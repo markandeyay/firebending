@@ -149,7 +149,12 @@ function longStreamSpec(): FixtureSpec {
   };
 }
 
-/** Two right jabs so fast that the second lands inside the 0.25s cooldown. */
+/**
+ * Two right jabs so fast that the second lands inside the 0.25s cooldown.
+ * The second cycle is a touch tighter than the first: retract resolution is
+ * windowed span shrink now, and its ~2-frame lag applies to both jabs, so
+ * the second must RESOLVE (not just start) within cooldown of the first.
+ */
 function doubleJabTightSpec(): FixtureSpec {
   const durationMs = 2000;
   return {
@@ -162,10 +167,9 @@ function doubleJabTightSpec(): FixtureSpec {
       kf(600, 'fist', 0.68, 0.5, -0.3, { ease: 'easeOut' }),
       kf(660, 'fist', 0.68, 0.5, -0.3),
       kf(780, 'fist', 0.63, 0.58, -0.05),
-      kf(800, 'fist', 0.63, 0.58, -0.05),
-      kf(880, 'fist', 0.68, 0.5, -0.3, { ease: 'easeOut' }),
-      kf(900, 'fist', 0.68, 0.5, -0.3),
-      kf(1020, 'fist', 0.63, 0.58, -0.05),
+      kf(850, 'fist', 0.68, 0.5, -0.3, { ease: 'easeOut' }),
+      kf(870, 'fist', 0.68, 0.5, -0.3),
+      kf(990, 'fist', 0.63, 0.58, -0.05),
       kf(1500, 'fist', 0.63, 0.58, -0.05),
       kf(durationMs, 'rest', REST_X.right, REST_Y, REST_Z),
     ],
@@ -525,6 +529,93 @@ describe('breath-charge empowerment', () => {
     const jab = events[1];
     if (!jab) throw new Error('missing jab');
     expect(jab.empowered).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Near-miss diagnostics (debug HUD tracing)
+// ---------------------------------------------------------------------------
+
+/**
+ * A "soft jab": correct fist pose and travel, but the thrust takes 500 ms,
+ * so the windowed speed peaks around 0.55 u/s: above half the 0.9 spike
+ * threshold, below the threshold itself. Must fire nothing and, with
+ * diagnostics on, leave a jab-blast speed near-miss record.
+ */
+function softJabSpec(): FixtureSpec {
+  const durationMs = 2400;
+  return {
+    label: 'custom-soft-jab',
+    durationMs,
+    right: [
+      kf(0, 'rest', REST_X.right, REST_Y, REST_Z),
+      kf(300, 'fist', 0.63, 0.58, -0.05),
+      kf(600, 'fist', 0.63, 0.58, -0.05),
+      kf(1100, 'fist', 0.68, 0.5, -0.3, { ease: 'linear' }),
+      kf(1300, 'fist', 0.68, 0.5, -0.3),
+      kf(1900, 'fist', 0.63, 0.58, -0.05, { ease: 'linear' }),
+      kf(durationMs, 'rest', REST_X.right, REST_Y, REST_Z),
+    ],
+    left: idleTrack('left', durationMs),
+  };
+}
+
+describe('near-miss diagnostics ring buffer', () => {
+  it('records a jab speed near miss when debugEnabled is on', () => {
+    const rec = generateRecording(softJabSpec());
+    const engine = new MoveEngine();
+    engine.debugEnabled = true;
+    const events: MoveEvent[] = [];
+    for (const frame of rec.frames) events.push(...engine.update(frame));
+
+    // The soft jab must not fire anything...
+    expect(events).toEqual([]);
+    // ...but the diagnostics must have seen it get halfway there.
+    const misses = engine.nearMisses();
+    expect(misses.length).toBeGreaterThan(0);
+    expect(misses.length).toBeLessThanOrEqual(8); // ring capacity
+    const jab = misses.find(
+      (m) => m.move === 'jab-blast' && m.condition === 'speed',
+    );
+    if (!jab) throw new Error('expected a jab-blast speed near miss');
+    expect(jab.threshold).toBeCloseTo(engine.thresholds.spikeSpeed, 10);
+    expect(jab.value).toBeGreaterThanOrEqual(0.5 * jab.threshold);
+    expect(jab.value).toBeLessThan(jab.threshold);
+    expect(jab.t).toBeGreaterThan(0);
+  });
+
+  it('records nothing when debugEnabled is off (the default)', () => {
+    const rec = generateRecording(softJabSpec());
+    const engine = new MoveEngine();
+    for (const frame of rec.frames) engine.update(frame);
+    expect(engine.nearMisses()).toEqual([]);
+  });
+
+  it('keeps only the most recent 8 records', () => {
+    // Loop the soft jab several times through one engine: every pass adds
+    // multiple near-miss frames, so the ring must cap and keep the latest.
+    const rec = generateRecording(softJabSpec());
+    const engine = new MoveEngine();
+    engine.debugEnabled = true;
+    let offset = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      for (const frame of rec.frames) {
+        engine.update({ ...frame, t: frame.t + offset });
+      }
+      offset += 2500;
+    }
+    const misses = engine.nearMisses();
+    expect(misses.length).toBe(8);
+    for (let i = 1; i < misses.length; i++) {
+      const prev = misses[i - 1];
+      const cur = misses[i];
+      if (!prev || !cur) throw new Error('gap in ring');
+      expect(cur.t).toBeGreaterThanOrEqual(prev.t);
+    }
+    // All survivors come from the final pass (the ring evicted the rest).
+    const first = misses[0];
+    if (!first) throw new Error('no records');
+    expect(first.t).toBeGreaterThanOrEqual(2 * 2500);
   });
 });
 

@@ -120,32 +120,36 @@ function fingerRatio(hand: HandFrame, mcp: number, tip: number): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Tuning constants (PROVISIONAL: tuned on synthetic geometry only)
+// Tuning constants. Tuned on real hands: HaGRID landmark annotations
+// (fixtures/hagrid/, docs/hagrid-report.md), cross-checked against the
+// synthetic fixtures. PALM_FACING_* and GRIP_RAISED_Y_* could not be tuned
+// from stills (2D landmarks / cropped framing) and keep their original
+// values.
 // ---------------------------------------------------------------------------
 
 /** Finger ratio at or below this counts as fully curled. */
-export const FIST_CURL_FULL_RATIO = 1.05;
+export const FIST_CURL_FULL_RATIO = 0.92;
 /** Finger ratio at or above this counts as not curled at all. */
-export const FIST_CURL_NONE_RATIO = 1.45;
+export const FIST_CURL_NONE_RATIO = 1.43;
 
 /** Finger ratio at or below this counts as not extended. */
-export const PALM_EXT_NONE_RATIO = 1.15;
+export const PALM_EXT_NONE_RATIO = 1.3;
 /** Finger ratio at or above this counts as fully extended. */
-export const PALM_EXT_FULL_RATIO = 1.55;
+export const PALM_EXT_FULL_RATIO = 1.65;
 /** Adjacent fingertip gap / hand scale at or below this = fingers together. */
-export const PALM_GAP_TIGHT = 0.35;
+export const PALM_GAP_TIGHT = 0.55;
 /** Adjacent fingertip gap / hand scale at or above this = fingers spread. */
-export const PALM_GAP_SPREAD = 0.8;
+export const PALM_GAP_SPREAD = 1.0;
 /** Signed palm-normal z (toward camera) where facing credit starts / maxes. */
 export const PALM_FACING_MIN = 0.1;
 export const PALM_FACING_FULL = 0.6;
 
 /** Thumb tip distance to index PIP/MCP, / hand scale: near / far edges. */
-export const GRIP_THUMB_NEAR = 0.5;
-export const GRIP_THUMB_FAR = 1.0;
+export const GRIP_THUMB_NEAR = 1.1;
+export const GRIP_THUMB_FAR = 1.7;
 /** Thumb tip rise above thumb MCP, / hand scale: none / full edges. */
 export const GRIP_THUMB_RISE_MIN = 0.15;
-export const GRIP_THUMB_RISE_FULL = 0.5;
+export const GRIP_THUMB_RISE_FULL = 0.4;
 /** Raised-hand band: full credit below y 0.55, none above y 0.65 (y is DOWN). */
 export const GRIP_RAISED_Y_FULL = 0.55;
 export const GRIP_RAISED_Y_NONE = 0.65;
@@ -159,10 +163,11 @@ export const HANDS_TOGETHER_THRESHOLD = 0.12;
 
 /**
  * All four fingertips curled toward the palm. Per finger: ratio of
- * tip-to-wrist over MCP-to-wrist distance, smoothstepped so ratio <= 1.05
- * scores 1 (tip at or inside the knuckle) and ratio >= 1.45 scores 0.
- * Average across index/middle/ring/pinky. The thumb is ignored so the
- * fist family works with either thumb tuck.
+ * tip-to-wrist over MCP-to-wrist distance, smoothstepped so ratios at or
+ * below FIST_CURL_FULL_RATIO score 1 (tip at or inside the knuckle) and
+ * ratios at or above FIST_CURL_NONE_RATIO score 0. Average across
+ * index/middle/ring/pinky. The thumb is ignored so the fist family works
+ * with either thumb tuck; the cost is that a thumbs-down reads as a fist.
  */
 export function fistScore(hand: HandFrame): number {
   let sum = 0;
@@ -181,9 +186,12 @@ export function fistScore(hand: HandFrame): number {
 /**
  * Open palm shown to the camera. Product of three factors (all must hold):
  *
- * 1. Extension: per-finger ratio smoothstepped 1.15 -> 1.55, averaged.
+ * 1. Extension: per-finger ratio smoothstepped PALM_EXT_NONE_RATIO ->
+ *    PALM_EXT_FULL_RATIO, averaged.
  * 2. Together: mean adjacent fingertip gap (index-middle, middle-ring,
- *    ring-pinky) divided by hand scale, credited below 0.35 and gone by 0.8.
+ *    ring-pinky) divided by hand scale, credited below PALM_GAP_TIGHT and
+ *    gone by PALM_GAP_SPREAD (real relaxed-open palms sit wider than the
+ *    synthetic ideal; see the HaGRID report).
  * 3. Facing: palm normal from cross(indexMCP - wrist, pinkyMCP - wrist).
  *
  * Handedness resolution for the facing factor: the winding wrist -> index
@@ -247,13 +255,16 @@ export function palmScore(hand: HandFrame, handedness: Handedness): number {
  *
  * 1. Curl: same per-finger curl as fistScore.
  * 2. Thumb near: min distance from thumb tip to index PIP or index MCP,
- *    / hand scale, credited below 0.5 and gone by 1.0.
+ *    / hand scale, credited below GRIP_THUMB_NEAR and gone by
+ *    GRIP_THUMB_FAR. HaGRID finding: a REAL vertical thumb stands well off
+ *    the knuckle line (median 0.74 hand-scale units vs 0.22 for a tucked
+ *    fist thumb), so the edges are permissive; rejecting fists here would
+ *    also reject real grips.
  * 3. Thumb up: (thumbMCP.y - thumbTip.y) / hand scale (y is DOWN, so a
- *    positive rise means the tip is above the MCP), credited from 0.15,
- *    full at 0.5. A fist's sideways-tucked thumb has ~zero rise, which is
- *    what separates grip from fist.
- * 4. Raised: wrist y in the upper 60% of the frame; full credit below
- *    y 0.55, none above y 0.65.
+ *    positive rise means the tip is above the MCP), credited from
+ *    GRIP_THUMB_RISE_MIN, full at GRIP_THUMB_RISE_FULL.
+ * 4. Raised: wrist y in the upper part of the frame; full credit below
+ *    GRIP_RAISED_Y_FULL, none above GRIP_RAISED_Y_NONE.
  *
  * "Roughly static" is the move layer's job, not scored here.
  */

@@ -162,12 +162,17 @@ const FIST_LOCAL: readonly Triple[] = [
   [0.24, -0.31, -0.12], // PINKY_TIP
 ];
 
+// Thumb geometry matches REAL vertical-thumb grips (HaGRID 'like' class,
+// docs/hagrid-report.md): the thumb stands extended and clear of the index
+// knuckle line (median 0.74 hand-scale units away, rise ~0.5), not wrapped
+// over the fingers as originally guessed. The old wrapped thumb sat
+// mid-slope on both gripScore thumb factors and made the score jittery.
 const GRIP_LOCAL: readonly Triple[] = [
   [0, 0, 0], // WRIST
-  [-0.17, -0.11, -0.03], // THUMB_CMC
-  [-0.27, -0.22, -0.07], // THUMB_MCP
-  [-0.2, -0.33, -0.12], // THUMB_IP
-  [-0.1, -0.4, -0.15], // THUMB_TIP (wrapped over the curled fingers)
+  [-0.18, -0.12, -0.03], // THUMB_CMC
+  [-0.3, -0.24, -0.05], // THUMB_MCP
+  [-0.34, -0.42, -0.06], // THUMB_IP
+  [-0.36, -0.58, -0.06], // THUMB_TIP (standing tall, off the knuckles)
   [-0.15, -0.51, -0.04], // INDEX_MCP
   [-0.16, -0.6, -0.14], // INDEX_PIP
   [-0.16, -0.52, -0.21], // INDEX_DIP
@@ -227,6 +232,28 @@ export const POSES: Record<PoseName, Vec3[]> = {
 
 /** Hand length (wrist to extended middle fingertip) in normalized units. */
 export const HAND_SCALE = 0.16;
+
+/**
+ * Perspective constant for depth-consistent hand sizing. A real hand that
+ * moves toward the camera grows on screen; the original generator moved the
+ * wrist in z without scaling the hand, which would leave the palm-span
+ * growth signal (src/gestures/motion.ts) at zero for every thrust. A hand
+ * whose wrist sits at depth z (negative toward the camera) has its landmark
+ * spread scaled around the wrist by 1 / (1 + z * PERSPECTIVE_K). K = 1.8
+ * makes the guard-to-extension punch (z -0.05 -> -0.30) roughly double the
+ * span, producing a windowed growth rate comparable to the punch's speed
+ * spike (measured ~3 1/s raw), while slow negatives (slow-reach,
+ * talking-hands) stay far below the spike-growth threshold.
+ */
+export const PERSPECTIVE_K = 1.8;
+
+/** Smallest allowed perspective denominator: guards degenerate depths. */
+const PERSPECTIVE_DENOM_MIN = 0.2;
+
+/** Apparent-size multiplier for a wrist at depth z (see PERSPECTIVE_K). */
+export function perspectiveScale(z: number): number {
+  return 1 / Math.max(1 + z * PERSPECTIVE_K, PERSPECTIVE_DENOM_MIN);
+}
 
 export type HandSide = 'left' | 'right';
 
@@ -349,11 +376,15 @@ export function sampleHand(
   const wy = lerp(a.wrist.y, b.wrist.y, e);
   const wz = lerp(a.wrist.z, b.wrist.z, e);
 
+  // Depth-consistent sizing: scale the whole hand around the wrist by the
+  // apparent-size factor for this depth (see PERSPECTIVE_K above), so a
+  // thrust grows the on-screen hand exactly as a real approach would.
+  const ps = perspectiveScale(wz);
   const landmarks: Vec3[] = shapeA.map((pa, i) => {
     const pb = shapeB[i] ?? pa;
-    const lx = lerp(pa.x, pb.x, e) * mirror * HAND_SCALE;
-    const ly = lerp(pa.y, pb.y, e) * HAND_SCALE;
-    const lz = lerp(pa.z, pb.z, e) * HAND_SCALE;
+    const lx = lerp(pa.x, pb.x, e) * mirror * HAND_SCALE * ps;
+    const ly = lerp(pa.y, pb.y, e) * HAND_SCALE * ps;
+    const lz = lerp(pa.z, pb.z, e) * HAND_SCALE * ps;
     return vec(
       round4(wx + lx + gaussian(rng) * noiseSigma),
       round4(wy + ly + gaussian(rng) * noiseSigma),

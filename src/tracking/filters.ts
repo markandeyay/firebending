@@ -34,11 +34,21 @@ export interface OneEuroOptions {
   dCutoff?: number;
 }
 
-/** Spec Section 5 starting values. */
+/**
+ * Hand-landmark tuning. The spec Section 5 starting values (beta 0.007,
+ * dCutoff 1.0) were tuned for pixel-scale signals; in normalized [0..1]
+ * coordinates a punch derivative is only ~3 units/sec, so beta 0.007 barely
+ * raised the adaptive cutoff and a 3-frame punch spike lost ~44% of its
+ * windowed speed through the filter (the reason the repo carried
+ * REPLAY_VELOCITY_SCALE 1.8). beta 4.0 with dCutoff 4.0 lets the cutoff
+ * follow fast motion (spike attenuation ~1.5%, measured in
+ * tests/oneEuroResponse.test.ts) while rest jitter stays within ~1.25x of
+ * the old tuning's smoothing.
+ */
 export const ONE_EURO_DEFAULTS: Required<OneEuroOptions> = {
   minCutoff: 1.0,
-  beta: 0.007,
-  dCutoff: 1.0,
+  beta: 4.0,
+  dCutoff: 4.0,
 };
 
 /** Guard against zero or negative dt from duplicate/reordered timestamps. */

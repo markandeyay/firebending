@@ -56,6 +56,10 @@ The whole game runs without a webcam via recorded landmark fixtures:
 
 `tools/capture.html` is a standalone recorder page for capturing real gesture sessions into `fixtures/recorded/`.
 
+## Credits and data
+
+The pose score thresholds were tuned against real hands using the HaGRID dataset (Kapitanov et al.), via the `cj-mills/hagrid-sample-500k-384p` sample on HuggingFace, licensed CC-BY-SA-4.0. Only the landmark annotations were used: no images were downloaded and no models were trained. See `docs/hagrid-report.md` for the full methodology.
+
 ## Tech stack
 
 Vite, TypeScript (strict), Three.js, MediaPipe Tasks Vision, Rapier physics (WASM), and pure Web Audio synthesis for every sound. No React, no framework: a game loop, plain TS modules, and a single HTML entry.

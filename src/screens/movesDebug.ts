@@ -53,20 +53,18 @@ const COLOR_BAR_BG = '#2a231c';
 // ---------------------------------------------------------------------------
 
 /**
- * PROVISIONAL replay-path velocity compensation. The move thresholds
- * (SPIKE_SPEED_MIN etc.) were tuned on RAW fixture frames, but this scene
- * feeds the engine FILTERED frames exactly as the game will, and the One Euro
- * smoothing roughly halves the synthetic thrusts' peak windowed wrist speed
- * (measured: raw ~1.45..1.65 u/s vs filtered ~0.80..0.91). Without
- * compensation, palm-wave, flame-fan, twin-cannon, and fire-whip never fire
- * through the filter. velocityScale is the engine's calibration hook for
- * exactly this kind of scaling; 1.8 makes all 10 positive fixtures fire while
- * every negative fixture stays silent (verified headless). The live path does
- * NOT use this: real motion is attenuated far less by the filter, and
- * per-player scaling belongs to calibrationStats. Retune when the engine
- * thresholds are recalibrated against filtered/real data.
+ * Replay-path velocity compensation. The motion thresholds (DEFAULT_PROFILE
+ * derived) are tuned on RAW fixture frames, but this scene feeds the engine
+ * FILTERED frames exactly as the game will. With the retuned One Euro
+ * defaults (beta 4.0, dCutoff 4.0 in tracking/filters.ts) the filter costs a
+ * synthetic thrust only ~4..5% of its peak windowed wrist speed (measured:
+ * raw ~1.45..1.65 u/s vs filtered ~1.38..1.58; the 3-frame spike harness in
+ * tests/oneEuroResponse.test.ts measures ~1.5%). 1.1 restores that loss with
+ * a little headroom; all 10 positive fixtures fire and every negative
+ * fixture stays silent through the filtered pipeline. The live path does NOT
+ * use this: per-player scaling belongs to calibrationStats.
  */
-export const REPLAY_VELOCITY_SCALE = 1.8;
+export const REPLAY_VELOCITY_SCALE = 1.1;
 
 /** The 10 positive fixtures, in cycle order. */
 export const POSITIVE_FIXTURES: readonly string[] = [

@@ -43,6 +43,7 @@ import {
   DEFAULT_CALIBRATION,
   type CalibrationStats,
 } from './gestures/calibrationStats';
+import { clearProfile, type MotionProfile } from './gestures/profile';
 import { ReplaySource } from './tracking/replaySource';
 import type { LandmarkSource } from './tracking/types';
 import './ui/theme.css';
@@ -133,13 +134,23 @@ async function bootGameFlow(
   let source: LandmarkSource | null = null;
   let liveStream: MediaStream | null = null;
 
-  const startArena = (stats: CalibrationStats): void => {
+  // ?recalibrate=1 forgets the stored motion profile so the calibration
+  // ritual runs its punch/push steps again (same as pressing R in-ritual).
+  if (replayFixture === null && params.get('recalibrate') === '1') {
+    clearProfile();
+  }
+
+  const startArena = (
+    stats: CalibrationStats,
+    profile: MotionProfile | null,
+  ): void => {
     const activeSource = source;
     if (!activeSource) return;
     const ctx: ArenaContext = {
       source: activeSource,
       stats: replayFixture !== null ? DEFAULT_CALIBRATION : stats,
       audio: audioHooks,
+      ...(profile !== null && replayFixture === null ? { profile } : {}),
       ...(replayFixture !== null
         ? { velocityScale: REPLAY_VELOCITY_SCALE }
         : {}),
@@ -176,8 +187,11 @@ async function bootGameFlow(
     const calCtx: CalibrationContext = {
       source,
       ...(liveStream ? { stream: liveStream } : {}),
+      // Motion-capture steps (punches/pushes) run on the live camera only;
+      // replay flows keep the classic capture-then-done ritual.
+      ...(replayFixture === null ? { motionSteps: true } : {}),
       onIgnite: () => engine.ignite(),
-      onComplete: (stats) => startArena(stats),
+      onComplete: (stats, profile) => startArena(stats, profile),
     };
     await manager.show('calibration', calCtx);
     // Replay input starts once calibration is listening; the live source is

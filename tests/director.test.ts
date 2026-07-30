@@ -348,7 +348,7 @@ describe('Director chain', () => {
  * which is exactly the screenToWorld contract being exercised.
  */
 function probeJabAim(rec: LandmarkRecording): THREE.Vector3 {
-  const engine = new MoveEngine({ velocityScale: 1.8 });
+  const engine = new MoveEngine({ velocityScale: 1.1 });
   const replay = new ReplaySource(rec);
   const filtered = new FilteredSource(replay);
   let aim: THREE.Vector3 | null = null;
@@ -408,13 +408,13 @@ describe('end-to-end replay smoke', () => {
 
     // Loop the fixture through the REAL gameplay pipeline until the kill:
     // fresh engine + FilteredSource per pass (the movesDebug convention; no
-    // filter or cooldown state bleeds across loops), velocityScale 1.8 (the
+    // filter or cooldown state bleeds across loops), velocityScale 1.1 (the
     // One Euro replay compensation, see movesDebug.REPLAY_VELOCITY_SCALE).
     const FRAME = 1 / 30;
     let passes = 0;
     while (combat.kills === 0 && passes < 40) {
       passes++;
-      const engine = new MoveEngine({ velocityScale: 1.8 });
+      const engine = new MoveEngine({ velocityScale: 1.1 });
       const replay = new ReplaySource(rec);
       const filtered = new FilteredSource(replay);
       const off = filtered.onFrame((frame) => {

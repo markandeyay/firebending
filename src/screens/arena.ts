@@ -83,6 +83,8 @@ import { EmpowerGlow } from '../ui/empowerGlow';
 import { DegradeLadder } from '../game/degrade';
 import { SingleHandHint, TrackingLoss } from '../game/trackingLoss';
 import { handOutline } from '../ui/handOutlines';
+import { DebugHud } from '../ui/debugHud';
+import type { MotionProfile } from '../gestures/profile';
 
 // ---------------------------------------------------------------------------
 // Audio seam (see module header). The orchestrator wires the real hooks.
@@ -125,6 +127,11 @@ export interface ArenaContext {
    * play omits this and uses velocityScaleFor(stats.wristSpan).
    */
   velocityScale?: number;
+  /**
+   * Per-player motion profile from the calibration punch/push steps. Fed to
+   * the MoveEngine; absent (replay paths) DEFAULT_PROFILE applies.
+   */
+  profile?: MotionProfile;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +290,10 @@ export class ArenaScreen implements Screen {
   private toastEl: HTMLElement | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Debug HUD (D key): engine internals overlay, live and replay alike.
+  private debugHud: DebugHud | null = null;
+  private ctxProfile: MotionProfile | null = null;
+
   // Frame state (reused, no per-frame allocation).
   private readonly clock = new THREE.Clock();
   private elapsed = 0;
@@ -359,7 +370,11 @@ export class ArenaScreen implements Screen {
     // --- Gesture engine ----------------------------------------------------
     const velocityScale =
       context.velocityScale ?? velocityScaleFor(context.stats.wristSpan);
-    this.engine = new MoveEngine({ velocityScale });
+    this.ctxProfile = context.profile ?? null;
+    this.engine = new MoveEngine({
+      velocityScale,
+      ...(context.profile ? { profile: context.profile } : {}),
+    });
 
     // --- Combat (MoveEffects adapter per the combat.ts header) -------------
     const fx = this.fx;
@@ -444,7 +459,11 @@ export class ArenaScreen implements Screen {
     this.buildLossOverlay(root);
     this.buildHintChip(root);
 
-    // Runtime keys: P toggles the parallax yaw sign (Section 8 verification).
+    // Debug HUD overlay (D key), hidden until toggled.
+    this.debugHud = new DebugHud(root);
+
+    // Runtime keys: P toggles the parallax yaw sign (Section 8 verification),
+    // D toggles the debug HUD (and the engine's near-miss diagnostics).
     this.onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'p' || e.key === 'P') {
         const rig = this.rig;
@@ -457,6 +476,17 @@ export class ArenaScreen implements Screen {
             ? 'Parallax yaw: head left pans left (window style, default)'
             : 'Parallax yaw: head left pans right (flipped)',
         );
+      } else if (e.key === 'd' || e.key === 'D') {
+        const hud = this.debugHud;
+        const eng = this.engine;
+        if (!hud || !eng) return;
+        if (hud.visible) {
+          hud.hide();
+          eng.debugEnabled = false;
+        } else {
+          hud.show();
+          eng.debugEnabled = true; // near-miss tracing only while open
+        }
       }
     };
     window.addEventListener('keydown', this.onKeyDown);
@@ -511,6 +541,9 @@ export class ArenaScreen implements Screen {
     }
     this.toastEl?.remove();
     this.toastEl = null;
+    this.debugHud?.dispose();
+    this.debugHud = null;
+    this.ctxProfile = null;
     this.degrade = null;
     this.loss = null;
     this.hint = null;
@@ -670,6 +703,17 @@ export class ArenaScreen implements Screen {
     rig.update(rawDt);
 
     this.updateHud(rawDt, camera, renderer.domElement);
+
+    // Debug HUD: pulls engine/rig state; internally throttled to ~10 Hz.
+    if (this.debugHud && this.debugHud.visible && this.engine) {
+      this.debugHud.update(performance.now(), {
+        engine: this.engine,
+        frame: this.latestFrame,
+        profile: this.ctxProfile,
+        parallax: rig.parallaxState,
+        parallaxYawSign: rig.parallaxYawSign,
+      });
+    }
 
     renderer.render(scene, camera);
   }
