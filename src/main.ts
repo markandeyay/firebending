@@ -38,7 +38,7 @@ import {
 import { AudioEngine } from './audio/engine';
 import { MoveAudio } from './audio/moveAudio';
 import { buildAudioHooks } from './boot/audioWiring';
-import { isMobileLike, replayFixtureUrl, routeFor } from './boot/route';
+import { faultKindFor, isMobileLike, replayFixtureUrl, routeFor } from './boot/route';
 import {
   DEFAULT_CALIBRATION,
   type CalibrationStats,
@@ -50,12 +50,15 @@ import './ui/theme.css';
 export type ScreenName = 'title' | 'calibration' | 'arena';
 
 const DESKTOP_GATE_BODY =
-  'Firebending needs a desktop with a webcam. ' +
-  'Come back on a laptop and bring your hands.';
+  'Firebending needs a desktop or laptop with a webcam. ' +
+  'Your hands deserve a bigger stage. Come back on a computer.';
 
 const CAMERA_FAULT_BODY =
   'The fire needs your camera to see your hands. ' +
   'Allow camera access in your browser and reload the page to begin.';
+
+const NETWORK_FAULT_BODY =
+  'The spirits are unreachable. Check your connection and reload.';
 
 const app = document.getElementById('app');
 if (!app) throw new Error('Missing #app root');
@@ -97,7 +100,7 @@ switch (routeFor(params)) {
         innerWidth: window.innerWidth,
       })
     ) {
-      mountMessageScreen(app, 'FIREBENDING', DESKTOP_GATE_BODY);
+      mountMessageScreen(app, null, DESKTOP_GATE_BODY, { wordmark: true });
     } else {
       void bootGameFlow(app, null);
     }
@@ -162,7 +165,12 @@ async function bootGameFlow(
       }
     } catch (err) {
       console.error('Firebending: input source failed to start', err);
-      mountMessageScreen(root, 'NO FLAME WITHOUT SIGHT', CAMERA_FAULT_BODY);
+      // T070: a denied camera and a failed model download read differently.
+      if (faultKindFor(err) === 'camera') {
+        mountMessageScreen(root, 'NO FLAME WITHOUT SIGHT', CAMERA_FAULT_BODY);
+      } else {
+        mountMessageScreen(root, 'THE HALL IS SILENT', NETWORK_FAULT_BODY);
+      }
       return;
     }
     const calCtx: CalibrationContext = {
@@ -210,26 +218,41 @@ async function bootArenaReplay(root: HTMLElement, replayUrl: string): Promise<vo
 }
 
 /**
- * Parchment message screen: the desktop-only gate placeholder (full mobile
- * rejection lands with T070) and flow fault states. Kind, ink on parchment.
+ * Parchment message screen (T070): the mobile rejection gate and the flow
+ * fault states. Kind, ink on parchment. With `wordmark` the brushstroke
+ * FIREBENDING wordmark sits above the panel (the mobile gate should still
+ * feel like the game's front door).
  */
 function mountMessageScreen(
   root: HTMLElement,
-  heading: string,
+  heading: string | null,
   body: string,
+  opts: { wordmark?: boolean } = {},
 ): void {
   root.replaceChildren();
   const layer = document.createElement('div');
   layer.className = 'fb-screen-layer fb-gate';
+  const stack = document.createElement('div');
+  stack.className = 'fb-gate-stack';
+  if (opts.wordmark) {
+    const mark = document.createElement('h1');
+    mark.className = 'fb-wordmark fb-gate-wordmark';
+    mark.textContent = 'FIREBENDING';
+    stack.appendChild(mark);
+  }
   const panel = document.createElement('div');
   panel.className = 'fb-panel fb-gate-panel';
-  const h = document.createElement('h2');
-  h.className = 'fb-gate-heading';
-  h.textContent = heading;
+  if (heading !== null) {
+    const h = document.createElement('h2');
+    h.className = 'fb-gate-heading';
+    h.textContent = heading;
+    panel.appendChild(h);
+  }
   const p = document.createElement('p');
   p.className = 'fb-gate-body';
   p.textContent = body;
-  panel.append(h, p);
-  layer.appendChild(panel);
+  panel.appendChild(p);
+  stack.appendChild(panel);
+  layer.appendChild(stack);
   root.appendChild(layer);
 }

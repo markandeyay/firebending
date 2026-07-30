@@ -75,11 +75,14 @@ import {
   type EffectsProvider,
 } from '../game/combat';
 import { Director } from '../game/director';
-import { FireSystem } from '../vfx/fire';
+import { FireSystem, type AmbientFlameHandle } from '../vfx/fire';
 import { MoveEffects } from '../vfx/moveEffects';
 import { ImpactSystem } from '../vfx/impact';
 import { HUD } from '../ui/hud';
 import { EmpowerGlow } from '../ui/empowerGlow';
+import { DegradeLadder } from '../game/degrade';
+import { SingleHandHint, TrackingLoss } from '../game/trackingLoss';
+import { handOutline } from '../ui/handOutlines';
 
 // ---------------------------------------------------------------------------
 // Audio seam (see module header). The orchestrator wires the real hooks.
@@ -143,6 +146,10 @@ const DAMAGE_FLUSH_MIN = 0.5;
 const EMPOWERED_HOT_SEC = 1.2;
 /** Ambient brazier flame scale. */
 const BRAZIER_FLAME_SCALE = 0.8;
+/** Key light shadow map edge at full quality (matches game/arena.ts). */
+const SHADOW_MAP_FULL = 1024;
+/** No landmark frame for this long counts as both hands untracked (T070). */
+const FRAME_STALE_SEC = 1.0;
 
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -258,6 +265,19 @@ export class ArenaScreen implements Screen {
   private audio: AudioHooks = {};
   private disposed = false;
 
+  // Hardening (T070): degrade ladder, tracking-loss UX, single-hand hint,
+  // WebGL context-loss overlay.
+  private degrade: DegradeLadder | null = null;
+  private readonly ambientHandles: AmbientFlameHandle[] = [];
+  private loss: TrackingLoss | null = null;
+  private hint: SingleHandHint | null = null;
+  private sinceFrameSec = 0;
+  private lossLayer: HTMLElement | null = null;
+  private lossCountEl: HTMLElement | null = null;
+  private hintChipEl: HTMLElement | null = null;
+  private faultLayer: HTMLElement | null = null;
+  private onContextLost: ((e: Event) => void) | null = null;
+
   // Frame state (reused, no per-frame allocation).
   private readonly clock = new THREE.Clock();
   private elapsed = 0;
@@ -325,7 +345,8 @@ export class ArenaScreen implements Screen {
 
     this.fire = new FireSystem(scene);
     for (const anchor of this.arena.brazierAnchors) {
-      this.fire.attachAmbient(anchor, BRAZIER_FLAME_SCALE);
+      // Handles kept so the degrade ladder can scale ambient flames (T070).
+      this.ambientHandles.push(this.fire.attachAmbient(anchor, BRAZIER_FLAME_SCALE));
     }
     this.fx = new MoveEffects(scene, this.fire, camera, this.rig);
     this.impacts = new ImpactSystem(scene, this.fire);
@@ -392,11 +413,48 @@ export class ArenaScreen implements Screen {
     });
     this.director.start();
 
+    // --- Hardening (T070) --------------------------------------------------
+    // Degrade ladder: particle scale -> MoveEffects + ambient braziers, face
+    // rate -> live source (replay sources lack the setter: no-op), shadows ->
+    // renderer + key light shadow map.
+    const maybeLive = context.source as Partial<{
+      setFaceIntervalMultiplier(multiplier: number): void;
+    }>;
+    this.degrade = new DegradeLadder({
+      setParticleScale: (scale) => {
+        if (this.fx) this.fx.intensityScale = scale;
+        for (const handle of this.ambientHandles) {
+          handle.scale = BRAZIER_FLAME_SCALE * scale;
+        }
+      },
+      setFaceIntervalMultiplier: (multiplier) => {
+        maybeLive.setFaceIntervalMultiplier?.(multiplier);
+      },
+      setShadowHalved: (halved) => this.setShadowHalved(halved),
+    });
+
+    // Tracking-loss pause overlay + single-hand hint chip.
+    this.loss = new TrackingLoss();
+    this.hint = new SingleHandHint();
+    this.buildLossOverlay(root);
+    this.buildHintChip(root);
+
+    // WebGL context loss: the flame guttered.
+    this.onContextLost = (e: Event) => {
+      e.preventDefault();
+      this.showContextLossOverlay(root);
+    };
+    renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
+
     // --- Input pipeline ----------------------------------------------------
     this.filtered = new FilteredSource(context.source);
     this.detachFrames = this.filtered.onFrame((frame) => {
       this.latestFrame = frame;
       this.frameFresh = true;
+      this.sinceFrameSec = 0;
+      // While the tracking-loss overlay is up the world is frozen: keep the
+      // engine idle too so no move can fire into the paused arena.
+      if (this.loss && this.loss.paused) return;
       const events = engine.update(frame);
       for (const e of events) this.routeEvent(e);
     });
@@ -414,6 +472,24 @@ export class ArenaScreen implements Screen {
       window.removeEventListener('resize', this.onResize);
       this.onResize = null;
     }
+    if (this.renderer && this.onContextLost) {
+      this.renderer.domElement.removeEventListener(
+        'webglcontextlost',
+        this.onContextLost,
+      );
+    }
+    this.onContextLost = null;
+    this.degrade = null;
+    this.loss = null;
+    this.hint = null;
+    this.ambientHandles.length = 0;
+    this.lossLayer?.remove();
+    this.lossLayer = null;
+    this.lossCountEl = null;
+    this.hintChipEl?.remove();
+    this.hintChipEl = null;
+    this.faultLayer?.remove();
+    this.faultLayer = null;
     this.detachFrames?.();
     this.detachFrames = null;
     this.filtered?.stop();
@@ -497,35 +573,67 @@ export class ArenaScreen implements Screen {
     if (!renderer || !camera || !scene || !rig) return;
 
     const rawDt = Math.min(this.clock.getDelta(), MAX_FRAME_DT_SEC);
+    this.sinceFrameSec += rawDt;
 
-    // Hit-stop freezes the world; slow-mo stretches it (see module header).
-    let dt = rawDt;
-    if (this.hitStopMs > 0) {
-      this.hitStopMs -= rawDt * 1000;
-      dt = 0;
-    } else if (this.slowMoMs > 0) {
-      this.slowMoMs -= rawDt * 1000;
-      dt = rawDt * this.slowMoScale;
+    // Tracking-loss and single-hand FSMs (T070). A stale landmark stream
+    // (source stopped emitting) counts the same as both hands untracked.
+    const stale = this.sinceFrameSec > FRAME_STALE_SEC;
+    const latest = this.latestFrame;
+    const leftTracked = !stale && latest !== null && latest.left !== null;
+    const rightTracked = !stale && latest !== null && latest.right !== null;
+    if (this.loss) {
+      this.loss.update(
+        leftTracked && rightTracked,
+        rawDt,
+        leftTracked || rightTracked,
+      );
+      this.syncLossOverlay();
     }
-    this.elapsed += dt;
+    const paused = this.loss !== null && this.loss.paused;
+    if (this.hint && !paused) {
+      for (const ev of this.hint.update(leftTracked, rightTracked, rawDt)) {
+        this.hintChipEl?.classList.toggle('is-on', ev === 'show');
+      }
+    }
 
-    // World systems, in the combat.ts contract order.
-    const frame = this.frameFresh ? this.latestFrame : null;
-    this.frameFresh = false;
-    this.manager?.update(dt);
-    this.fx?.update(dt);
-    if (frame) this.combat?.update(dt, frame);
-    else this.combat?.update(dt);
-    this.fire?.update(dt);
-    this.impacts?.update(dt);
-    this.arena?.update(dt, this.elapsed);
-    this.pollCoals();
+    if (!paused) {
+      // Frame-time feed for the degrade ladder (wall clock, ms). Paused
+      // frames are cheap by construction and would only pump the step-up
+      // counter, so they are not fed.
+      this.degrade?.update(rawDt * 1000);
 
-    // Breath Charge empowerment glow follows the exposed charge window.
-    this.glow?.update(this.fx !== null && this.fx.chargeActive !== null, rawDt);
+      // Hit-stop freezes the world; slow-mo stretches it (see module header).
+      let dt = rawDt;
+      if (this.hitStopMs > 0) {
+        this.hitStopMs -= rawDt * 1000;
+        dt = 0;
+      } else if (this.slowMoMs > 0) {
+        this.slowMoMs -= rawDt * 1000;
+        dt = rawDt * this.slowMoScale;
+      }
+      this.elapsed += dt;
 
-    // Camera and pacing on wall-clock time.
-    this.director?.update(rawDt);
+      // World systems, in the combat.ts contract order.
+      const frame = this.frameFresh ? this.latestFrame : null;
+      this.frameFresh = false;
+      this.manager?.update(dt);
+      this.fx?.update(dt);
+      if (frame) this.combat?.update(dt, frame);
+      else this.combat?.update(dt);
+      this.fire?.update(dt);
+      this.impacts?.update(dt);
+      this.arena?.update(dt, this.elapsed);
+      this.pollCoals();
+
+      // Breath Charge empowerment glow follows the exposed charge window.
+      this.glow?.update(this.fx !== null && this.fx.chargeActive !== null, rawDt);
+
+      // Director pacing on wall-clock time.
+      this.director?.update(rawDt);
+    }
+
+    // Camera keeps breathing while the world is frozen (Section 8 parallax
+    // and idle sway), so the pause never reads as a hang.
     rig.applyHeadPose(this.latestFrame?.face ?? null, rawDt);
     rig.update(rawDt);
 
@@ -585,6 +693,97 @@ export class ArenaScreen implements Screen {
     }
 
     hud.update(rawDt);
+  }
+
+  // -------------------------------------------------------------------------
+  // Hardening internals (T070)
+  // -------------------------------------------------------------------------
+
+  /** Degrade rung 3: rebuild the key light shadow map at half resolution. */
+  private setShadowHalved(halved: boolean): void {
+    const key = this.arena?.lights.key;
+    const renderer = this.renderer;
+    if (!key || !renderer) return;
+    const edge = halved ? SHADOW_MAP_FULL / 2 : SHADOW_MAP_FULL;
+    key.shadow.mapSize.set(edge, edge);
+    // The old render target is the wrong size; dispose it and let the
+    // renderer rebuild lazily on the next shadow pass.
+    key.shadow.map?.dispose();
+    key.shadow.map = null;
+    renderer.shadowMap.needsUpdate = true;
+  }
+
+  /** Parchment "Show your hands." overlay plus the ember resume countdown. */
+  private buildLossOverlay(root: HTMLElement): void {
+    const layer = document.createElement('div');
+    layer.className = 'fb-loss';
+    const panel = document.createElement('div');
+    panel.className = 'fb-panel fb-loss-panel';
+    const hands = document.createElement('div');
+    hands.className = 'fb-loss-hands';
+    hands.append(handOutline('left'), handOutline('right'));
+    const text = document.createElement('div');
+    text.className = 'fb-loss-text';
+    text.textContent = 'Show your hands.';
+    panel.append(hands, text);
+    const count = document.createElement('div');
+    count.className = 'fb-loss-count';
+    layer.append(panel, count);
+    root.appendChild(layer);
+    this.lossLayer = layer;
+    this.lossCountEl = count;
+  }
+
+  /** Non-blocking single-hand hint chip (hidden until the FSM says show). */
+  private buildHintChip(root: HTMLElement): void {
+    const chip = document.createElement('div');
+    chip.className = 'fb-hint-chip';
+    chip.textContent = 'One hand found. Fist moves ready.';
+    root.appendChild(chip);
+    this.hintChipEl = chip;
+  }
+
+  /** Mirror the TrackingLoss state onto the overlay DOM, once per frame. */
+  private syncLossOverlay(): void {
+    const loss = this.loss;
+    const layer = this.lossLayer;
+    if (!loss || !layer) return;
+    layer.classList.toggle('is-on', loss.paused);
+    layer.classList.toggle('is-counting', loss.state === 'resuming');
+    const count = this.lossCountEl;
+    if (count && loss.state === 'resuming') {
+      const digit = String(loss.countdownStep);
+      if (count.textContent !== digit) {
+        count.textContent = digit;
+        // Restart the ember pop animation for each digit.
+        count.style.animation = 'none';
+        void count.offsetWidth;
+        count.style.animation = '';
+      }
+    } else if (count && count.textContent !== '') {
+      count.textContent = '';
+    }
+  }
+
+  /** WebGL context loss: parchment fault with a Reload button. */
+  private showContextLossOverlay(root: HTMLElement): void {
+    if (this.faultLayer) return;
+    const layer = document.createElement('div');
+    layer.className = 'fb-screen-layer fb-gate fb-fault';
+    const panel = document.createElement('div');
+    panel.className = 'fb-panel fb-gate-panel';
+    const body = document.createElement('p');
+    body.className = 'fb-gate-body';
+    body.textContent = 'The flame guttered. Reload to rekindle.';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'fb-reload-btn';
+    button.textContent = 'Reload';
+    button.addEventListener('click', () => window.location.reload());
+    panel.append(body, button);
+    layer.appendChild(panel);
+    root.appendChild(layer);
+    this.faultLayer = layer;
   }
 
   /**

@@ -67,3 +67,31 @@ export function replayFixtureUrl(name: string): string {
   if (name.includes('/') || name.endsWith('.json')) return name;
   return `fixtures/synthetic/${name}.json`;
 }
+
+/**
+ * T070 error states: classify a startup failure from the live input path.
+ * getUserMedia rejections carry DOMException names; anything else on that
+ * path (MediaPipe model or WASM fetch failing, usually a TypeError from
+ * fetch) is treated as a network fault. Pure so tests cover it headlessly.
+ */
+export type FaultKind = 'camera' | 'network';
+
+const CAMERA_FAULT_NAMES = new Set([
+  'NotAllowedError', // permission denied
+  'PermissionDeniedError', // legacy Chrome alias
+  'NotFoundError', // no camera device
+  'DevicesNotFoundError', // legacy alias
+  'NotReadableError', // camera in use by another app
+  'TrackStartError', // legacy alias
+  'OverconstrainedError',
+  'SecurityError',
+  'AbortError',
+]);
+
+export function faultKindFor(err: unknown): FaultKind {
+  if (err !== null && typeof err === 'object' && 'name' in err) {
+    const name = String((err as { name: unknown }).name);
+    if (CAMERA_FAULT_NAMES.has(name)) return 'camera';
+  }
+  return 'network';
+}

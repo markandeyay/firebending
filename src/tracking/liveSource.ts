@@ -86,6 +86,8 @@ export class LiveLandmarkSource implements LandmarkSource {
   private lastFrameTime = 0;
   private frameIndex = 0;
   private faceInterval = FACE_INTERVAL_NORMAL;
+  /** Degrade-ladder multiplier on the face interval (T070). 1 = normal. */
+  private faceIntervalMult = 1;
   private lastFace: FaceFrame | null = null;
   private handMsAvg = new RollingAverage(ROLLING_WINDOW);
   private faceMsAvg = new RollingAverage(ROLLING_WINDOW);
@@ -108,6 +110,17 @@ export class LiveLandmarkSource implements LandmarkSource {
   /** True once the degrade rule has dropped face detection to every 8th frame. */
   get faceDegraded(): boolean {
     return this.faceInterval === FACE_INTERVAL_DEGRADED;
+  }
+
+  /**
+   * Degrade-ladder hook (T070, append-only): multiply the face detection
+   * interval. 1 restores the normal schedule; 2 halves the face rate
+   * (nominal 7.5 Hz). Composes with the internal ML-budget degrade above;
+   * hands are never touched. Replay sources have no such method and the
+   * ladder wiring treats that as a no-op.
+   */
+  setFaceIntervalMultiplier(multiplier: number): void {
+    this.faceIntervalMult = Math.max(1, Math.round(multiplier));
   }
 
   async start(): Promise<void> {
@@ -209,7 +222,8 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.handMsAvg.push(handMs);
     totalMs += handMs;
 
-    if (this.faceLandmarker && this.frameIndex % this.faceInterval === 0) {
+    const faceEvery = this.faceInterval * this.faceIntervalMult;
+    if (this.faceLandmarker && this.frameIndex % faceEvery === 0) {
       const faceStart = performance.now();
       this.lastFace = detectFace(this.faceLandmarker, video, timestamp);
       const faceMs = performance.now() - faceStart;

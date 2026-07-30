@@ -489,3 +489,230 @@
   font-size: 1rem;
   line-height: 1.6;
 }
+
+/* ------------------------------------------------------------------ */
+/* T070: tracking-loss overlay and resume countdown                    */
+/* ------------------------------------------------------------------ */
+
+.fb-loss {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(13, 10, 8, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease-out;
+}
+
+.fb-loss.is-on {
+  opacity: 1;
+}
+
+.fb-loss-panel {
+  text-align: center;
+  padding: 1.6rem 2.4rem;
+  transition: opacity 180ms ease-out;
+}
+
+/* While the ember countdown runs the parchment steps aside. */
+.fb-loss.is-counting .fb-loss-panel {
+  opacity: 0;
+}
+
+.fb-loss-hands {
+  display: flex;
+  justify-content: center;
+  gap: 1.6rem;
+  margin-bottom: 0.9rem;
+}
+
+/* The shared .fb-hand asset is absolutely positioned for calibration;
+   inside the loss panel it flows in the row instead. */
+.fb-loss-hands .fb-hand {
+  position: static;
+  transform: none;
+  width: 68px;
+  height: 88px;
+  transition: none;
+}
+
+.fb-loss-hands .fb-hand path {
+  stroke: rgba(26, 21, 18, 0.75);
+  stroke-width: 4;
+}
+
+.fb-loss-text {
+  font-family: var(--fb-font-display);
+  font-size: 1.35rem;
+  letter-spacing: 0.16em;
+  text-indent: 0.16em;
+  color: var(--fb-charcoal);
+}
+
+.fb-loss-count {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: var(--fb-font-display);
+  font-weight: 700;
+  font-size: clamp(4rem, 14vw, 8rem);
+  color: var(--fb-ember-bright);
+  text-shadow:
+    0 3px 6px rgba(0, 0, 0, 0.85),
+    0 0 28px rgba(201, 119, 46, 0.55);
+  animation: fb-count-pop 300ms ease-out;
+}
+
+@keyframes fb-count-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.35);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* T070: single-hand hint chip                                         */
+/* ------------------------------------------------------------------ */
+
+.fb-hint-chip {
+  position: absolute;
+  left: 50%;
+  bottom: 72px;
+  transform: translateX(-50%);
+  padding: 0.45rem 1.1rem;
+  background-color: rgba(216, 200, 168, 0.92);
+  color: var(--fb-charcoal);
+  border: 1px solid rgba(168, 133, 60, 0.7);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+  font-family: var(--fb-font-body);
+  font-size: 0.9rem;
+  letter-spacing: 0.05em;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 600ms ease-out;
+}
+
+.fb-hint-chip.is-on {
+  opacity: 1;
+  transition: opacity 200ms ease-out;
+}
+
+/* ------------------------------------------------------------------ */
+/* T070: lighting help (calibration only)                              */
+/* ------------------------------------------------------------------ */
+
+.fb-help-btn {
+  position: absolute;
+  right: 26px;
+  bottom: 24px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background-color: transparent;
+  border: 2px solid rgba(216, 200, 168, 0.5);
+  color: var(--fb-parchment);
+  font-family: var(--fb-font-display);
+  font-size: 1.25rem;
+  cursor: pointer;
+  transition: border-color 140ms ease-out, color 140ms ease-out;
+}
+
+.fb-help-btn:hover {
+  border-color: var(--fb-ember-bright);
+  color: var(--fb-ember-bright);
+}
+
+.fb-help-btn:focus-visible {
+  outline: 2px solid var(--fb-gold);
+  outline-offset: 3px;
+}
+
+.fb-help-panel {
+  position: absolute;
+  right: 26px;
+  bottom: 84px;
+  max-width: 21rem;
+  display: none;
+}
+
+.fb-help-panel.is-open {
+  display: block;
+}
+
+.fb-help-heading {
+  margin: 0 0 0.5rem;
+  font-family: var(--fb-font-display);
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+}
+
+.fb-help-list {
+  margin: 0 0 0.8rem;
+  padding-left: 1.1rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.fb-help-list li + li {
+  margin-top: 0.3rem;
+}
+
+.fb-help-close {
+  padding: 0.3rem 0.9rem;
+  background-color: var(--fb-vermilion);
+  color: var(--fb-parchment);
+  border: 1px solid rgba(168, 133, 60, 0.55);
+  font-family: var(--fb-font-body);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.fb-help-close:hover {
+  background-color: var(--fb-oxblood);
+}
+
+/* ------------------------------------------------------------------ */
+/* T070: fault overlays and gate upgrades                              */
+/* ------------------------------------------------------------------ */
+
+/* The context-loss fault covers the arena, not a fresh page. */
+.fb-fault {
+  background: rgba(13, 10, 8, 0.82);
+}
+
+.fb-reload-btn {
+  margin-top: 0.9rem;
+  padding: 0.5rem 1.6rem;
+  background-color: var(--fb-vermilion);
+  color: var(--fb-parchment);
+  border: 1px solid rgba(168, 133, 60, 0.55);
+  font-family: var(--fb-font-display);
+  font-size: 1rem;
+  letter-spacing: 0.12em;
+  text-indent: 0.12em;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+}
+
+.fb-reload-btn:hover {
+  background-color: var(--fb-oxblood);
+}
+
+.fb-gate-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.6rem;
+  text-align: center;
+}
+
+.fb-gate-wordmark {
+  font-size: clamp(1.8rem, 6vw, 3rem);
+}

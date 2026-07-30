@@ -21,6 +21,8 @@ import {
   captureCalibration,
   type CalibrationStats,
 } from '../gestures/calibrationStats';
+import { handOutline } from '../ui/handOutlines';
+import { HelpPanel } from '../ui/helpPanel';
 import '../ui/theme.css';
 
 export interface CalibrationContext {
@@ -46,25 +48,8 @@ export const CAPTURE_WINDOW_MS = 2000;
 const REST_LEFT = { x: 0.32, y: 0.55 };
 const REST_RIGHT = { x: 0.68, y: 0.55 };
 
-/**
- * Simple brush-outline open hand, thumb toward the outside. Drawn for the
- * right hand; the left is mirrored in CSS.
- */
-const HAND_PATH =
-  'M28 116 C26 102 24 94 23 82 L14 60 C12 54 17 50 21 54 L30 70 L30 34 ' +
-  'C30 28 38 28 38 34 L38 64 L40 22 C40 16 48 16 48 22 L48 62 L52 28 ' +
-  'C53 22 60 23 60 29 L57 64 L64 42 C66 36 73 39 71 45 L62 78 ' +
-  'C60 92 58 104 56 116';
-
-function handOutline(side: 'left' | 'right'): HTMLDivElement {
-  const el = document.createElement('div');
-  el.className = `fb-hand fb-hand--${side}`;
-  el.innerHTML =
-    `<svg viewBox="0 0 90 120" aria-hidden="true">` +
-    `<path d="${HAND_PATH}"></path>` +
-    `</svg>`;
-  return el;
-}
+// The ink hand outline moved to src/ui/handOutlines.ts (T070) so the
+// tracking-loss overlay shares the same asset style.
 
 type Phase = 'waiting' | 'capturing' | 'done';
 
@@ -81,6 +66,7 @@ export class CalibrationScreen implements Screen {
   private leftHandEl: HTMLElement | null = null;
   private rightHandEl: HTMLElement | null = null;
   private textEl: HTMLElement | null = null;
+  private help: HelpPanel | null = null;
 
   private resolveStats: ((stats: CalibrationStats) => void) | null = null;
   private completion: Promise<CalibrationStats>;
@@ -141,12 +127,17 @@ export class CalibrationScreen implements Screen {
     this.textEl.textContent = 'Raise your hands.';
     root.appendChild(this.textEl);
 
+    // Lighting help, calibration only (T070).
+    this.help = new HelpPanel(root);
+
     this.detachFrames = c.source.onFrame((frame) => this.handleFrame(frame));
   }
 
   exit(): void {
     this.detachFrames?.();
     this.detachFrames = null;
+    this.help?.dispose();
+    this.help = null;
     if (this.ownVideo) {
       this.ownVideo.srcObject = null;
       this.ownVideo = null;
