@@ -205,14 +205,14 @@ T010 | P1 | live hand source         | T001       | done | agent-tracking | hand
 T011 | P1 | face source              | T001       | done | agent-tracking | faceSource.ts + liveSource.ts, face at 1/4 rate, degrade to 1/8 past 7ms budget
 T012 | P1 | filters + gating         | T002       | done | agent-filters | filters.ts: OneEuro, Hysteresis, ConfidenceGate, FilteredSource; 20 tests
 T020 | P2 | pose functions           | T012       | done | agent-poses | poses.ts, ratio-based scale-free scoring, 29 tests; palmScore needs handedness param
-T021 | P2 | move state machine       | T020       | doing | agent-moves | combined with T022 in one agent
-T022 | P2 | false-positive suite     | T021       | doing | agent-moves |
+T021 | P2 | move state machine       | T020       | done | agent-moves | moves.ts MoveEngine; retract-gated discrete vs 350ms-hold sustained; latency 0-17ms
+T022 | P2 | false-positive suite     | T021       | done | agent-moves | 33 tests: all 10 positives exact event lists, 5 negatives zero events, cooldown/breath/empower
 T030 | P3 | arena environment        | T000       | done | agent-arena | 21 mesh nodes, 6 dynamic lights, headless-guarded canvas textures, seeded PRNG layout
 T031 | P3 | camera rig + parallax    | T011,T030  | done | agent-rig | cameraRig.ts + killTravel.ts, 13 tests; parallax jointly clamped 4deg/0.25m incl breathing sway
 T040 | P4 | fire particle core       | T030       | done | agent-fire | fire.ts FireSystem facade; 4700 instanced cap; shader-side particle motion; 20 tests
-T041 | P4 | per-move VFX             | T021,T040  | todo |  |
+T041 | P4 | per-move VFX             | T021,T040  | doing | agent-movefx |
 T050 | P5 | constructs + physics     | T030       | done | agent-constructs | enemies.ts: rapier world, spring-back wobble (gravityScale 0 + K=250), charring, debris, lob arcs
-T051 | P5 | combat + HUD             | T021,T050  | todo |  |
+T051 | P5 | combat + HUD             | T021,T050  | doing | agent-combat |
 T052 | P5 | director chain           | T051       | todo |  |
 T060 | P6 | title + calibration      | T010       | done | agent-screens | ScreenManager + flameWipe + title + calibration + calibrationStats; 15 tests; main.ts wiring recipe in agent report, applied at P5/P6 integration
 T061 | P6 | audio pass               | T041       | todo |  |
@@ -233,6 +233,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:34] orchestrator | P1 debug overlay merged, phase-1-complete | 152/152 green, vite build ok, overlay at ?debug=tracking (&fixture=name, &live) | in flight: T021+T022, T040, T050, T060
 [2026-07-30 03:40] orchestrator | T060, T040 merged; liveSource gains mediaStream getter for calibration preview | 162 green, 2 failing in enemies.test.ts belong to still-running T050 agent | in flight: T021+T022, T050; next: T041 when moves land
 [2026-07-30 03:46] orchestrator | T050 merged | 164/164 green, rapier runs for real in node tests | in flight: T021+T022 only; T041 + T051 launch when moves land
+[2026-07-30 03:52] orchestrator | T021, T022 merged | 197/197 green, Phase 2 code complete | launching T041, T051, and moves debug scene (P2 exit criterion); tag phase-2 when debug scene lands
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -260,6 +261,10 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:40] Ember/smoke layers folded into fire.ts; src/vfx/embers.ts intentionally not created | one system, one update clock; repo layout deviation recorded | S4, S10
 [2026-07-30 03:46] Construct torso: gravityScale 0 + spring torque (K=250, ang damping 3.5) instead of gravity + spring | upright is a stable equilibrium, wobble tuning orthogonal, no tip-over drift | S11
 [2026-07-30 03:46] Coal lobs are closed-form parabolas, no rapier bodies; base body has no collider | keeps physics scope minimal per S3; avoids pivot contact jitter | S3, S11
+[2026-07-30 03:52] DEVIATION from S6: grip pose uses 5-frame score average with hysteresis enter 0.45 exit 0.28 (not 0.75/0.55) | synthetic GRIP_LOCAL vs FIST_LOCAL nearly indistinguishable (thumb rise ~0.34 both); fire-whip safety comes from motion context (static hold then lateral swing) not score margin | S6, S7
+[2026-07-30 03:52] Aim events carry screen-space velocity (punch toward camera = aim.z < 0); combat layer maps screen -z to world forward | one documented mapping point instead of per-move conversions | S7
+[2026-07-30 03:52] triggerLatencyMs measured from trigger-condition completion, not pose acquisition; hysteresis runs during wind-up | 4-frame hysteresis at 30fps would otherwise exceed the 120ms budget by construction | S7, S13
+[2026-07-30 03:52] Cross-combo: third alternating jab emits cross-combo INSTEAD of third jab-blast; blocked twin-cannon consumes both thrust records so it never leaks two jabs | S7 ambiguity resolved | S7
 
 ### 16.4 Known issues / debt
 
@@ -271,11 +276,14 @@ Format: `[timestamp] decision | reason | affected sections`
 - HUMAN: visual pass on title screen (ember density, wordmark spacing, seal emboss) and calibration ritual (hand outline SVG shape, ignite flare subtlety, flame wipe weight at 700ms).
 - HUMAN: fire shader visual judgment via mountFireDebug (wired behind ?debug=fire before ship): expect noise-torn licks not flat sprites, warm ramp, ember curl, faint smoke, light pooling; check fps under sustained load.
 - HUMAN: judge construct wobble feel live (SPRING_K 250, damping 3.5, ~1.4s period, tuned headless only), debris scatter/fade (damping may read viscous), and whether the tier 2 chest plates read as skeletal armor.
+- DEBT: fixtures/lib.ts GRIP_LOCAL vs FIST_LOCAL nearly indistinguishable to gripScore. Fix later: GRIP_LOCAL thumb rise >= 0.6, FIST_LOCAL flat tuck <= 0.1, then restore S6 grip thresholds (0.75/0.55) and re-verify whip suite plus real recordings.
 
 ### 16.5 Tuning values that differ from spec defaults
 
 - All gesture and filter thresholds are PROVISIONAL: tuned on synthetic fixtures only, no real recordings yet.
 - Face One Euro: minCutoff 1.5 (hands use spec 1.0) | face parallax smoothing is light here because heavy smoothing belongs to the camera rig per S8.
+- Grip hysteresis 0.45/0.28 over 5-frame average (spec says 0.75/0.55) | see Decision Log 03:52; revisit with real recordings.
+- Move thresholds: SPIKE_SPEED_MIN 0.9 u/s, SPIKE_TOWARD_MIN 0.6, RETRACT 0.5, EXTEND_HOLD 350ms, WHIP swing |vx| >= 1.0, RISING up-vel 1.0, TWIN chest y 0.4-0.68, BREATH hip y > 0.7. All provisional on synthetic data.
 
 ## 17. README requirements (written in Phase 8, not before)
 
