@@ -218,7 +218,8 @@ T062a| P6 | game flow + perf gate    | T052,T061  | done | agent-juice | full fl
 T060 | P6 | title + calibration      | T010       | done | agent-screens | ScreenManager + flameWipe + title + calibration + calibrationStats; 15 tests; main.ts wiring recipe in agent report, applied at P5/P6 integration
 T061 | P6 | audio pass               | T041       | done | agent-audio | engine.ts + moveAudio.ts, all synthesized, seeded deterministic buffers; 29 tests; unlock() on Play click
 T062 | P6 | juice tuning             | T052       | todo |  |
-T070 | P7 | hardening ladder         | T062       | doing | agent-hardening |
+T070 | P7 | hardening ladder         | T062       | done | agent-hardening | degrade ladder, tracking-loss FSM, single-hand OK as-is, error states, mobile gate; 339 tests
+T080a| P8 | README + deploy prep     | T070       | doing | agent-ship | GIFs captured; README, vercel/netlify config, bundle audit, drop howler
 T080 | P8 | README + deploy + GIFs   | T070       | todo |  |
 ```
 
@@ -242,6 +243,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 04:48] orchestrator | T052 merged | 291/291 green, vite build ok; P5 exit (full loop on replay) achieved headlessly | launched T062a (flow+juice+perf harness); tags for P3/P4/P5 held until browser perf gate + screenshots
 [2026-07-30 05:05] orchestrator | T062a merged; browser verification via Chrome automation | PERFGATE on dev machine: 901 frames, median 16.70ms (vsync-locked 60fps), p95 17.3, max 18.1, 32 draw calls, 365 particles, 2 lights, PASS; screenshots in docs/screens/ (title, arena+HUD, fire, perf load); fixed ?screen=arena bare-name fixture resolution; phases 3-5 tagged | next: T070 hardening
 [2026-07-30 05:15] orchestrator | full flow verified in browser: title -> Play -> calibration gate-in on replay -> flame wipe -> arena; phase-6-complete tagged | launched T070 hardening | note: background-tab throttling makes unattended browser flows crawl; all interactive verification must actively drive the tab
+[2026-07-30 05:40] orchestrator | T070 merged, phase-7-complete tagged; FIXED live bug: flameWipe negative rAF delta -> negative arc radius exception hung the transition (clamp added); 3 gameplay GIFs captured in browser (demo incl. calibration+twin-cannon kill chain, fan cone, whip ambience) | launched T080a ship prep | remaining: deploy (HUMAN credentials), MORNING.md
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
