@@ -8,27 +8,39 @@
  * Revisit only if profiling shows main-thread stalls attributable to the
  * detectForVideo call sites.
  *
- * Scheduling: hand detection every video frame, face detection every 4th
- * frame (~15 Hz). Degrade rule: if the rolling average (60 frames) of total
- * ML time per frame exceeds the 7 ms budget, face drops to every 8th frame.
- * Hands are never degraded.
+ * Scheduling: hand detection every video frame, pose detection every 2nd
+ * frame (~15 Hz, offset to odd frames so it never stacks on a face frame),
+ * face detection every 4th frame (~15 Hz). Degrade rule: if the rolling
+ * average (60 frames) of total ML time per frame exceeds the 7 ms budget,
+ * the ladder inside this source steps in ORDER: pose drops to every 4th
+ * frame FIRST, then (still over budget on the new configuration) face drops
+ * to every 8th. Hands are never degraded. Pose and face are sample-and-held
+ * between detections.
  */
 
-import type { FaceLandmarker, HandLandmarker } from '@mediapipe/tasks-vision';
+import type {
+  FaceLandmarker,
+  HandLandmarker,
+  PoseLandmarker,
+} from '@mediapipe/tasks-vision';
 import type {
   FaceFrame,
   FrameListener,
   LandmarkFrame,
   LandmarkSource,
+  PoseFrame,
 } from './types';
 import { createHandLandmarker, detectHands } from './handSource';
 import { createFaceLandmarker, detectFace } from './faceSource';
+import { createPoseLandmarker, detectPose } from './poseSource';
 
 /** Combined ML budget per frame in ms (Section 14). */
 const ML_BUDGET_MS = 7;
 const ROLLING_WINDOW = 60;
 const FACE_INTERVAL_NORMAL = 4;
 const FACE_INTERVAL_DEGRADED = 8;
+const POSE_INTERVAL_NORMAL = 2;
+const POSE_INTERVAL_DEGRADED = 4;
 
 /** Fixed-size rolling average, O(1) push. */
 class RollingAverage {
@@ -56,6 +68,12 @@ class RollingAverage {
   get full(): boolean {
     return this.values.length >= this.size;
   }
+
+  reset(): void {
+    this.values.length = 0;
+    this.sum = 0;
+    this.cursor = 0;
+  }
 }
 
 export interface LiveSourceStats {
@@ -63,6 +81,8 @@ export interface LiveSourceStats {
   handMs: number;
   /** Rolling average face inference time (frames where it ran), ms. */
   faceMs: number;
+  /** Rolling average pose inference time (frames where it ran), ms. */
+  poseMs: number;
   /** Rolling average frames per second of the emit loop. */
   fps: number;
 }
@@ -78,6 +98,7 @@ export class LiveLandmarkSource implements LandmarkSource {
   private video: HTMLVideoElement | null = null;
   private handLandmarker: HandLandmarker | null = null;
   private faceLandmarker: FaceLandmarker | null = null;
+  private poseLandmarker: PoseLandmarker | null = null;
   private running = false;
   private rvfcHandle: number | null = null;
   private rafHandle: number | null = null;
@@ -86,11 +107,16 @@ export class LiveLandmarkSource implements LandmarkSource {
   private lastFrameTime = 0;
   private frameIndex = 0;
   private faceInterval = FACE_INTERVAL_NORMAL;
+  private poseInterval = POSE_INTERVAL_NORMAL;
   /** Degrade-ladder multiplier on the face interval (T070). 1 = normal. */
   private faceIntervalMult = 1;
+  /** Degrade-ladder multiplier on the pose interval. 1 = normal. */
+  private poseIntervalMult = 1;
   private lastFace: FaceFrame | null = null;
+  private lastPose: PoseFrame | null = null;
   private handMsAvg = new RollingAverage(ROLLING_WINDOW);
   private faceMsAvg = new RollingAverage(ROLLING_WINDOW);
+  private poseMsAvg = new RollingAverage(ROLLING_WINDOW);
   private totalMsAvg = new RollingAverage(ROLLING_WINDOW);
   private fpsAvg = new RollingAverage(ROLLING_WINDOW);
 
@@ -103,6 +129,7 @@ export class LiveLandmarkSource implements LandmarkSource {
     return {
       handMs: this.handMsAvg.average,
       faceMs: this.faceMsAvg.average,
+      poseMs: this.poseMsAvg.average,
       fps: this.fpsAvg.average,
     };
   }
@@ -110,6 +137,11 @@ export class LiveLandmarkSource implements LandmarkSource {
   /** True once the degrade rule has dropped face detection to every 8th frame. */
   get faceDegraded(): boolean {
     return this.faceInterval === FACE_INTERVAL_DEGRADED;
+  }
+
+  /** True once the degrade rule has dropped pose detection to every 4th frame. */
+  get poseDegraded(): boolean {
+    return this.poseInterval === POSE_INTERVAL_DEGRADED;
   }
 
   /**
@@ -121,6 +153,16 @@ export class LiveLandmarkSource implements LandmarkSource {
    */
   setFaceIntervalMultiplier(multiplier: number): void {
     this.faceIntervalMult = Math.max(1, Math.round(multiplier));
+  }
+
+  /**
+   * Degrade-ladder hook, sibling of setFaceIntervalMultiplier: multiply the
+   * pose detection interval. 1 restores the normal schedule (~15 Hz); 2
+   * halves the pose rate (~7.5 Hz). The external ladder degrades pose
+   * BEFORE face, matching this source's internal ML-budget order.
+   */
+  setPoseIntervalMultiplier(multiplier: number): void {
+    this.poseIntervalMult = Math.max(1, Math.round(multiplier));
   }
 
   async start(): Promise<void> {
@@ -149,12 +191,14 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.video = video;
     await video.play();
 
-    const [hand, face] = await Promise.all([
+    const [hand, face, pose] = await Promise.all([
       createHandLandmarker(),
       createFaceLandmarker(),
+      createPoseLandmarker(),
     ]);
     this.handLandmarker = hand;
     this.faceLandmarker = face;
+    this.poseLandmarker = pose;
 
     this.running = true;
     this.startTime = performance.now();
@@ -186,7 +230,10 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.handLandmarker = null;
     this.faceLandmarker?.close();
     this.faceLandmarker = null;
+    this.poseLandmarker?.close();
+    this.poseLandmarker = null;
     this.lastFace = null;
+    this.lastPose = null;
   }
 
   private scheduleNext(): void {
@@ -222,6 +269,20 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.handMsAvg.push(handMs);
     totalMs += handMs;
 
+    // Pose runs on frames ODD relative to its interval so it never stacks on
+    // a face frame (face frames are multiples of 4). Sample-and-hold between
+    // detections; PoseFrame.t is re-stamped into frame time so downstream
+    // freshness and angular-velocity math share the frame clock.
+    const poseEvery = this.poseInterval * this.poseIntervalMult;
+    if (this.poseLandmarker && this.frameIndex % poseEvery === 1) {
+      const poseStart = performance.now();
+      const pose = detectPose(this.poseLandmarker, video, timestamp);
+      this.lastPose = pose ? { ...pose, t: now - this.startTime } : null;
+      const poseMs = performance.now() - poseStart;
+      this.poseMsAvg.push(poseMs);
+      totalMs += poseMs;
+    }
+
     const faceEvery = this.faceInterval * this.faceIntervalMult;
     if (this.faceLandmarker && this.frameIndex % faceEvery === 0) {
       const faceStart = performance.now();
@@ -232,13 +293,18 @@ export class LiveLandmarkSource implements LandmarkSource {
     }
 
     this.totalMsAvg.push(totalMs);
-    if (
-      this.faceInterval === FACE_INTERVAL_NORMAL &&
-      this.totalMsAvg.full &&
-      this.totalMsAvg.average > ML_BUDGET_MS
-    ) {
-      // Over budget consistently: halve the face rate, never touch hands.
-      this.faceInterval = FACE_INTERVAL_DEGRADED;
+    if (this.totalMsAvg.full && this.totalMsAvg.average > ML_BUDGET_MS) {
+      // Over budget consistently. Internal ML-budget ladder, in order:
+      // pose first (every 4th frame), then face (every 8th); hands never.
+      // The window resets after each step so the next verdict measures the
+      // new configuration instead of the old one's backlog.
+      if (this.poseInterval === POSE_INTERVAL_NORMAL) {
+        this.poseInterval = POSE_INTERVAL_DEGRADED;
+        this.totalMsAvg.reset();
+      } else if (this.faceInterval === FACE_INTERVAL_NORMAL) {
+        this.faceInterval = FACE_INTERVAL_DEGRADED;
+        this.totalMsAvg.reset();
+      }
     }
 
     const frame: LandmarkFrame = {
@@ -246,6 +312,7 @@ export class LiveLandmarkSource implements LandmarkSource {
       left: hands.left,
       right: hands.right,
       face: this.lastFace,
+      pose: this.lastPose,
     };
     this.frameIndex++;
     for (const l of this.listeners) l(frame);

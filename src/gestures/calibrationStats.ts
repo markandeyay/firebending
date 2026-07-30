@@ -20,12 +20,20 @@ export interface CalibrationStats {
   neutralRightWrist: Vec3;
   /** Median wrist-to-wrist distance, a shoulder width proxy. */
   wristSpan: number;
+  /**
+   * Median REAL shoulder width (pose shoulder-to-shoulder distance,
+   * normalized screen units) when body pose was present during the capture;
+   * null otherwise. Preferred over wristSpan for velocity scaling: wrists
+   * wander during the capture window, shoulders do not.
+   */
+  shoulderWidth: number | null;
   /** Median wrist to middle MCP distance across both hands. */
   handSize: number;
   /**
-   * Multiplier for velocity thresholds. 1 at the reference span; a player
-   * farther from the camera (smaller span, smaller on-screen velocities)
-   * gets a scale above 1 so raw velocities are boosted before thresholding.
+   * Multiplier for velocity thresholds. 1 at the reference size; a player
+   * farther from the camera (smaller on-screen body, smaller on-screen
+   * velocities) gets a scale above 1 so raw velocities are boosted before
+   * thresholding.
    */
   velocityScale: number;
   /** Number of captured frames in which both hands were present. */
@@ -34,6 +42,14 @@ export interface CalibrationStats {
 
 /** Wrist span that maps to velocityScale 1, in normalized screen units. */
 export const REFERENCE_WRIST_SPAN = 0.5;
+/**
+ * Pose shoulder width that maps to velocityScale 1. Reference: a seated
+ * player at a normal desk distance (~60..80 cm from a typical webcam FOV)
+ * shows a shoulder line about a third of the frame wide; 0.32 keeps the
+ * live scale ~1 there, above 1 when they sit farther back. Revisit against
+ * real capture data once live pose recordings exist.
+ */
+export const REFERENCE_SHOULDER_WIDTH = 0.32;
 export const VELOCITY_SCALE_MIN = 0.5;
 export const VELOCITY_SCALE_MAX = 3;
 
@@ -46,6 +62,7 @@ export const DEFAULT_CALIBRATION: CalibrationStats = {
   neutralLeftWrist: { x: 0.35, y: 0.62, z: 0 },
   neutralRightWrist: { x: 0.65, y: 0.62, z: 0 },
   wristSpan: REFERENCE_WRIST_SPAN,
+  shoulderWidth: null,
   handSize: 0.09,
   velocityScale: 1,
   sampleCount: 0,
@@ -80,10 +97,24 @@ function middleMcpOf(hand: HandFrame): Vec3 | undefined {
 }
 
 /**
- * Velocity threshold multiplier for a measured wrist span. Clamped so a
- * degenerate capture can never disable or hair-trigger the move detectors.
+ * Velocity threshold multiplier. Prefers the REAL shoulder width from body
+ * pose when the capture had one (shoulders are rigid; wrists wander), and
+ * falls back to the wrist-span proxy otherwise. Clamped so a degenerate
+ * capture can never disable or hair-trigger the move detectors.
  */
-export function velocityScaleFor(span: number): number {
+export function velocityScaleFor(
+  span: number,
+  shoulderWidth?: number | null,
+): number {
+  if (
+    shoulderWidth !== undefined &&
+    shoulderWidth !== null &&
+    Number.isFinite(shoulderWidth) &&
+    shoulderWidth > 0
+  ) {
+    const raw = REFERENCE_SHOULDER_WIDTH / shoulderWidth;
+    return Math.min(VELOCITY_SCALE_MAX, Math.max(VELOCITY_SCALE_MIN, raw));
+  }
   if (!Number.isFinite(span) || span <= 0) return 1;
   const raw = REFERENCE_WRIST_SPAN / span;
   return Math.min(VELOCITY_SCALE_MAX, Math.max(VELOCITY_SCALE_MIN, raw));
@@ -100,6 +131,7 @@ export function captureCalibration(frames: LandmarkFrame[]): CalibrationStats {
   const rightWrists: Vec3[] = [];
   const spans: number[] = [];
   const handSizes: number[] = [];
+  const shoulderWidths: number[] = [];
 
   for (const frame of frames) {
     const lw = frame.left ? wristOf(frame.left) : undefined;
@@ -116,11 +148,20 @@ export function captureCalibration(frames: LandmarkFrame[]): CalibrationStats {
       if (mcp) handSizes.push(distance(rw, mcp));
     }
     if (lw && rw) spans.push(distance(lw, rw));
+
+    // Real shoulder width from body pose when the frame carries one (frames
+    // and recordings without pose are fully supported and just skip this).
+    const pose = frame.pose;
+    if (pose) {
+      const w = distance(pose.left.shoulder, pose.right.shoulder);
+      if (Number.isFinite(w) && w > 0) shoulderWidths.push(w);
+    }
   }
 
   if (spans.length === 0) return { ...DEFAULT_CALIBRATION };
 
   const wristSpan = median(spans);
+  const shoulderWidth = shoulderWidths.length > 0 ? median(shoulderWidths) : null;
   return {
     neutralLeftWrist:
       leftWrists.length > 0
@@ -131,9 +172,10 @@ export function captureCalibration(frames: LandmarkFrame[]): CalibrationStats {
         ? medianVec(rightWrists)
         : { ...DEFAULT_CALIBRATION.neutralRightWrist },
     wristSpan,
+    shoulderWidth,
     handSize:
       handSizes.length > 0 ? median(handSizes) : DEFAULT_CALIBRATION.handSize,
-    velocityScale: velocityScaleFor(wristSpan),
+    velocityScale: velocityScaleFor(wristSpan, shoulderWidth),
     sampleCount: spans.length,
   };
 }

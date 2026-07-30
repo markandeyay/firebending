@@ -55,6 +55,48 @@ export interface FaceFrame {
   confidence: number;
 }
 
+/** MediaPipe pose landmark indices for the joints we extract (33-point model). */
+export const POSE_LM = {
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+} as const;
+
+/** One arm-plus-hip chain of the body pose. */
+export interface PoseArm {
+  shoulder: Vec3;
+  elbow: Vec3;
+  wrist: Vec3;
+  hip: Vec3;
+}
+
+/**
+ * Body pose subset from MediaPipe PoseLandmarker: the eight joints the game
+ * uses (shoulders, elbows, wrists, hips), in MIRRORED player space (x -> 1-x,
+ * same convention as hands). The player's LEFT arm fills the `left` fields.
+ * `world` carries the same joints from worldLandmarks (meters, hip-centered),
+ * mirrored consistently (world x negated); preferred for angle math because
+ * it is metric and depth-corrected. `t` is the DETECTION timestamp (ms since
+ * source start): pose runs at half frame rate and is sample-and-held between
+ * detections, so downstream angular-velocity math must difference on `t`,
+ * never on frame dt, and can use frame.t - pose.t as a freshness measure.
+ */
+export interface PoseFrame {
+  /** Detection timestamp, ms since source start (held frames keep it). */
+  t: number;
+  left: PoseArm;
+  right: PoseArm;
+  /** World-landmark joints (meters, hip-centered, x mirrored). */
+  world: { left: PoseArm; right: PoseArm } | null;
+  /** Presence/visibility confidence 0..1. */
+  confidence: number;
+}
+
 export interface LandmarkFrame {
   /** Milliseconds since source start. */
   t: number;
@@ -63,6 +105,12 @@ export interface LandmarkFrame {
   /** Player's right hand. */
   right: HandFrame | null;
   face: FaceFrame | null;
+  /**
+   * Body pose, when a pose tracker ran. OPTIONAL: every fixture and recording
+   * that predates pose support lacks the field, and all downstream code must
+   * treat an absent/null pose as a fully supported state.
+   */
+  pose?: PoseFrame | null;
 }
 
 export type FrameListener = (frame: LandmarkFrame) => void;

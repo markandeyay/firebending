@@ -17,6 +17,8 @@ import type {
   HandFrame,
   LandmarkFrame,
   LandmarkSource,
+  PoseArm,
+  PoseFrame,
   Vec3,
 } from './types';
 import { HAND_LANDMARK_COUNT, LM } from './types';
@@ -332,6 +334,74 @@ export interface FilteredSourceOptions {
   hand?: OneEuroOptions;
   /** One Euro tuning for face yaw/pitch/position. Defaults to FACE_FILTER_DEFAULTS. */
   face?: OneEuroOptions;
+  /** One Euro tuning for pose joints. Defaults to ONE_EURO_DEFAULTS (hand tuning). */
+  pose?: OneEuroOptions;
+}
+
+/**
+ * One Euro filters for the eight pose joints (screen space) plus the eight
+ * world joints when present. Filters run once per pose SAMPLE (PoseFrame.t
+ * changes), never per held frame, so the smoothing timestep matches the pose
+ * detection rate and the sample-and-hold repetition cannot bias the filter.
+ * Resets after a gap longer than HAND_FILTER_RESET_GAP_SEC, like hands.
+ */
+class PoseFilterBank {
+  private readonly screen: OneEuroVec3[];
+  private readonly world: OneEuroVec3[];
+  private lastTSec: number | null = null;
+
+  constructor(options: OneEuroOptions = {}) {
+    this.screen = Array.from({ length: 8 }, () => new OneEuroVec3(options));
+    this.world = Array.from({ length: 8 }, () => new OneEuroVec3(options));
+  }
+
+  private static joints(side: PoseArm): Vec3[] {
+    return [side.shoulder, side.elbow, side.wrist, side.hip];
+  }
+
+  private filterArm(
+    filters: OneEuroVec3[],
+    offset: number,
+    arm: PoseArm,
+    tSec: number,
+  ): PoseArm {
+    const src = PoseFilterBank.joints(arm);
+    const out: Vec3[] = src.map((v, i) => {
+      const f = filters[offset + i];
+      return f ? f.filter(v, tSec) : { x: v.x, y: v.y, z: v.z };
+    });
+    return {
+      shoulder: out[0] ?? arm.shoulder,
+      elbow: out[1] ?? arm.elbow,
+      wrist: out[2] ?? arm.wrist,
+      hip: out[3] ?? arm.hip,
+    };
+  }
+
+  filter(pose: PoseFrame, tSec: number): PoseFrame {
+    if (this.lastTSec !== null && tSec - this.lastTSec > HAND_FILTER_RESET_GAP_SEC) {
+      this.reset();
+    }
+    this.lastTSec = tSec;
+    return {
+      t: pose.t,
+      left: this.filterArm(this.screen, 0, pose.left, tSec),
+      right: this.filterArm(this.screen, 4, pose.right, tSec),
+      world: pose.world
+        ? {
+            left: this.filterArm(this.world, 0, pose.world.left, tSec),
+            right: this.filterArm(this.world, 4, pose.world.right, tSec),
+          }
+        : null,
+      confidence: pose.confidence,
+    };
+  }
+
+  reset(): void {
+    for (const f of this.screen) f.reset();
+    for (const f of this.world) f.reset();
+    this.lastTSec = null;
+  }
 }
 
 /**
@@ -345,6 +415,11 @@ export interface FilteredSourceOptions {
  *   handles reacquisition without smearing.
  * - Face yaw/pitch/position get a light One Euro; face filters reset after a
  *   face absence longer than HAND_FILTER_RESET_GAP_SEC.
+ * - Pose joints get One Euro smoothing (hand defaults), gated like face:
+ *   passed through when present, null otherwise, filters reset after a 0.5 s
+ *   absence. Filtering happens once per pose sample (see PoseFilterBank);
+ *   held frames re-emit the cached filtered sample so PoseFrame.t semantics
+ *   survive the decorator.
  *
  * start()/stop() delegate to the inner source. The subscription to the inner
  * source is made at construction; call dispose() to detach entirely.
@@ -362,6 +437,11 @@ export class FilteredSource implements LandmarkSource {
   private readonly facePosition: OneEuroVec3;
   private lastFaceTSec: number | null = null;
 
+  private readonly poseBank: PoseFilterBank;
+  private lastPoseSampleT: number | null = null;
+  private lastPoseSeenTSec: number | null = null;
+  private cachedPose: PoseFrame | null = null;
+
   private readonly detach: () => void;
 
   constructor(
@@ -375,6 +455,7 @@ export class FilteredSource implements LandmarkSource {
     this.faceYaw = new OneEuroFilter(faceOptions);
     this.facePitch = new OneEuroFilter(faceOptions);
     this.facePosition = new OneEuroVec3(faceOptions);
+    this.poseBank = new PoseFilterBank(options.pose ?? handOptions);
     this.detach = inner.onFrame((frame) => this.process(frame));
   }
 
@@ -404,6 +485,7 @@ export class FilteredSource implements LandmarkSource {
       left: this.processHand(frame.left, this.leftGate, this.leftBank, tSec),
       right: this.processHand(frame.right, this.rightGate, this.rightBank, tSec),
       face: this.processFace(frame.face, tSec),
+      pose: this.processPose(frame.pose ?? null, tSec),
     };
     for (const l of this.listeners) l(out);
   }
@@ -433,6 +515,33 @@ export class FilteredSource implements LandmarkSource {
       position: this.facePosition.filter(face.position, tSec),
       confidence: face.confidence,
     };
+  }
+
+  /**
+   * Pose gate + smoothing. Pose is sample-and-held upstream, so a fresh
+   * filter pass runs only when the sample timestamp advances; held frames
+   * re-emit the cached filtered sample. An absence longer than the hand
+   * reset gap drops the cache and resets the filters so a reacquired body
+   * never smears from its old position.
+   */
+  private processPose(pose: PoseFrame | null, tSec: number): PoseFrame | null {
+    if (!pose) {
+      if (
+        this.lastPoseSeenTSec !== null &&
+        tSec - this.lastPoseSeenTSec > HAND_FILTER_RESET_GAP_SEC
+      ) {
+        this.poseBank.reset();
+        this.cachedPose = null;
+        this.lastPoseSampleT = null;
+      }
+      return null;
+    }
+    this.lastPoseSeenTSec = tSec;
+    if (this.lastPoseSampleT !== pose.t || this.cachedPose === null) {
+      this.lastPoseSampleT = pose.t;
+      this.cachedPose = this.poseBank.filter(pose, pose.t / 1000);
+    }
+    return this.cachedPose;
   }
 }
 

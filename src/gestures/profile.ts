@@ -9,12 +9,26 @@
  * durations, Breath costs) stays absolute in moves.ts; only motion triggers
  * are personal.
  *
+ * VERSION 2 (pose-fusion): the growth fields are now BOUNDING-BOX-DIAGONAL
+ * growth (src/gestures/motion.ts bboxGrowthRate), replacing palm-span growth
+ * which collapsed exactly when a fist clenched, and the profile gains the
+ * elbow-extension angular-velocity peaks from the body-pose punch signal
+ * (rad/s, from PoseLandmarker; see tracking/poseSource.ts). A stored v1
+ * profile fails validation and loads as null, forcing one recalibration.
+ *
  * DEFAULT_PROFILE is chosen so thresholdsFrom(DEFAULT_PROFILE) reproduces
- * the previously tuned absolute values exactly (spikeSpeed 0.9, risingUpVel
- * 1.0, whipSwingVx 1.0, whipStaticMax 0.3, breathStaticMax 0.4, aimMinSpeed
- * 0.5, and spikeGrowth 1.35 / retractShrink 1.05 matching the regenerated
- * perspective-scaled fixtures). Replay fixtures and tests therefore stay
- * deterministic with no stored profile.
+ * the previously tuned values exactly (spikeSpeed 0.9, risingUpVel 1.0,
+ * whipSwingVx 1.0, whipStaticMax 0.3, breathStaticMax 0.4, aimMinSpeed 0.5,
+ * spikeGrowth 1.35 / retractShrink 1.05). The growth defaults carry over
+ * unchanged because on the perspective-scaled synthetic fixtures the bbox
+ * diagonal grows at the same relative rate as the palm span (uniform
+ * scaling): measured windowed bbox growth peaks 2.69..3.08 1/s across every
+ * thrust fixture (jab 3.03/3.04, cross-combo 3.02/3.08, stream 2.95,
+ * palm-wave 2.76, fan 2.69, twin 2.81/2.84) against the derived 1.35
+ * threshold, while every negative fixture stays at or below 1.28 (fidget
+ * 1.23, breath-charge release 1.28, talking-hands 1.00). All fixtures
+ * therefore keep firing exactly their moves through the no-pose fallback
+ * path with no fixture regeneration.
  *
  * Every derived threshold is floored at 3x the matching neutral baseline AND
  * at a small absolute safety floor, so a degenerate profile (near-zero peaks
@@ -26,19 +40,23 @@
 // ---------------------------------------------------------------------------
 
 export interface MotionProfile {
-  version: 1;
+  version: 2;
   /** Peak windowed wrist speed of a real punch, normalized units/sec. */
   peakPunchSpeed: number;
-  /** Peak relative palm-span growth of a real punch, 1/sec. */
-  peakPunchGrowth: number;
+  /** Peak relative hand-bbox-diagonal growth of a real punch, 1/sec. */
+  peakPunchBboxGrowth: number;
   /** Peak windowed wrist speed of a palm push, normalized units/sec. */
   peakPalmSpeed: number;
-  /** Peak relative palm-span growth of a palm push, 1/sec. */
-  peakPalmGrowth: number;
+  /** Peak relative hand-bbox-diagonal growth of a palm push, 1/sec. */
+  peakPalmBboxGrowth: number;
+  /** Peak elbow-extension angular velocity of a real punch, rad/s. */
+  peakElbowVel: number;
+  /** Median absolute elbow angular velocity while resting, rad/s. */
+  neutralElbowVel: number;
   /** Median windowed wrist speed while resting, normalized units/sec. */
   neutralSpeed: number;
-  /** Median absolute span growth while resting, 1/sec. */
-  neutralGrowth: number;
+  /** Median absolute bbox-diagonal growth while resting, 1/sec. */
+  neutralBboxGrowth: number;
   /** ISO timestamp of the capture ('default' for DEFAULT_PROFILE). */
   capturedAt: string;
 }
@@ -46,10 +64,15 @@ export interface MotionProfile {
 export interface MotionThresholds {
   /** Windowed wrist speed to register a thrust spike (jab / wave / twin). */
   spikeSpeed: number;
-  /** Windowed span growth rate to register a thrust spike, 1/sec. */
+  /** Windowed bbox-diagonal growth rate to register a thrust spike, 1/sec. */
   spikeGrowth: number;
-  /** Windowed span SHRINK rate (positive number) that counts as retract. */
+  /** Windowed bbox SHRINK rate (positive number) that counts as retract. */
   retractShrink: number;
+  /**
+   * Elbow-extension angular velocity (rad/s) for the pose-fusion PRIMARY
+   * punch signal; negated, it is also the fast re-flex retract signal.
+   */
+  elbowExtendVel: number;
   /** Windowed -y velocity for the Rising Flame upward sweep. */
   risingUpVel: number;
   /** Windowed |x| velocity for the Fire Whip lateral swing. */
@@ -86,10 +109,14 @@ export const NEUTRAL_FLOOR_MULT = 3;
  * static and aim floors ARE the binding term for DEFAULT_PROFILE (0.4 and
  * 0.5 reproduce the old BREATH_STATIC_SPEED_MAX and AIM_MIN_SPEED). Raising
  * a static cap is lenient, not hair-trigger, so a high floor there is safe.
+ * The elbow floor (1.5 rad/s) guards against a pose capture that barely saw
+ * the arm: idle arm sway measures well under 1 rad/s, a deliberate punch
+ * extension measures several.
  */
 export const FLOOR_SPIKE_SPEED = 0.5;
 export const FLOOR_SPIKE_GROWTH = 0.6;
 export const FLOOR_RETRACT_SHRINK = 0.5;
+export const FLOOR_ELBOW_VEL = 1.5;
 export const FLOOR_SWEEP = 0.6;
 export const FLOOR_WHIP_STATIC = 0.2;
 export const FLOOR_BREATH_STATIC = 0.4;
@@ -97,18 +124,24 @@ export const FLOOR_AIM_MIN = 0.5;
 
 /**
  * Fallback profile for replay fixtures, tests, and skipped calibration.
- * Peaks match the regenerated synthetic fixtures (punch speed ~1.5..1.65
- * u/s windowed with peaks near 2 for a hard sweep; punch span growth
- * ~2.8..3.1 1/s); neutral baselines match resting fixture hands.
+ * Speed/growth peaks match the synthetic fixtures (punch speed ~1.5..1.65
+ * u/s windowed with peaks near 2 for a hard sweep; punch bbox growth
+ * 2.69..3.08 1/s measured, see the module header); neutral baselines match
+ * resting fixture hands. Elbow defaults model a real seated punch: the
+ * elbow opens from a ~90 degree guard to near straight (~1.4 rad) in about
+ * 175 ms, i.e. a peak around 8 rad/s, and a resting arm drifts well under
+ * 0.5 rad/s. Derived elbowExtendVel = 0.45 * 8 = 3.6 rad/s.
  */
 export const DEFAULT_PROFILE: MotionProfile = {
-  version: 1,
+  version: 2,
   peakPunchSpeed: 2.0,
-  peakPunchGrowth: 3.0,
+  peakPunchBboxGrowth: 3.0,
   peakPalmSpeed: 1.6,
-  peakPalmGrowth: 3.0,
+  peakPalmBboxGrowth: 3.0,
+  peakElbowVel: 8.0,
+  neutralElbowVel: 0.3,
   neutralSpeed: 0.1,
-  neutralGrowth: 0.15,
+  neutralBboxGrowth: 0.15,
   capturedAt: 'default',
 };
 
@@ -119,7 +152,8 @@ export const DEFAULT_PROFILE: MotionProfile = {
  */
 export function thresholdsFrom(profile: MotionProfile): MotionThresholds {
   const nSpeed = NEUTRAL_FLOOR_MULT * profile.neutralSpeed;
-  const nGrowth = NEUTRAL_FLOOR_MULT * profile.neutralGrowth;
+  const nGrowth = NEUTRAL_FLOOR_MULT * profile.neutralBboxGrowth;
+  const nElbow = NEUTRAL_FLOOR_MULT * profile.neutralElbowVel;
   const sweep = Math.max(
     SWEEP_FRACTION * profile.peakPunchSpeed,
     nSpeed,
@@ -132,14 +166,19 @@ export function thresholdsFrom(profile: MotionProfile): MotionThresholds {
       FLOOR_SPIKE_SPEED,
     ),
     spikeGrowth: Math.max(
-      JAB_TRIGGER_FRACTION * profile.peakPunchGrowth,
+      JAB_TRIGGER_FRACTION * profile.peakPunchBboxGrowth,
       nGrowth,
       FLOOR_SPIKE_GROWTH,
     ),
     retractShrink: Math.max(
-      RETRACT_FRACTION * profile.peakPunchGrowth,
+      RETRACT_FRACTION * profile.peakPunchBboxGrowth,
       nGrowth,
       FLOOR_RETRACT_SHRINK,
+    ),
+    elbowExtendVel: Math.max(
+      JAB_TRIGGER_FRACTION * profile.peakElbowVel,
+      nElbow,
+      FLOOR_ELBOW_VEL,
     ),
     risingUpVel: sweep,
     whipSwingVx: sweep,
@@ -165,22 +204,30 @@ export function thresholdsFrom(profile: MotionProfile): MotionThresholds {
 // Persistence (localStorage)
 // ---------------------------------------------------------------------------
 
+/**
+ * Storage key is shared across profile versions; the version field inside
+ * the JSON is what gates loading. A v1 payload under this key fails
+ * validation and loads as null, which forces one recalibration.
+ */
 export const PROFILE_STORAGE_KEY = 'fb.motionProfile.v1';
 
 const NUMERIC_KEYS = [
   'peakPunchSpeed',
-  'peakPunchGrowth',
+  'peakPunchBboxGrowth',
   'peakPalmSpeed',
-  'peakPalmGrowth',
+  'peakPalmBboxGrowth',
+  'peakElbowVel',
+  'neutralElbowVel',
   'neutralSpeed',
-  'neutralGrowth',
+  'neutralBboxGrowth',
 ] as const;
 
-/** Full structural validation: wrong version, NaN, or non-finite rejects. */
+/** Full structural validation: wrong version (v1 included), NaN, or
+ *  non-finite rejects. */
 function isValidProfile(value: unknown): value is MotionProfile {
   if (typeof value !== 'object' || value === null) return false;
   const p = value as Record<string, unknown>;
-  if (p['version'] !== 1) return false;
+  if (p['version'] !== 2) return false;
   if (typeof p['capturedAt'] !== 'string') return false;
   for (const key of NUMERIC_KEYS) {
     const v = p[key];
@@ -197,7 +244,7 @@ function storage(): Storage | null {
   }
 }
 
-/** Load the stored profile, or null when absent, invalid, or unavailable. */
+/** Load the stored profile, or null when absent, invalid, or a stale v1. */
 export function loadProfile(): MotionProfile | null {
   const store = storage();
   if (!store) return null;

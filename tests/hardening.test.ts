@@ -45,6 +45,7 @@ import type { MoveEvent } from '../src/gestures/moves';
 interface HookLog {
   hooks: DegradeHooks;
   particle: number[];
+  pose: number[];
   face: number[];
   shadow: boolean[];
 }
@@ -52,10 +53,12 @@ interface HookLog {
 function makeHooks(): HookLog {
   const log: HookLog = {
     particle: [],
+    pose: [],
     face: [],
     shadow: [],
     hooks: {
       setParticleScale: (s) => log.particle.push(s),
+      setPoseIntervalMultiplier: (m) => log.pose.push(m),
       setFaceIntervalMultiplier: (m) => log.face.push(m),
       setShadowHalved: (h) => log.shadow.push(h),
     },
@@ -93,6 +96,7 @@ describe('DegradeLadder', () => {
     window_(ladder, SLOW_MS);
     expect(ladder.rung).toBe(1);
     expect(log.particle).toEqual([0.5]);
+    expect(log.pose).toEqual([]);
     expect(log.face).toEqual([]);
     expect(log.shadow).toEqual([]);
     expect(info).toHaveBeenCalledTimes(1);
@@ -100,17 +104,32 @@ describe('DegradeLadder', () => {
     info.mockRestore();
   });
 
-  it('walks the rungs in spec order and clamps at the bottom', () => {
+  it('walks the rungs in spec order (pose before face) and clamps at the bottom', () => {
     const log = makeHooks();
     const ladder = new DegradeLadder(log.hooks);
     vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
-    for (let i = 0; i < DEGRADE_SLOW_WINDOWS * 3 + 4; i++) window_(ladder, SLOW_MS);
+    // Enough slow windows to reach the bottom, plus slack to prove clamping.
+    for (let i = 0; i < DEGRADE_SLOW_WINDOWS * DEGRADE_MAX_RUNG + 4; i++) {
+      window_(ladder, SLOW_MS);
+    }
 
     expect(ladder.rung).toBe(DEGRADE_MAX_RUNG);
     expect(log.particle).toEqual([0.5]); // exactly once
+    expect(log.pose).toEqual([2]); // exactly once, BEFORE face
     expect(log.face).toEqual([2]); // exactly once
     expect(log.shadow).toEqual([true]); // exactly once, then clamped
+    vi.restoreAllMocks();
+  });
+
+  it('degrades pose before face (rung 2 touches only the pose hook)', () => {
+    const log = makeHooks();
+    const ladder = new DegradeLadder(log.hooks);
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    for (let i = 0; i < DEGRADE_SLOW_WINDOWS * 2; i++) window_(ladder, SLOW_MS);
+    expect(ladder.rung).toBe(2);
+    expect(log.pose).toEqual([2]);
+    expect(log.face).toEqual([]);
     vi.restoreAllMocks();
   });
 
@@ -139,6 +158,7 @@ describe('DegradeLadder', () => {
     }
     expect(ladder.rung).toBe(0);
     expect(log.particle).toEqual([]);
+    expect(log.pose).toEqual([]);
     expect(log.face).toEqual([]);
     expect(log.shadow).toEqual([]);
   });

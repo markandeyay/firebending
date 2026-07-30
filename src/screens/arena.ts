@@ -124,7 +124,8 @@ export interface ArenaContext {
   /**
    * Explicit velocity-scale override. The replay path needs the One Euro
    * compensation factor (REPLAY_VELOCITY_SCALE, see movesDebug.ts); live
-   * play omits this and uses velocityScaleFor(stats.wristSpan).
+   * play omits this and uses velocityScaleFor(stats.wristSpan,
+   * stats.shoulderWidth) (real pose shoulder width preferred).
    */
   velocityScale?: number;
   /**
@@ -376,8 +377,10 @@ export class ArenaScreen implements Screen {
     this.impacts = new ImpactSystem(scene, this.fire);
 
     // --- Gesture engine ----------------------------------------------------
+    // Real shoulder width (body pose) preferred over the wrist-span proxy.
     const velocityScale =
-      context.velocityScale ?? velocityScaleFor(context.stats.wristSpan);
+      context.velocityScale ??
+      velocityScaleFor(context.stats.wristSpan, context.stats.shoulderWidth);
     this.ctxProfile = context.profile ?? null;
     this.engine = new MoveEngine({
       velocityScale,
@@ -442,11 +445,12 @@ export class ArenaScreen implements Screen {
     this.director.start();
 
     // --- Hardening (T070) --------------------------------------------------
-    // Degrade ladder: particle scale -> MoveEffects + ambient braziers, face
-    // rate -> live source (replay sources lack the setter: no-op), shadows ->
-    // renderer + key light shadow map.
+    // Degrade ladder: particle scale -> MoveEffects + ambient braziers, pose
+    // then face rate -> live source (replay sources lack the setters:
+    // no-op), shadows -> renderer + key light shadow map.
     const maybeLive = context.source as Partial<{
       setFaceIntervalMultiplier(multiplier: number): void;
+      setPoseIntervalMultiplier(multiplier: number): void;
     }>;
     this.degrade = new DegradeLadder({
       setParticleScale: (scale) => {
@@ -454,6 +458,9 @@ export class ArenaScreen implements Screen {
         for (const handle of this.ambientHandles) {
           handle.scale = BRAZIER_FLAME_SCALE * scale;
         }
+      },
+      setPoseIntervalMultiplier: (multiplier) => {
+        maybeLive.setPoseIntervalMultiplier?.(multiplier);
       },
       setFaceIntervalMultiplier: (multiplier) => {
         maybeLive.setFaceIntervalMultiplier?.(multiplier);

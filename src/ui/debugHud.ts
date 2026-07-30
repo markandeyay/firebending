@@ -1,7 +1,8 @@
 /**
  * Debug HUD (D key in the arena): a translucent charcoal overlay panel in the
  * top-right corner showing the move engine's live internals per hand (pose
- * scores + active flags, windowed speed, span growth, thrust/whip arming),
+ * scores + active flags, windowed speed, bbox growth, thrust/whip arming,
+ * the per-hand punch-fusion signals vs thresholds with pose freshness),
  * the global state machine (active sustain, lockout, cooldowns, Breath), the
  * derived MotionThresholds and the loaded MotionProfile, the raw head pose,
  * the camera rig's parallax state, and the engine's near-miss trace ring
@@ -43,9 +44,22 @@ export interface DebugHudInputs {
   parallaxYawSign: number;
 }
 
-/** One near-miss line, formatted exactly as specified. */
+/**
+ * One near-miss line, formatted exactly as specified. Fusion conditions name
+ * the specific failing signal: "JAB: elbowVel 2.10 vs threshold 3.60 FAIL"
+ * or, for a primary that passed with no secondary,
+ * "JAB: no secondary: speed 0.51/0.90, growth 0.40/1.35".
+ */
 export function formatNearMiss(rec: NearMissRecord): string {
   const name = SHORT_NAME[rec.move] ?? rec.move.toUpperCase();
+  if (rec.condition === 'secondary') {
+    const g = rec.value2 ?? 0;
+    const gt = rec.threshold2 ?? 0;
+    return (
+      `${name}: no secondary: speed ${rec.value.toFixed(2)}/${rec.threshold.toFixed(2)}, ` +
+      `growth ${g.toFixed(2)}/${gt.toFixed(2)}`
+    );
+  }
   return (
     `${name}: ${rec.condition} ${rec.value.toFixed(2)}` +
     ` vs threshold ${rec.threshold.toFixed(2)} FAIL`
@@ -138,6 +152,23 @@ export class DebugHud {
     hand('L', 'left', scores.left);
     hand('R', 'right', scores.right);
 
+    // Punch-fusion block: each signal vs its threshold with PASS/FAIL, plus
+    // whether pose is fresh (fresh = primary+one-secondary rule; stale =
+    // both-secondaries fallback).
+    const fusion = engine.fusionState;
+    lines.push(`fusion  pose ${fusion.left.elbowFresh ? 'FRESH' : 'stale/absent'}`);
+    const fusionLine = (label: string, f: typeof fusion.left): void => {
+      const pf = (v: number, th: number): string =>
+        `${v.toFixed(2)}/${th.toFixed(2)} ${v >= th ? 'PASS' : 'FAIL'}`;
+      lines.push(
+        `  ${label} elbow ${pf(f.elbowVel, f.elbowThreshold)} ` +
+          `speed ${pf(f.wristSpeed, f.speedThreshold)} ` +
+          `bbox ${pf(f.bboxGrowth, f.growthThreshold)}`,
+      );
+    };
+    fusionLine('L', fusion.left);
+    fusionLine('R', fusion.right);
+
     // State machine.
     const lockoutMs = Math.max(0, engine.lockoutUntilT - t);
     lines.push(
@@ -156,7 +187,7 @@ export class DebugHud {
     const th = engine.thresholds;
     lines.push(
       `thresholds  spike ${th.spikeSpeed.toFixed(2)}/${th.spikeGrowth.toFixed(2)} ` +
-        `retract ${th.retractShrink.toFixed(2)}`,
+        `retract ${th.retractShrink.toFixed(2)} elbow ${th.elbowExtendVel.toFixed(2)}`,
     );
     lines.push(
       `  rise ${th.risingUpVel.toFixed(2)} whipVx ${th.whipSwingVx.toFixed(2)} ` +
@@ -166,13 +197,15 @@ export class DebugHud {
     if (profile) {
       lines.push(
         `profile  punch ${profile.peakPunchSpeed.toFixed(2)}u/s ` +
-          `${profile.peakPunchGrowth.toFixed(2)}/s ` +
+          `${profile.peakPunchBboxGrowth.toFixed(2)}/s ` +
           `palm ${profile.peakPalmSpeed.toFixed(2)}u/s ` +
-          `${profile.peakPalmGrowth.toFixed(2)}/s`,
+          `${profile.peakPalmBboxGrowth.toFixed(2)}/s`,
       );
       lines.push(
-        `  neutral ${profile.neutralSpeed.toFixed(3)}u/s ` +
-          `${profile.neutralGrowth.toFixed(3)}/s`,
+        `  elbow ${profile.peakElbowVel.toFixed(2)}rad/s ` +
+          `neutral ${profile.neutralSpeed.toFixed(3)}u/s ` +
+          `${profile.neutralBboxGrowth.toFixed(3)}/s ` +
+          `${profile.neutralElbowVel.toFixed(3)}rad/s`,
       );
     } else {
       lines.push('profile  default');

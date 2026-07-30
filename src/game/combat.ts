@@ -48,7 +48,7 @@
  */
 
 import * as THREE from 'three';
-import type { LandmarkFrame, Vec3 } from '../tracking/types';
+import type { LandmarkFrame, PoseFrame, Vec3 } from '../tracking/types';
 import { EMPOWER_MULTIPLIER, type MoveEvent, type MoveName } from '../gestures/moves';
 import type { Construct, ConstructManager } from './enemies';
 
@@ -134,28 +134,49 @@ const DEFAULT_TICK_MS = 1000 / 30;
 /** Sustain tick dt clamp, seconds (a long hitch must not dump damage). */
 const MAX_TICK_SEC = 0.25;
 
-/** Face-frame samples averaged into the duck baseline when uncalibrated. */
+/** Samples averaged into a duck baseline when uncalibrated. */
 const DUCK_BASELINE_SAMPLES = 45;
 
+/** A torso (pose) sample older than this falls back to the head-y duck. */
+const TORSO_STALE_MS = 1000;
+
 // ---------------------------------------------------------------------------
-// Duck detection (Section 8: head-Y drop > 20% of baseline within 0.4 s)
+// Duck detection (Section 8: body drop > 20% of baseline within 0.4 s)
 // ---------------------------------------------------------------------------
 
 export const DUCK_DROP_FRACTION = 0.2;
 export const DUCK_WINDOW_MS = 400;
-/** Un-ducks once the head is back within this fraction of the baseline. */
+/** Un-ducks once the tracked point is back within this fraction of baseline. */
 export const DUCK_RECOVER_FRACTION = 0.1;
-/** The head must sit at least this far below baseline to count as ducked. */
+/** The point must sit at least this far below baseline to count as ducked. */
 export const DUCK_MIN_ABS_FRACTION = 0.15;
 
 /**
- * Pure duck detector. Head y is normalized screen space where y grows DOWN,
- * so ducking (head physically dropping) means y INCREASES. "Drop > 20% of
- * baseline within 0.4 s" therefore reads: current y minus the smallest y in
- * the trailing 400 ms window exceeds 0.2 * baselineY, with the head actually
- * below the baseline (not just wobbling around it). The ducked state holds
- * until the head returns to within 10% of the baseline, the y-down
- * equivalent of "returns above 90% of the calibrated baseline height".
+ * Torso center y from body pose: the midpoint of the four shoulder/hip
+ * points, normalized screen space (y grows DOWN). The PREFERRED duck input:
+ * the torso is rigid and cannot fake a duck by nodding, while the head-y
+ * fallback (face tracking) can. Pure.
+ */
+export function torsoCenterY(pose: PoseFrame): number {
+  return (
+    (pose.left.shoulder.y +
+      pose.right.shoulder.y +
+      pose.left.hip.y +
+      pose.right.hip.y) /
+    4
+  );
+}
+
+/**
+ * Pure duck detector over any vertical body signal (torso center y from
+ * pose, or head y from face tracking as fallback). y is normalized screen
+ * space where y grows DOWN, so ducking (the body physically dropping) means
+ * y INCREASES. "Drop > 20% of baseline within 0.4 s" therefore reads:
+ * current y minus the smallest y in the trailing 400 ms window exceeds
+ * 0.2 * baselineY, with the point actually below the baseline (not just
+ * wobbling around it). The ducked state holds until the point returns to
+ * within 10% of the baseline, the y-down equivalent of "returns above 90%
+ * of the calibrated baseline height".
  */
 export class DuckDetector {
   private readonly baselineY: number;
@@ -318,7 +339,14 @@ export class CombatSystem {
   private readonly sustainBook = new Map<string, SustainBook>();
   private readonly wiredConstructs = new WeakSet<Construct>();
 
-  private duck: DuckDetector | null = null;
+  // Two duck detectors: torso (pose, preferred) and head (face, fallback).
+  // Each auto-baselines from its own signal because torso center y and head
+  // y live at different heights; isDucked prefers the torso detector while
+  // torso samples are fresh.
+  private torsoDuck: DuckDetector | null = null;
+  private torsoBaselineSamples: number[] = [];
+  private lastTorsoT = -Infinity;
+  private headDuck: DuckDetector | null = null;
   private baselineSamples: number[] = [];
 
   constructor(deps: CombatDeps) {
@@ -337,9 +365,13 @@ export class CombatSystem {
     return this.killCount;
   }
 
-  /** True while the player's head counts as ducked (Section 8). */
+  /** True while the player counts as ducked (Section 8): torso center from
+   *  body pose when fresh, head y as the fallback. */
   get isDucked(): boolean {
-    return this.duck?.isDucked ?? false;
+    if (this.torsoDuck && this.clockMs - this.lastTorsoT <= TORSO_STALE_MS) {
+      return this.torsoDuck.isDucked;
+    }
+    return this.headDuck?.isDucked ?? false;
   }
 
   /** Internal clock, ms. Synced to frame/event timestamps when available. */
@@ -360,6 +392,7 @@ export class CombatSystem {
     if (frame) this.clockMs = Math.max(this.clockMs, frame.t);
     else this.clockMs += dt * 1000;
 
+    if (frame?.pose) this.feedTorso(torsoCenterY(frame.pose), frame.t);
     if (frame?.face) this.feedFace(frame.face.position.y, frame.t);
     this.wireConstructs();
     this.sweepEffectProjectiles();
@@ -625,10 +658,10 @@ export class CombatSystem {
   }
 
   private feedFace(headY: number, tMs: number): void {
-    if (!this.duck) {
+    if (!this.headDuck) {
       const fixed = this.deps.headBaselineY;
       if (fixed !== undefined) {
-        this.duck = new DuckDetector(fixed);
+        this.headDuck = new DuckDetector(fixed);
       } else {
         // Auto-calibrate from the first samples (the calibration screen's
         // stats should provide headBaselineY at integration; this is the
@@ -637,11 +670,25 @@ export class CombatSystem {
         if (this.baselineSamples.length < DUCK_BASELINE_SAMPLES) return;
         let sum = 0;
         for (const y of this.baselineSamples) sum += y;
-        this.duck = new DuckDetector(sum / this.baselineSamples.length);
+        this.headDuck = new DuckDetector(sum / this.baselineSamples.length);
         this.baselineSamples = [];
       }
     }
-    this.duck.update(headY, tMs);
+    this.headDuck.update(headY, tMs);
+  }
+
+  /** Torso duck feed (preferred path): auto-baselines from its own signal. */
+  private feedTorso(torsoY: number, tMs: number): void {
+    if (!this.torsoDuck) {
+      this.torsoBaselineSamples.push(torsoY);
+      if (this.torsoBaselineSamples.length < DUCK_BASELINE_SAMPLES) return;
+      let sum = 0;
+      for (const y of this.torsoBaselineSamples) sum += y;
+      this.torsoDuck = new DuckDetector(sum / this.torsoBaselineSamples.length);
+      this.torsoBaselineSamples = [];
+    }
+    this.lastTorsoT = tMs;
+    this.torsoDuck.update(torsoY, tMs);
   }
 
   // -------------------------------------------------------------------------

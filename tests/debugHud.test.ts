@@ -36,8 +36,31 @@ describe('formatNearMiss', () => {
     ).toBe('WHIP: swingVx 0.90 vs threshold 1.00 FAIL');
   });
 
+  it('names the failing fusion primary by signal', () => {
+    expect(
+      formatNearMiss(rec({ condition: 'elbowVel', value: 2.1, threshold: 3.6 })),
+    ).toBe('JAB: elbowVel 2.10 vs threshold 3.60 FAIL');
+  });
+
+  it('renders the two-pair no-secondary line', () => {
+    expect(
+      formatNearMiss(
+        rec({
+          condition: 'secondary',
+          value: 0.51,
+          threshold: 0.9,
+          value2: 0.4,
+          threshold2: 1.35,
+        }),
+      ),
+    ).toBe('JAB: no secondary: speed 0.51/0.90, growth 0.40/1.35');
+  });
+
   it('never contains em dashes', () => {
     expect(formatNearMiss(rec())).not.toContain('—');
+    expect(
+      formatNearMiss(rec({ condition: 'secondary', value2: 1, threshold2: 2 })),
+    ).not.toContain('—');
   });
 });
 

@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CALIBRATION,
+  REFERENCE_SHOULDER_WIDTH,
   REFERENCE_WRIST_SPAN,
   VELOCITY_SCALE_MAX,
   VELOCITY_SCALE_MIN,
@@ -25,6 +26,7 @@ import {
   LM,
   type HandFrame,
   type LandmarkFrame,
+  type PoseFrame,
   type Vec3,
 } from '../src/tracking/types';
 
@@ -183,6 +185,62 @@ describe('velocityScaleFor', () => {
     expect(velocityScaleFor(0)).toBe(1);
     expect(velocityScaleFor(-1)).toBe(1);
     expect(velocityScaleFor(Number.NaN)).toBe(1);
+  });
+
+  it('prefers the real shoulder width over the wrist-span proxy', () => {
+    expect(velocityScaleFor(REFERENCE_WRIST_SPAN, REFERENCE_SHOULDER_WIDTH)).toBe(1);
+    // A far player: half-size shoulders double the scale even when the
+    // wrist span would have said 1.
+    expect(
+      velocityScaleFor(REFERENCE_WRIST_SPAN, REFERENCE_SHOULDER_WIDTH / 2),
+    ).toBeCloseTo(2, 5);
+    // Degenerate shoulder measurements fall back to the span.
+    expect(velocityScaleFor(REFERENCE_WRIST_SPAN, null)).toBe(1);
+    expect(velocityScaleFor(REFERENCE_WRIST_SPAN / 2, 0)).toBeCloseTo(2, 5);
+    expect(velocityScaleFor(REFERENCE_WRIST_SPAN / 2, Number.NaN)).toBeCloseTo(2, 5);
+    // Shoulder scaling clamps like the span path.
+    expect(velocityScaleFor(1, 0.001)).toBe(VELOCITY_SCALE_MAX);
+  });
+});
+
+describe('shoulder width capture', () => {
+  function withPose(frame: LandmarkFrame, width: number): LandmarkFrame {
+    const arm = (x: number): PoseFrame['left'] => ({
+      shoulder: { x, y: 0.32, z: 0 },
+      elbow: { x, y: 0.48, z: 0 },
+      wrist: { x, y: 0.6, z: 0 },
+      hip: { x, y: 0.66, z: 0 },
+    });
+    const pose: PoseFrame = {
+      t: frame.t,
+      left: arm(0.5 - width / 2),
+      right: arm(0.5 + width / 2),
+      world: null,
+      confidence: 1,
+    };
+    return { ...frame, pose };
+  }
+
+  it('records the median pose shoulder width and uses it for the scale', () => {
+    const frames = bothHandFrames(35).map((f, i) =>
+      withPose(f, 0.3 + (i % 2 === 0 ? 0.02 : -0.02)),
+    );
+    const stats = captureCalibration(frames);
+    expect(stats.shoulderWidth).not.toBeNull();
+    expect(stats.shoulderWidth ?? 0).toBeCloseTo(0.3, 1);
+    expect(stats.velocityScale).toBeCloseTo(
+      REFERENCE_SHOULDER_WIDTH / (stats.shoulderWidth ?? 1),
+      5,
+    );
+  });
+
+  it('leaves shoulderWidth null without pose (wrist-span scale)', () => {
+    const stats = captureCalibration(bothHandFrames(35));
+    expect(stats.shoulderWidth).toBeNull();
+    expect(stats.velocityScale).toBeCloseTo(
+      velocityScaleFor(stats.wristSpan),
+      10,
+    );
   });
 });
 

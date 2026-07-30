@@ -21,6 +21,7 @@ import {
   PLAYER_HIT_BREATH_PENALTY,
   PLAYER_WORLD_POSITION,
   screenAimToWorld,
+  torsoCenterY,
   TWIN_HIT_STOP_MS,
   type EffectsProvider,
   type ProjectileEffectLike,
@@ -33,7 +34,7 @@ import {
   DamageNumberLedger,
   sideBiasFromYaw,
 } from '../src/ui/hud';
-import type { LandmarkFrame } from '../src/tracking/types';
+import type { LandmarkFrame, PoseFrame } from '../src/tracking/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -100,6 +101,27 @@ function faceFrame(tMs: number, headY: number): LandmarkFrame {
       confidence: 1,
     },
   };
+}
+
+/** Body pose whose shoulders sit at torsoY - 0.15 and hips at torsoY + 0.15,
+ *  so torsoCenterY(pose) === torsoY exactly. */
+function bodyPose(tMs: number, torsoY: number): PoseFrame {
+  const arm = (m: number) => ({
+    shoulder: { x: 0.5 + 0.12 * m, y: torsoY - 0.15, z: 0 },
+    elbow: { x: 0.5 + 0.16 * m, y: torsoY, z: 0 },
+    wrist: { x: 0.5 + 0.2 * m, y: torsoY + 0.05, z: 0 },
+    hip: { x: 0.5 + 0.08 * m, y: torsoY + 0.15, z: 0 },
+  });
+  return { t: tMs, left: arm(-1), right: arm(1), world: null, confidence: 1 };
+}
+
+function poseFrame(
+  tMs: number,
+  torsoY: number,
+  headY: number | null = null,
+): LandmarkFrame {
+  const base = headY !== null ? faceFrame(tMs, headY) : { t: tMs, left: null, right: null, face: null };
+  return { ...base, pose: bodyPose(tMs, torsoY) };
 }
 
 async function setup(): Promise<{
@@ -480,6 +502,86 @@ describe('DuckDetector', () => {
     expect(duck.update(0.375, 200)).toBe(true);
     expect(duck.update(0.36, 300)).toBe(true); // still well below baseline
     expect(duck.update(0.32, 400)).toBe(false); // within 10% of baseline again
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Torso duck (body pose preferred, head-y fallback)
+// ---------------------------------------------------------------------------
+
+/** CombatSystem with a construct-free stub manager: duck logic only. */
+function duckOnlyCombat(headBaselineY?: number): CombatSystem {
+  const manager = {
+    constructs: [] as never[],
+    onDeath: null,
+  } as unknown as ConstructManager;
+  return new CombatSystem({
+    manager,
+    effects: makeEffects(),
+    ...(headBaselineY !== undefined ? { headBaselineY } : {}),
+  });
+}
+
+describe('torso duck detection', () => {
+  it('torsoCenterY is the midpoint of the four shoulder/hip points', () => {
+    expect(torsoCenterY(bodyPose(0, 0.45))).toBeCloseTo(0.45, 10);
+  });
+
+  it('ducks on a fast torso drop when pose is present (no face at all)', () => {
+    const combat = duckOnlyCombat();
+    const dt = 1 / 30;
+    let t = 0;
+    // Baseline: 50 samples at torso 0.45.
+    for (let i = 0; i < 50; i++) {
+      combat.update(dt, poseFrame(t, 0.45));
+      t += dt * 1000;
+    }
+    expect(combat.isDucked).toBe(false);
+    // Fast drop: torso down 30% of baseline within ~130 ms.
+    for (let i = 0; i < 4; i++) {
+      combat.update(dt, poseFrame(t, 0.45 + 0.035 * (i + 1)));
+      t += dt * 1000;
+    }
+    expect(combat.isDucked).toBe(true);
+    // Recover.
+    for (let i = 0; i < 4; i++) {
+      combat.update(dt, poseFrame(t, 0.45));
+      t += dt * 1000;
+    }
+    expect(combat.isDucked).toBe(false);
+  });
+
+  it('prefers the torso verdict over the head while pose is fresh', () => {
+    const combat = duckOnlyCombat(0.3);
+    const dt = 1 / 30;
+    let t = 0;
+    for (let i = 0; i < 50; i++) {
+      // Head nods hard (would count as a head-duck) but the torso holds.
+      combat.update(dt, poseFrame(t, 0.45, i < 45 ? 0.3 : 0.39));
+      t += dt * 1000;
+    }
+    expect(combat.isDucked).toBe(false);
+  });
+
+  it('falls back to head y when pose goes stale', () => {
+    const combat = duckOnlyCombat(0.3);
+    const dt = 1 / 30;
+    let t = 0;
+    // Torso present and upright for the baseline window.
+    for (let i = 0; i < 50; i++) {
+      combat.update(dt, poseFrame(t, 0.45, 0.3));
+      t += dt * 1000;
+    }
+    // Pose disappears; after >1 s the head signal decides. Head drops fast.
+    for (let i = 0; i < 40; i++) {
+      combat.update(dt, faceFrame(t, 0.3));
+      t += dt * 1000;
+    }
+    for (let i = 0; i < 4; i++) {
+      combat.update(dt, faceFrame(t, 0.3 + 0.025 * (i + 1)));
+      t += dt * 1000;
+    }
+    expect(combat.isDucked).toBe(true);
   });
 });
 

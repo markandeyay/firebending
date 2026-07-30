@@ -216,14 +216,18 @@ import {
   FilesetResolver,
   HandLandmarker,
   FaceLandmarker,
+  PoseLandmarker,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const POSE_MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker.task";
 
 const FACE_EVERY_N_FRAMES = 4;   // per spec Section 5: face at ~15 Hz
 const FACE_HOLD_MS = 500;        // sample-and-hold window before face goes null
+const POSE_EVERY_N_FRAMES = 2;   // pose at ~15 Hz, matching LiveLandmarkSource
+const POSE_HOLD_MS = 500;        // sample-and-hold window before pose goes null
 // Flip these if the human's head-pose sign check fails; log the change.
 const YAW_SIGN = 1;              // +1 => positive yaw when player looks to their right
 const PITCH_SIGN = 1;            // +1 => positive pitch when player looks up
@@ -325,9 +329,52 @@ function assembleFace(faceResult) {
   return { yaw, pitch, position, confidence: 1 };
 }
 
-/** Assemble one LandmarkFrame exactly per the contract. */
-function assembleFrame(t, hands, face) {
-  return { t, left: hands.left, right: hands.right, face };
+/**
+ * Build an optional PoseFrame from a PoseLandmarker result (see
+ * src/tracking/poseSource.ts for the canonical extraction). Screen joints
+ * mirror x -> 1 - x; world joints (meters, hip-centered) negate x. Pose
+ * landmark indices are ANATOMICAL (11 = person's own left shoulder), so the
+ * left fields fill from the "left" indices directly; after mirroring the
+ * player's left arm draws on the left of the mirrored preview, matching the
+ * hand convention. `t` is the DETECTION time (ms since recording start).
+ */
+function assemblePose(poseResult, tMs) {
+  if (!poseResult) return null;
+  const lms = poseResult.landmarks && poseResult.landmarks[0];
+  if (!lms || lms.length < 25) return null;
+  const world = poseResult.worldLandmarks && poseResult.worldLandmarks[0];
+  const S = { LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16, LH: 23, RH: 24 };
+  const screen = (p) => ({ x: 1 - p.x, y: p.y, z: p.z });
+  const worldV = (p) => ({ x: -p.x, y: p.y, z: p.z });
+  const arm = (pts, side, map) => ({
+    shoulder: map(pts[side === "left" ? S.LS : S.RS]),
+    elbow: map(pts[side === "left" ? S.LE : S.RE]),
+    wrist: map(pts[side === "left" ? S.LW : S.RW]),
+    hip: map(pts[side === "left" ? S.LH : S.RH]),
+  });
+  let vis = 0, visN = 0;
+  for (const i of [S.LS, S.RS, S.LE, S.RE, S.LW, S.RW, S.LH, S.RH]) {
+    const v = lms[i] && lms[i].visibility;
+    if (typeof v === "number" && isFinite(v)) { vis += v; visN++; }
+  }
+  return {
+    t: tMs,
+    left: arm(lms, "left", screen),
+    right: arm(lms, "right", screen),
+    world: world && world.length >= 25
+      ? { left: arm(world, "left", worldV), right: arm(world, "right", worldV) }
+      : null,
+    confidence: visN > 0 ? vis / visN : 1,
+  };
+}
+
+/** Assemble one LandmarkFrame exactly per the contract. The `pose` field is
+ *  OPTIONAL (recording version stays 1); frames without pose omit it and
+ *  old fixtures load unchanged. */
+function assembleFrame(t, hands, face, pose) {
+  const frame = { t, left: hands.left, right: hands.right, face };
+  if (pose) frame.pose = pose;
+  return frame;
 }
 
 // ---------- app state ----------
@@ -339,6 +386,7 @@ const ctx = overlay.getContext("2d");
 
 let handLandmarker = null;
 let faceLandmarker = null;
+let poseLandmarker = null;
 let running = false;
 let frameCounter = 0;
 
@@ -350,6 +398,8 @@ let countdownTimer = null;
 
 let lastFace = null;      // last FaceFrame (sample-and-hold)
 let lastFaceAt = -1e9;    // performance.now() of last face detection
+let lastPose = null;      // last PoseFrame (sample-and-hold)
+let lastPoseAt = -1e9;    // performance.now() of last pose detection
 let fpsEma = 0;
 let lastTick = 0;
 
@@ -404,7 +454,18 @@ async function createLandmarkers(delegate) {
     numFaces: 1,
     outputFacialTransformationMatrixes: true,
   });
-  return { hand, face };
+  let pose = null;
+  try {
+    pose = await PoseLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: POSE_MODEL, delegate },
+      runningMode: "VIDEO",
+      numPoses: 1,
+    });
+  } catch (e) {
+    // Pose is optional in recordings; keep capturing without it.
+    console.warn("PoseLandmarker unavailable, recording without pose", e);
+  }
+  return { hand, face, pose };
 }
 
 async function startCamera() {
@@ -422,6 +483,7 @@ async function startCamera() {
     }
     handLandmarker = pair.hand;
     faceLandmarker = pair.face;
+    poseLandmarker = pair.pose;
 
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
@@ -467,11 +529,19 @@ function loop(now) {
       const face = assembleFace(faceResult);
       if (face) { lastFace = face; lastFaceAt = now; }
     }
+    // Pose on odd frames so it never stacks on a face frame, like the game.
+    if (poseLandmarker && frameCounter % POSE_EVERY_N_FRAMES === 1) {
+      const poseResult = poseLandmarker.detectForVideo(video, now);
+      const tMs = state === "recording" ? Math.round(now - recordStart) : 0;
+      const pose = assemblePose(poseResult, tMs);
+      if (pose) { lastPose = pose; lastPoseAt = now; }
+    }
     const face = (now - lastFaceAt) <= FACE_HOLD_MS ? lastFace : null;
+    const pose = (now - lastPoseAt) <= POSE_HOLD_MS ? lastPose : null;
     const hands = assembleHands(handResult, $("swapHands").checked);
 
     if (state === "recording") {
-      frames.push(assembleFrame(Math.round(now - recordStart), hands, face));
+      frames.push(assembleFrame(Math.round(now - recordStart), hands, face, pose));
       $("frameOut").textContent = String(frames.length);
       $("durOut").textContent = ((now - recordStart) / 1000).toFixed(1) + "s";
     }

@@ -7,6 +7,10 @@
  * AIM SEMANTICS (combat layer contract):
  *   MoveEvent.aim is the normalized SCREEN-SPACE hand velocity at the moment
  *   the move triggered (filtered over the last AIM_WINDOW_FRAMES frames).
+ *   When body pose is FRESH, thrust-family aims (jab / cross / palm-wave /
+ *   stream / fan) blend the forearm direction into the velocity aim (see
+ *   thrustAim and AIM_FOREARM_WEIGHT); twin / rising / whip and every
+ *   pose-absent path keep the pure velocity aim.
  *   Screen space is player space from tracking/types.ts: x grows to the
  *   player's right, y grows DOWN, z is NEGATIVE toward the camera. A punch
  *   thrown at the camera therefore has aim.z < 0 (dominant), an upward sweep
@@ -41,9 +45,10 @@
  * per hand for the jab family).
  */
 
-import type { HandFrame, LandmarkFrame, Vec3 } from '../tracking/types';
+import type { HandFrame, LandmarkFrame, PoseFrame, Vec3 } from '../tracking/types';
 import { LM } from '../tracking/types';
 import { Hysteresis } from '../tracking/filters';
+import { elbowAngle, elbowAngularVelocity } from '../tracking/poseSource';
 import type { Handedness, HandSpeed } from './poses';
 import {
   add,
@@ -57,7 +62,7 @@ import {
   scale,
   HANDS_TOGETHER_THRESHOLD,
 } from './poses';
-import { spanGrowthRate } from './motion';
+import { bboxGrowthRate } from './motion';
 import {
   DEFAULT_PROFILE,
   thresholdsFrom,
@@ -122,13 +127,35 @@ export interface MoveEngineConfig {
  * One near-miss diagnostic record (see MoveEngine.debugEnabled): a move whose
  * trigger was evaluated and failed on a final physical condition while the
  * measured value was at least NEAR_MISS_FRACTION of the threshold.
+ *
+ * Fusion additions: 'elbowVel' reports the pose-fusion PRIMARY signal
+ * failing while pose was fresh; 'secondary' reports the primary passing but
+ * NEITHER secondary crossing, in which case value/threshold carry the speed
+ * pair and value2/threshold2 the bbox-growth pair (both shown by the HUD as
+ * "no secondary: speed a/b, growth c/d").
  */
 export interface NearMissRecord {
   t: number;
   move: MoveName;
-  condition: 'speed' | 'growth' | 'upVel' | 'swingVx';
+  condition: 'speed' | 'growth' | 'upVel' | 'swingVx' | 'elbowVel' | 'secondary';
   value: number;
   threshold: number;
+  /** Second signal pair, only for condition 'secondary'. */
+  value2?: number;
+  threshold2?: number;
+}
+
+/** Live fusion diagnostics for one hand (debug HUD; pulled at HUD rate). */
+export interface FusionState {
+  /** Elbow-extension angular velocity, rad/s (positive = extending). */
+  elbowVel: number;
+  elbowThreshold: number;
+  /** True when a pose sample landed within POSE_FRESH_MS of the last frame. */
+  elbowFresh: boolean;
+  wristSpeed: number;
+  speedThreshold: number;
+  bboxGrowth: number;
+  growthThreshold: number;
 }
 
 /** Debug view of one hand's pose classifier state. */
@@ -162,11 +189,51 @@ export const CONFIDENCE_FLOOR = 0.5;
 // 0.4, AIM_MIN_SPEED 0.5) are gone: every motion trigger now derives from a
 // per-player MotionProfile via thresholdsFrom() (src/gestures/profile.ts).
 // thresholdsFrom(DEFAULT_PROFILE) reproduces those exact values, so fixtures
-// and tests stay deterministic. Toward-camera intent is measured as palm-span
-// GROWTH (src/gestures/motion.ts), not MediaPipe z: apparent-size growth is
-// projective geometry read from the same 2D landmarks the tracker is
-// confident about, while z is a monocular depth guess that is far too noisy
-// on real hands. Retract is span SHRINK.
+// and tests stay deterministic.
+//
+// PUNCH FUSION (three signals, anchored on body pose):
+//   PRIMARY   elbow-extension angular velocity from PoseLandmarker (rad/s,
+//             d(elbow angle)/dt between consecutive POSE SAMPLES, positive =
+//             opening toward straight). Anchored on large stable joints, so
+//             it does not degrade when the fist clenches.
+//   SECONDARY windowed wrist screen-space speed (s.speed.speed).
+//   SECONDARY windowed hand bounding-box-diagonal growth (bboxGrowthRate in
+//             src/gestures/motion.ts). The full-hand bbox replaces palm-span
+//             growth: a clenching fist collapses the palm measurements into
+//             a small noisy cluster, i.e. span growth measured its weakest
+//             quantity exactly when a jab happened; the 21-landmark box
+//             keeps a stable extent through the clench.
+// FIRE RULE: pose fresh (a sample within POSE_FRESH_MS) -> primary AND at
+// least one secondary. Pose absent or stale (replay fixtures, tracking
+// dropouts) -> BOTH secondaries; this documented fallback is exactly the
+// pre-fusion behavior and keeps the synthetic suite meaningful. Retract is
+// bbox SHRINK, or (pose fresh) a fast elbow re-flex. MediaPipe z stays out:
+// it is a monocular depth guess, far too noisy on real hands.
+
+/**
+ * A pose sample this recent (vs the current frame time) counts as fresh and
+ * arms the fusion path; anything older falls back to the two-secondary rule.
+ * Pose runs at ~15 Hz (66 ms) nominally and ~7.5 Hz degraded, so 250 ms
+ * tolerates a missed detection without flapping between rules.
+ */
+export const POSE_FRESH_MS = 250;
+
+/**
+ * A gap between pose samples longer than this resets the elbow-angle
+ * differencing (tracking dropout): the first sample after the gap
+ * re-baselines instead of producing a bogus velocity across the hole.
+ */
+export const ELBOW_RESET_GAP_MS = 500;
+
+/**
+ * Thrust-family aim blend when pose is fresh (TUNABLE): the emitted aim is
+ * normalize(0.6 * forearm direction + 0.4 * velocity aim). The forearm
+ * (elbow -> wrist, screen space, z borrowed from the velocity aim) is where
+ * the player is POINTING, steadier than raw hand velocity; the velocity
+ * fraction keeps flicks responsive. Pose absent: pure velocity aim.
+ */
+export const AIM_FOREARM_WEIGHT = 0.6;
+export const AIM_VELOCITY_WEIGHT = 0.4;
 
 /**
  * Weak secondary z check. When true, a generous toward-camera z velocity is
@@ -295,10 +362,21 @@ class HandState {
   /** Windowed wrist velocity, already velocity-scaled. */
   speed: HandSpeed = ZERO_SPEED;
   /**
-   * Windowed relative palm-span growth, 1/sec. Positive = approaching the
-   * camera, negative = retracting. NOT velocity-scaled (already relative).
+   * Windowed relative hand-bbox-diagonal growth, 1/sec. Positive =
+   * approaching the camera, negative = retracting. NOT velocity-scaled
+   * (already relative). See bboxGrowthRate for why bbox, not palm span.
    */
   growth = 0;
+  /**
+   * Elbow-extension angular velocity for this hand's arm, rad/s, positive =
+   * extending. Differenced on POSE SAMPLE timestamps (pose runs at half
+   * frame rate); held between samples. Gated by pose freshness at use sites.
+   */
+  elbowVel = 0;
+  /** Elbow angle at the last consumed pose sample, radians. */
+  prevElbowAngle = 0;
+  /** Timestamp (ms) of the last consumed pose sample; null before any. */
+  lastPoseSampleT: number | null = null;
   thrust: ThrustRecord | null = null;
   suppressThrustUntil = -Infinity;
   gripStaticMs = 0;
@@ -319,7 +397,9 @@ class HandState {
     this.thrust = null;
     this.gripStaticMs = 0;
     this.whipArmed = false;
-    // jabCooldownUntil survives tracking loss on purpose.
+    // jabCooldownUntil survives tracking loss on purpose. Elbow tracking
+    // (elbowVel / prevElbowAngle / lastPoseSampleT) also survives: it is
+    // pose-driven and independent of hand-landmark presence.
   }
 }
 
@@ -379,6 +459,11 @@ export class MoveEngine {
 
   private combo: Array<{ hand: Handedness; t: number }> = [];
   private empowerUntil = -Infinity;
+
+  /** Latest PoseFrame seen on a frame (null when the source carries none). */
+  private latestPose: PoseFrame | null = null;
+  /** True while the latest pose sample is within POSE_FRESH_MS of frame t. */
+  private poseFresh = false;
 
   private chargeHoldMs = 0;
   private chargeFired = false;
@@ -444,6 +529,23 @@ export class MoveEngine {
     };
   }
 
+  /**
+   * Live fusion diagnostics per hand (debug HUD; called at HUD rate only,
+   * so the per-call allocation is off the hot path).
+   */
+  get fusionState(): { left: FusionState; right: FusionState } {
+    const of = (s: HandState): FusionState => ({
+      elbowVel: s.elbowVel,
+      elbowThreshold: this.th.elbowExtendVel,
+      elbowFresh: this.poseFresh,
+      wristSpeed: s.speed.speed,
+      speedThreshold: this.th.spikeSpeed,
+      bboxGrowth: s.growth,
+      growthThreshold: this.th.spikeGrowth,
+    });
+    return { left: of(this.left), right: of(this.right) };
+  }
+
   /** Debug: lockout expiry timestamp (frame time, ms). */
   get lockoutUntilT(): number {
     return this.lockoutUntil;
@@ -481,6 +583,8 @@ export class MoveEngine {
     condition: NearMissRecord['condition'],
     value: number,
     threshold: number,
+    value2?: number,
+    threshold2?: number,
   ): void {
     let rec = this.nearMissRing[this.nearMissNext];
     if (!rec) {
@@ -493,6 +597,8 @@ export class MoveEngine {
       rec.value = value;
       rec.threshold = threshold;
     }
+    rec.value2 = value2;
+    rec.threshold2 = threshold2;
     this.nearMissNext = (this.nearMissNext + 1) % NEAR_MISS_CAPACITY;
     this.nearMissCount = Math.min(this.nearMissCount + 1, NEAR_MISS_CAPACITY);
   }
@@ -504,6 +610,17 @@ export class MoveEngine {
     const dtMs = this.prevT === null ? 0 : Math.max(0, t - this.prevT);
     this.prevT = t;
     const dtSec = dtMs / 1000;
+
+    // Pose fusion state: freshness plus per-arm elbow angular velocity.
+    // Absent pose (all replay fixtures, tracking dropouts) leaves poseFresh
+    // false and the trigger logic on the documented two-secondary fallback.
+    const pose = frame.pose ?? null;
+    this.latestPose = pose;
+    this.poseFresh = pose !== null && t - pose.t <= POSE_FRESH_MS;
+    if (pose !== null) {
+      this.updateElbow(this.left, pose, 'left');
+      this.updateElbow(this.right, pose, 'right');
+    }
 
     this.updateHand(this.left, frame.left, 'left', dtSec);
     this.updateHand(this.right, frame.right, 'right', dtSec);
@@ -537,6 +654,34 @@ export class MoveEngine {
   // Per-hand tracking
   // -------------------------------------------------------------------------
 
+  /**
+   * Advance one hand's elbow-extension tracking from a PoseFrame. Runs only
+   * when the pose SAMPLE timestamp advances (pose is sample-and-held between
+   * detections at ~15 Hz), and differences the elbow angle on the sample
+   * timestamps, never on frame dt. frame.left pairs with the pose LEFT arm.
+   * Allocation-free: reads joints in place, stores scalars.
+   */
+  private updateElbow(s: HandState, pose: PoseFrame, hand: Handedness): void {
+    if (s.lastPoseSampleT === pose.t) return; // held sample: nothing new
+    // poseWorld (metric, hip-centered) when available, else screen joints.
+    const source = pose.world ?? pose;
+    const arm = hand === 'left' ? source.left : source.right;
+    const angle = elbowAngle(arm.shoulder, arm.elbow, arm.wrist);
+    if (
+      s.lastPoseSampleT !== null &&
+      pose.t - s.lastPoseSampleT <= ELBOW_RESET_GAP_MS
+    ) {
+      const dtSec = (pose.t - s.lastPoseSampleT) / 1000;
+      s.elbowVel = elbowAngularVelocity(s.prevElbowAngle, angle, dtSec);
+    } else {
+      // First sample ever, or a gap: re-baseline instead of inventing a
+      // velocity across the hole.
+      s.elbowVel = 0;
+    }
+    s.prevElbowAngle = angle;
+    s.lastPoseSampleT = pose.t;
+  }
+
   private updateHand(
     s: HandState,
     raw: HandFrame | null,
@@ -564,10 +709,12 @@ export class MoveEngine {
       towardCamera: spRaw.towardCamera * vs,
     };
 
-    // Windowed relative span growth: the toward-camera signal (positive =
-    // approaching) and, negated, the retract signal. Not velocity-scaled:
-    // relative growth is already invariant to distance from the camera.
-    s.growth = spanGrowthRate(s.window, dt);
+    // Windowed relative bbox-diagonal growth: the toward-camera signal
+    // (positive = approaching) and, negated, the retract signal. Not
+    // velocity-scaled: relative growth is already distance-invariant. The
+    // full-hand bbox replaces palm span, which collapsed under a clenched
+    // fist (see gestures/motion.ts).
+    s.growth = bboxGrowthRate(s.window, dt);
 
     const fist = fistScore(raw);
     const palm = palmScore(raw, handedness);
@@ -821,12 +968,37 @@ export class MoveEngine {
       }
     } else if (this.debugEnabled && t >= s.suppressThrustUntil && s.thrust === null) {
       // Near-miss tracing: a would-be thrust that failed its final physical
-      // condition while at least NEAR_MISS_FRACTION of the way there.
+      // condition while at least NEAR_MISS_FRACTION of the way there. The
+      // record names the SPECIFIC failing fusion signal.
       const family = this.thrustFamily(s);
       if (family !== null) {
         const move: MoveName = family === 'fist' ? 'jab-blast' : 'palm-wave';
         const sp = s.speed.speed;
-        if (sp < this.th.spikeSpeed) {
+        if (this.poseFresh) {
+          if (s.elbowVel < this.th.elbowExtendVel) {
+            // The PRIMARY (elbow extension) is what refused the spike.
+            if (s.elbowVel >= NEAR_MISS_FRACTION * this.th.elbowExtendVel) {
+              this.recordNearMiss(t, move, 'elbowVel', s.elbowVel, this.th.elbowExtendVel);
+            }
+          } else {
+            // Primary passed; no secondary crossed. Report both pairs.
+            const frac = Math.max(
+              sp / this.th.spikeSpeed,
+              s.growth / this.th.spikeGrowth,
+            );
+            if (frac >= NEAR_MISS_FRACTION) {
+              this.recordNearMiss(
+                t,
+                move,
+                'secondary',
+                sp,
+                this.th.spikeSpeed,
+                s.growth,
+                this.th.spikeGrowth,
+              );
+            }
+          }
+        } else if (sp < this.th.spikeSpeed) {
           if (sp >= NEAR_MISS_FRACTION * this.th.spikeSpeed) {
             this.recordNearMiss(t, move, 'speed', sp, this.th.spikeSpeed);
           }
@@ -848,9 +1020,10 @@ export class MoveEngine {
     }
 
     // Retract within the hold window resolves to the discrete move. The
-    // retract signal is windowed span SHRINK (the on-screen hand getting
-    // smaller as it pulls back), not +z velocity: see the header note.
-    if (s.growth <= -this.th.retractShrink) {
+    // retract signal is windowed bbox SHRINK (the on-screen hand getting
+    // smaller as it pulls back), not +z velocity; when pose is fresh a fast
+    // elbow RE-FLEX (the arm folding back) also counts as retract.
+    if (this.isRetract(s)) {
       s.thrust = null;
       if (th.family === 'fist') this.emitJab(events, t, hand, s, th);
       else this.emitPalmWave(events, t, hand, s, th);
@@ -862,7 +1035,7 @@ export class MoveEngine {
       s.thrust = null;
       const move: MoveName = th.family === 'fist' ? 'fire-stream' : 'flame-fan';
       const costPerSec = th.family === 'fist' ? STREAM_COST_PER_SEC : FAN_COST_PER_SEC;
-      const aim = this.aimOf(th.aimVel);
+      const aim = this.thrustAim(hand, th.aimVel);
       const emitted = this.emit(events, t, {
         move,
         hand,
@@ -912,7 +1085,7 @@ export class MoveEngine {
       move,
       hand,
       kind: 'trigger',
-      aim: this.aimOf(th.aimVel),
+      aim: this.thrustAim(hand, th.aimVel),
       origin: s.wrist as Vec3,
       completedAt: t,
       cost: 0,
@@ -937,7 +1110,7 @@ export class MoveEngine {
       move: 'palm-wave',
       hand,
       kind: 'trigger',
-      aim: this.aimOf(th.aimVel),
+      aim: this.thrustAim(hand, th.aimVel),
       origin: s.wrist as Vec3,
       completedAt: t,
       cost: 0,
@@ -960,10 +1133,11 @@ export class MoveEngine {
 
     const poseActive =
       s.present && (su.family === 'fist' ? s.fistH.isActive : s.palmH.isActive);
-    // Windowed span shrink: robust against noise over a long hold (the
-    // retract threshold sits well above the measured hold-noise floor);
-    // a real retract crosses it within ~2 frames.
-    const retracting = s.present && s.growth <= -this.th.retractShrink;
+    // Windowed bbox shrink (or, pose fresh, a fast elbow re-flex): robust
+    // against noise over a long hold (the retract threshold sits well above
+    // the measured hold-noise floor); a real retract crosses it within ~2
+    // frames.
+    const retracting = s.present && this.isRetract(s);
     const ended = this.breathValue <= 0 || !poseActive || retracting;
 
     if (ended) {
@@ -1040,14 +1214,34 @@ export class MoveEngine {
   }
 
   /**
-   * Thrust spike: a windowed speed spike WITH span growth (the hand visibly
-   * approaching the camera). Z_TOWARD_SECONDARY optionally OR-s in the old
-   * z-velocity check as a weak secondary signal; it is never required.
+   * Thrust spike, three-signal fusion (see the PUNCH FUSION header note):
+   * - Pose FRESH: the primary (elbow extension angular velocity) must cross
+   *   AND at least one secondary (wrist speed, bbox growth) must cross.
+   * - Pose absent/stale: BOTH secondaries must cross; this is the documented
+   *   fallback, identical to the pre-fusion rule, and is what every replay
+   *   fixture and tracking dropout runs on.
+   * Z_TOWARD_SECONDARY optionally OR-s in the old z-velocity check as a weak
+   * extra secondary; it is never required.
    */
   private isSpike(s: HandState): boolean {
-    if (s.speed.speed < this.th.spikeSpeed) return false;
-    if (s.growth >= this.th.spikeGrowth) return true;
-    return Z_TOWARD_SECONDARY && s.speed.towardCamera >= Z_TOWARD_SECONDARY_MIN;
+    const speedOk = s.speed.speed >= this.th.spikeSpeed;
+    const growthOk = s.growth >= this.th.spikeGrowth;
+    const zOk = Z_TOWARD_SECONDARY && s.speed.towardCamera >= Z_TOWARD_SECONDARY_MIN;
+    if (this.poseFresh) {
+      if (s.elbowVel < this.th.elbowExtendVel) return false;
+      return speedOk || growthOk || zOk;
+    }
+    return speedOk && (growthOk || zOk);
+  }
+
+  /**
+   * Retract: windowed bbox shrink (the on-screen hand getting smaller as it
+   * pulls back), or, when pose is fresh, the elbow re-flexing fast
+   * (angular velocity at or below the negated extension threshold).
+   */
+  private isRetract(s: HandState): boolean {
+    if (s.growth <= -this.th.retractShrink) return true;
+    return this.poseFresh && s.elbowVel <= -this.th.elbowExtendVel;
   }
 
   /** Normalized aim from a velocity, with the forward fallback (see header). */
@@ -1060,6 +1254,36 @@ export class MoveEngine {
       return AIM_FORWARD;
     }
     return n;
+  }
+
+  /**
+   * Thrust-family aim (jab / cross / palm-wave / stream / fan): when pose is
+   * fresh, blend the forearm direction (elbow -> wrist, screen space, z
+   * borrowed from the velocity aim since 2D pose says nothing about depth)
+   * with the velocity aim at AIM_FOREARM_WEIGHT / AIM_VELOCITY_WEIGHT
+   * (tunable, see the constants). Pose absent: pure velocity aim, exactly
+   * as before. Twin / rising / whip keep the velocity aim regardless.
+   */
+  private thrustAim(hand: Handedness, aimVel: Vec3): Vec3 {
+    const velAim = this.aimOf(aimVel);
+    const pose = this.latestPose;
+    if (!this.poseFresh || pose === null) return velAim;
+    const arm = hand === 'left' ? pose.left : pose.right;
+    const dx = arm.wrist.x - arm.elbow.x;
+    const dy = arm.wrist.y - arm.elbow.y;
+    const planarLen = Math.sqrt(dx * dx + dy * dy);
+    if (planarLen < 1e-6) return velAim;
+    // Unit forearm vector whose z matches the velocity aim's z; the xy part
+    // is scaled so the whole vector stays unit length.
+    const planarScale = Math.sqrt(Math.max(0, 1 - velAim.z * velAim.z));
+    const blended = normalize({
+      x: AIM_FOREARM_WEIGHT * ((dx / planarLen) * planarScale) + AIM_VELOCITY_WEIGHT * velAim.x,
+      y: AIM_FOREARM_WEIGHT * ((dy / planarLen) * planarScale) + AIM_VELOCITY_WEIGHT * velAim.y,
+      // Both terms borrow the velocity aim's z, so the blend keeps it as is.
+      z: velAim.z,
+    });
+    if (blended.x === 0 && blended.y === 0 && blended.z === 0) return velAim;
+    return blended;
   }
 
   private thrustFamily(s: HandState): PoseFamily | null {

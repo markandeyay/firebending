@@ -10,15 +10,22 @@
  *
  * MOTION STEPS (live path only, ctx.motionSteps === true): after the stats
  * capture the ritual continues into two motion-capture steps that build a
- * per-player MotionProfile (src/gestures/profile.ts):
- *   1. "Throw three punches."     peak punch speed + span growth
- *   2. "Push your palms forward." peak palm speed + span growth
- * A live ink-brush meter shows the current windowed wrist speed and span
- * growth with a peak marker and a "1 of 3" counter. A stored profile skips
- * both steps (fast reload); pressing R clears it and runs them. A step that
- * detects nothing for 20 seconds falls back to DEFAULT_PROFILE so the player
- * is never trapped. Replay/test paths (motionSteps unset) keep the classic
- * behavior and promise semantics exactly: complete right after the capture.
+ * per-player MotionProfile v2 (src/gestures/profile.ts):
+ *   1. "Throw three punches."     peak punch speed + bbox growth + peak
+ *                                 elbow-extension angular velocity (median
+ *                                 of 3), plus the neutral elbow velocity
+ *                                 from the still lead-in
+ *   2. "Push your palms forward." peak palm speed + bbox growth
+ * A live ink-brush meter shows the three fusion signals (windowed wrist
+ * speed, bbox growth, elbow angular velocity) with peak markers and a
+ * "1 of 3" counter. The step works with or without body pose: when pose
+ * never appears the elbow fields fall back to DEFAULT_PROFILE values. A
+ * stored profile skips both steps (fast reload); pressing R clears it and
+ * runs them (a stale v1 profile fails validation and forces the steps). A
+ * step that detects nothing for 20 seconds falls back to DEFAULT_PROFILE so
+ * the player is never trapped. Replay/test paths (motionSteps unset) keep
+ * the classic behavior and promise semantics exactly: complete right after
+ * the capture.
  *
  * The screen then resolves its `calibrated` promise and calls ctx.onComplete
  * with the stats and the profile; the orchestrator transitions out with the
@@ -35,7 +42,8 @@ import {
   type CalibrationStats,
 } from '../gestures/calibrationStats';
 import { handSpeed } from '../gestures/poses';
-import { spanGrowthRate } from '../gestures/motion';
+import { bboxGrowthRate } from '../gestures/motion';
+import { elbowAngle, elbowAngularVelocity } from '../tracking/poseSource';
 import {
   DEFAULT_PROFILE,
   clearProfile,
@@ -85,7 +93,7 @@ const MOTION_WINDOW_FRAMES = 6;
 export const NEUTRAL_SAMPLE_MS = 800;
 /** A punch must exceed max(this, 4x neutral speed) windowed speed. */
 export const PUNCH_SPEED_FLOOR = 0.6;
-/** A push must exceed max(this, 4x neutral growth) windowed span growth. */
+/** A push must exceed max(this, 4x neutral growth) windowed bbox growth. */
 export const PUSH_GROWTH_FLOOR = 0.8;
 /** Multiplier over the measured neutral baseline for event detection. */
 export const DETECT_NEUTRAL_MULT = 4;
@@ -103,6 +111,9 @@ export const NOTICE_MS = 2000;
 /** Meter display scales: full bar at these values. */
 const METER_SPEED_FULL = 3.0; // normalized units/sec
 const METER_GROWTH_FULL = 5.0; // 1/sec
+const METER_ELBOW_FULL = 12.0; // rad/s
+/** A pose-sample gap beyond this re-baselines the elbow differencing. */
+const ELBOW_GAP_MS = 500;
 
 /** Resting positions for the hand outlines before tracking locks on. */
 const REST_LEFT = { x: 0.32, y: 0.55 };
@@ -158,6 +169,8 @@ export class CalibrationScreen implements Screen {
   private speedPeakEl: HTMLElement | null = null;
   private growthFillEl: HTMLElement | null = null;
   private growthPeakEl: HTMLElement | null = null;
+  private elbowFillEl: HTMLElement | null = null;
+  private elbowPeakEl: HTMLElement | null = null;
   private countEl: HTMLElement | null = null;
 
   // Motion step state (frame-driven).
@@ -169,21 +182,33 @@ export class CalibrationScreen implements Screen {
   private prevFrameT: number | null = null;
   private neutralSpeedSamples: number[] = [];
   private neutralGrowthSamples: number[] = [];
+  private neutralElbowSamples: number[] = [];
   private neutralSpeed = 0;
   private neutralGrowth = 0;
+  private neutralElbowVel = 0;
   private baselineDone = false;
-  /** Recent (t, speed, growth) samples for the +-250 ms peak pairing. */
-  private recent: Array<{ t: number; speed: number; growth: number }> = [];
+  /** Recent (t, speed, growth, elbow) samples for the +-250 ms peak pairing. */
+  private recent: Array<{ t: number; speed: number; growth: number; elbow: number }> = [];
   private tracking = false; // inside a candidate event (above threshold)
   private localPeak = 0;
   private localPeakT = 0;
   private pending: PeakPending[] = [];
   private keyPeaks: number[] = [];
   private pairPeaks: number[] = [];
+  private elbowPeaks: number[] = [];
   private punchSpeeds: number[] = [];
   private punchGrowths: number[] = [];
+  private punchElbows: number[] = [];
   private stepPeakSpeed = 0;
   private stepPeakGrowth = 0;
+  private stepPeakElbow = 0;
+  // Elbow-extension tracking from body pose (works without pose: all zeros).
+  private lastPoseSampleT: number | null = null;
+  private prevElbowAngleL = 0;
+  private prevElbowAngleR = 0;
+  private elbowVelL = 0;
+  private elbowVelR = 0;
+  private sawPose = false;
   /** Set by the R key: ignore any stored profile this run. */
   private recalibrateRequested = false;
 
@@ -222,6 +247,8 @@ export class CalibrationScreen implements Screen {
     this.resetMotionState();
     this.punchSpeeds = [];
     this.punchGrowths = [];
+    this.punchElbows = [];
+    this.sawPose = false;
     this.recalibrateRequested = false;
 
     root.classList.add('fb-cal');
@@ -288,6 +315,8 @@ export class CalibrationScreen implements Screen {
     this.speedPeakEl = null;
     this.growthFillEl = null;
     this.growthPeakEl = null;
+    this.elbowFillEl = null;
+    this.elbowPeakEl = null;
     this.countEl = null;
   }
 
@@ -400,6 +429,7 @@ export class CalibrationScreen implements Screen {
     this.prevFrameT = null;
     this.neutralSpeedSamples = [];
     this.neutralGrowthSamples = [];
+    this.neutralElbowSamples = [];
     this.baselineDone = false;
     this.recent = [];
     this.tracking = false;
@@ -408,8 +438,13 @@ export class CalibrationScreen implements Screen {
     this.pending = [];
     this.keyPeaks = [];
     this.pairPeaks = [];
+    this.elbowPeaks = [];
     this.stepPeakSpeed = 0;
     this.stepPeakGrowth = 0;
+    this.stepPeakElbow = 0;
+    this.lastPoseSampleT = null;
+    this.elbowVelL = 0;
+    this.elbowVelR = 0;
   }
 
   private requestRecalibrate(): void {
@@ -428,6 +463,7 @@ export class CalibrationScreen implements Screen {
     this.lastDetectionT = t;
     this.neutralSpeed = 0;
     this.neutralGrowth = 0;
+    this.neutralElbowVel = 0;
     this.setText('Throw three punches.');
     this.meterEl?.classList.add('is-on');
     this.setCount(0, PUNCHES_REQUIRED);
@@ -436,15 +472,43 @@ export class CalibrationScreen implements Screen {
   private startPushStep(t: number): void {
     const nSpeed = this.neutralSpeed;
     const nGrowth = this.neutralGrowth;
+    const nElbow = this.neutralElbowVel;
     this.resetMotionState();
     this.phase = 'pushes';
     this.neutralSpeed = nSpeed; // baselines carry over from the punch step
     this.neutralGrowth = nGrowth;
+    this.neutralElbowVel = nElbow;
     this.baselineDone = true;
     this.stepStartT = t;
     this.lastDetectionT = t;
     this.setText('Push your palms forward.');
     this.setCount(0, PUSHES_REQUIRED);
+  }
+
+  /**
+   * Advance the elbow-extension signal from body pose. Differencing runs on
+   * pose SAMPLE timestamps (pose is sample-and-held at ~15 Hz); between
+   * samples the last velocity holds. Without pose everything stays 0 and the
+   * profile's elbow fields fall back to defaults in finishSteps.
+   */
+  private updateElbowSignal(frame: LandmarkFrame): void {
+    const pose = frame.pose ?? null;
+    if (!pose || pose.t === this.lastPoseSampleT) return;
+    this.sawPose = true;
+    const src = pose.world ?? pose;
+    const angleL = elbowAngle(src.left.shoulder, src.left.elbow, src.left.wrist);
+    const angleR = elbowAngle(src.right.shoulder, src.right.elbow, src.right.wrist);
+    if (this.lastPoseSampleT !== null && pose.t - this.lastPoseSampleT <= ELBOW_GAP_MS) {
+      const dtSec = (pose.t - this.lastPoseSampleT) / 1000;
+      this.elbowVelL = elbowAngularVelocity(this.prevElbowAngleL, angleL, dtSec);
+      this.elbowVelR = elbowAngularVelocity(this.prevElbowAngleR, angleR, dtSec);
+    } else {
+      this.elbowVelL = 0; // first sample or a gap: re-baseline
+      this.elbowVelR = 0;
+    }
+    this.prevElbowAngleL = angleL;
+    this.prevElbowAngleR = angleR;
+    this.lastPoseSampleT = pose.t;
   }
 
   /** One frame of a motion step: signals, meter, detection, timeouts. */
@@ -461,8 +525,11 @@ export class CalibrationScreen implements Screen {
     const right = this.pushWindow(this.rightWindow, frame.right, dtSec);
     const speed = Math.max(left.speed, right.speed);
     const growth = Math.max(left.growth, right.growth);
+    this.updateElbowSignal(frame);
+    // Extension is positive; the stronger arm drives the punch signal.
+    const elbow = Math.max(this.elbowVelL, this.elbowVelR, 0);
 
-    this.recent.push({ t, speed, growth });
+    this.recent.push({ t, speed, growth, elbow });
     while (this.recent.length > 0) {
       const oldest = this.recent[0];
       if (oldest && t - oldest.t > 2 * PEAK_PAIR_WINDOW_MS + 200) {
@@ -480,17 +547,23 @@ export class CalibrationScreen implements Screen {
       if (t - this.stepStartT <= NEUTRAL_SAMPLE_MS) {
         this.neutralSpeedSamples.push(speed);
         this.neutralGrowthSamples.push(Math.abs(growth));
-        this.updateMeter(speed, growth);
+        // Neutral elbow velocity: the still lead-in, both arms, absolute.
+        this.neutralElbowSamples.push(
+          Math.max(Math.abs(this.elbowVelL), Math.abs(this.elbowVelR)),
+        );
+        this.updateMeter(speed, growth, elbow);
         return; // detection starts after the baseline window
       }
       this.neutralSpeed = median(this.neutralSpeedSamples);
       this.neutralGrowth = median(this.neutralGrowthSamples);
+      this.neutralElbowVel = median(this.neutralElbowSamples);
       this.neutralSpeedSamples = [];
       this.neutralGrowthSamples = [];
+      this.neutralElbowSamples = [];
       this.baselineDone = true;
     }
 
-    // The keyed signal: speed for punches, span growth for pushes.
+    // The keyed signal: speed for punches, bbox growth for pushes.
     const key = isPunches ? speed : growth;
     const threshold = isPunches
       ? Math.max(PUNCH_SPEED_FLOOR, DETECT_NEUTRAL_MULT * this.neutralSpeed)
@@ -518,28 +591,33 @@ export class CalibrationScreen implements Screen {
     }
 
     // Finalize pending events once their +-250 ms pairing window closed:
-    // pair the keyed peak with the other signal's max inside that window.
+    // pair the keyed peak with the other signals' max inside that window
+    // (punches also capture the elbow-extension peak per punch).
     for (let i = this.pending.length - 1; i >= 0; i--) {
       const p = this.pending[i];
       if (!p || t - p.tPeak < PEAK_PAIR_WINDOW_MS) continue;
       let pairMax = 0;
+      let elbowMax = 0;
       for (const sample of this.recent) {
         if (Math.abs(sample.t - p.tPeak) <= PEAK_PAIR_WINDOW_MS) {
           pairMax = Math.max(pairMax, isPunches ? sample.growth : sample.speed);
+          elbowMax = Math.max(elbowMax, sample.elbow);
         }
       }
       this.keyPeaks.push(p.keyPeak);
       this.pairPeaks.push(pairMax);
+      this.elbowPeaks.push(elbowMax);
       this.pending.splice(i, 1);
     }
 
-    this.updateMeter(speed, growth);
+    this.updateMeter(speed, growth, elbow);
 
     // Step advancement (after all events finalized, not just registered).
     if (this.keyPeaks.length >= required) {
       if (isPunches) {
         this.punchSpeeds = this.keyPeaks;
         this.punchGrowths = this.pairPeaks;
+        this.punchElbows = this.elbowPeaks;
         this.startPushStep(t);
       } else {
         this.finishSteps();
@@ -556,16 +634,25 @@ export class CalibrationScreen implements Screen {
     }
   }
 
-  /** Build the profile from both steps, persist it, and complete. */
+  /** Build the v2 profile from both steps, persist it, and complete. */
   private finishSteps(): void {
+    // Elbow fields need body pose; a poseless capture (older devices, pose
+    // model failed to load) falls back to the defaults so the profile stays
+    // usable and the engine's no-pose fallback rule carries the play.
+    const elbowPeak = median(this.punchElbows);
+    const haveElbow = this.sawPose && elbowPeak > 0;
     const profile: MotionProfile = {
-      version: 1,
+      version: 2,
       peakPunchSpeed: median(this.punchSpeeds),
-      peakPunchGrowth: median(this.punchGrowths),
-      peakPalmGrowth: median(this.keyPeaks),
+      peakPunchBboxGrowth: median(this.punchGrowths),
+      peakPalmBboxGrowth: median(this.keyPeaks),
       peakPalmSpeed: median(this.pairPeaks),
+      peakElbowVel: haveElbow ? elbowPeak : DEFAULT_PROFILE.peakElbowVel,
+      neutralElbowVel: haveElbow
+        ? this.neutralElbowVel
+        : DEFAULT_PROFILE.neutralElbowVel,
       neutralSpeed: this.neutralSpeed,
-      neutralGrowth: this.neutralGrowth,
+      neutralBboxGrowth: this.neutralGrowth,
       capturedAt: new Date().toISOString(),
     };
     saveProfile(profile);
@@ -586,7 +673,9 @@ export class CalibrationScreen implements Screen {
     if (window.length > MOTION_WINDOW_FRAMES) window.shift();
     return {
       speed: handSpeed(window, dtSec).speed,
-      growth: spanGrowthRate(window, dtSec),
+      // Bbox growth, matching the move engine's fusion secondary (palm span
+      // collapses under a clenched fist; see gestures/motion.ts).
+      growth: bboxGrowthRate(window, dtSec),
     };
   }
 
@@ -618,10 +707,13 @@ export class CalibrationScreen implements Screen {
 
     const speedRow = row('SPEED');
     const growthRow = row('GROWTH');
+    const elbowRow = row('ELBOW');
     this.speedFillEl = speedRow.fill;
     this.speedPeakEl = speedRow.peak;
     this.growthFillEl = growthRow.fill;
     this.growthPeakEl = growthRow.peak;
+    this.elbowFillEl = elbowRow.fill;
+    this.elbowPeakEl = elbowRow.peak;
 
     const count = document.createElement('div');
     count.className = 'fb-cal-meter-count';
@@ -632,9 +724,14 @@ export class CalibrationScreen implements Screen {
     this.meterEl = meter;
   }
 
-  private updateMeter(speed: number, growth: number): void {
+  /**
+   * Live fusion meter: all three signals with peak markers; the strongest
+   * (largest normalized fill) is what the player sees surge on a punch.
+   */
+  private updateMeter(speed: number, growth: number, elbow: number): void {
     this.stepPeakSpeed = Math.max(this.stepPeakSpeed, speed);
     this.stepPeakGrowth = Math.max(this.stepPeakGrowth, growth);
+    this.stepPeakElbow = Math.max(this.stepPeakElbow, elbow);
     const pct = (value: number, full: number): string =>
       `${(Math.min(Math.max(value, 0) / full, 1) * 100).toFixed(1)}%`;
     if (this.speedFillEl) {
@@ -648,6 +745,12 @@ export class CalibrationScreen implements Screen {
     }
     if (this.growthPeakEl) {
       this.growthPeakEl.style.left = pct(this.stepPeakGrowth, METER_GROWTH_FULL);
+    }
+    if (this.elbowFillEl) {
+      this.elbowFillEl.style.width = pct(elbow, METER_ELBOW_FULL);
+    }
+    if (this.elbowPeakEl) {
+      this.elbowPeakEl.style.left = pct(this.stepPeakElbow, METER_ELBOW_FULL);
     }
   }
 
