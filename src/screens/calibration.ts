@@ -32,6 +32,11 @@ export interface CalibrationContext {
   stream?: MediaStream;
   /** Called once with the captured stats. The `calibrated` promise also resolves. */
   onComplete?: (stats: CalibrationStats) => void;
+  /**
+   * Called once when both hands gate in and the outlines ignite (the whoosh
+   * moment). Added at T062 integration so the flow can fire engine.ignite().
+   */
+  onIgnite?: () => void;
 }
 
 /** Length of the stat capture window after ignition, in frame time. */
@@ -184,6 +189,7 @@ export class CalibrationScreen implements Screen {
   }
 
   private ignite(frame: LandmarkFrame): void {
+    this.ctx?.onIgnite?.();
     this.phase = 'capturing';
     this.captureStartT = frame.t;
     this.captured = [frame];

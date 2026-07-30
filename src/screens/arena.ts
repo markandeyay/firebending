@@ -62,6 +62,7 @@ import { CameraRig } from '../game/cameraRig';
 import {
   ConstructManager,
   createPhysicsWorld,
+  type CoalProjectile,
   type Construct,
   type PhysicsWorld,
 } from '../game/enemies';
@@ -78,6 +79,7 @@ import { FireSystem } from '../vfx/fire';
 import { MoveEffects } from '../vfx/moveEffects';
 import { ImpactSystem } from '../vfx/impact';
 import { HUD } from '../ui/hud';
+import { EmpowerGlow } from '../ui/empowerGlow';
 
 // ---------------------------------------------------------------------------
 // Audio seam (see module header). The orchestrator wires the real hooks.
@@ -97,6 +99,12 @@ export interface AudioHooks {
   /** Camera travel toward construct `index` began / arrived. */
   onTravelStart?(index: number): void;
   onTravelEnd?(index: number): void;
+  /** A tier 2 construct lobbed a coal; flight time in seconds (T062). */
+  onCoalLob?(flightTimeSec: number): void;
+  /** An in-flight coal burst against the Rising Flame wall (T062). */
+  onCoalBlocked?(): void;
+  /** An in-flight coal completed its arc and landed (T062). */
+  onCoalLanded?(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +247,10 @@ export class ArenaScreen implements Screen {
   private engine: MoveEngine | null = null;
   private combat: CombatSystem | null = null;
   private hud: HUD | null = null;
+  private glow: EmpowerGlow | null = null;
+  /** Coal audio bookkeeping (T062): coals already reported as lobbed. */
+  private readonly seenCoals = new WeakSet<CoalProjectile>();
+  private trackedCoals: CoalProjectile[] = [];
   private director: Director | null = null;
   private filtered: FilteredSource | null = null;
   private detachFrames: (() => void) | null = null;
@@ -331,6 +343,7 @@ export class ArenaScreen implements Screen {
       },
       wallActiveUntil: () => (fx.activeWall ? fx.activeWall.until : null),
     };
+    this.glow = new EmpowerGlow(root); // under the HUD in paint order
     this.hud = new HUD(root);
     const hud = this.hud;
     const engine = this.engine;
@@ -410,6 +423,9 @@ export class ArenaScreen implements Screen {
     this.director = null;
     this.hud?.dispose();
     this.hud = null;
+    this.glow?.dispose();
+    this.glow = null;
+    this.trackedCoals = [];
     this.fx?.dispose();
     this.fx = null;
     this.impacts?.dispose();
@@ -503,6 +519,10 @@ export class ArenaScreen implements Screen {
     this.fire?.update(dt);
     this.impacts?.update(dt);
     this.arena?.update(dt, this.elapsed);
+    this.pollCoals();
+
+    // Breath Charge empowerment glow follows the exposed charge window.
+    this.glow?.update(this.fx !== null && this.fx.chargeActive !== null, rawDt);
 
     // Camera and pacing on wall-clock time.
     this.director?.update(rawDt);
@@ -565,5 +585,44 @@ export class ArenaScreen implements Screen {
     }
 
     hud.update(rawDt);
+  }
+
+  /**
+   * Coal audio pass-throughs (T062, append-only): the combat layer owns coal
+   * resolution but exposes no events, so the screen diffs the constructs'
+   * projectile lists once per frame. A newly seen coal fires onCoalLob; a
+   * coal that vanished after completing its flight landed (onCoalLanded);
+   * one removed mid-flight was blocked by the Rising Flame wall
+   * (onCoalBlocked). Counts are tiny (a handful of coals at most).
+   */
+  private pollCoals(): void {
+    const manager = this.manager;
+    if (!manager) return;
+    for (const construct of manager.constructs) {
+      for (const coal of construct.projectiles) {
+        if (this.seenCoals.has(coal)) continue;
+        this.seenCoals.add(coal);
+        this.trackedCoals.push(coal);
+        this.audio.onCoalLob?.(coal.flightTime);
+      }
+    }
+    for (let i = this.trackedCoals.length - 1; i >= 0; i--) {
+      const coal = this.trackedCoals[i];
+      if (!coal) {
+        this.trackedCoals.splice(i, 1);
+        continue;
+      }
+      let present = false;
+      for (const construct of manager.constructs) {
+        if (construct.projectiles.includes(coal)) {
+          present = true;
+          break;
+        }
+      }
+      if (present) continue;
+      this.trackedCoals.splice(i, 1);
+      if (coal.age >= coal.flightTime) this.audio.onCoalLanded?.();
+      else this.audio.onCoalBlocked?.();
+    }
   }
 }
