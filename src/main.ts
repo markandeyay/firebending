@@ -89,7 +89,11 @@ switch (routeFor(params)) {
     mountPerfGate(app);
     break;
   case 'arena-replay':
-    void bootArenaReplay(app, replayFixtureUrl(params.get('replay') ?? 'jab-right'));
+    void bootArenaReplay(
+      app,
+      replayFixtureUrl(params.get('replay') ?? 'jab-right'),
+      params.get('shot'),
+    );
     break;
   case 'title-flow-replay':
     void bootGameFlow(app, params.get('replay'));
@@ -221,13 +225,19 @@ async function bootGameFlow(
  * input, skipping title/calibration. DEFAULT_CALIBRATION plus the replay-path
  * velocity compensation (REPLAY_VELOCITY_SCALE; see movesDebug.ts).
  */
-async function bootArenaReplay(root: HTMLElement, replayUrl: string): Promise<void> {
+async function bootArenaReplay(
+  root: HTMLElement,
+  replayUrl: string,
+  shot: string | null = null,
+): Promise<void> {
   const replay = await ReplaySource.load(replayUrl);
   const screen = new ArenaScreen();
+  const shotIndex = shot !== null ? Number.parseInt(shot, 10) : Number.NaN;
   await screen.enter(root, {
     source: new LoopingReplaySource(replay),
     stats: DEFAULT_CALIBRATION,
     velocityScale: REPLAY_VELOCITY_SCALE,
+    ...(Number.isFinite(shotIndex) ? { shot: shotIndex } : {}),
   });
 }
 

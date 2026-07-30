@@ -58,7 +58,7 @@ import {
   type CalibrationStats,
 } from '../gestures/calibrationStats';
 import { buildArena, type Arena } from '../game/arena';
-import { CameraRig } from '../game/cameraRig';
+import { CameraRig, SHOT_POSES } from '../game/cameraRig';
 import {
   ConstructManager,
   createPhysicsWorld,
@@ -132,6 +132,11 @@ export interface ArenaContext {
    * the MoveEngine; absent (replay paths) DEFAULT_PROFILE applies.
    */
   profile?: MotionProfile;
+  /**
+   * Screenshot-harness camera lock (tools/shots.ts): index into SHOT_POSES.
+   * The rig pins to that pose and skips travel/parallax/shake entirely.
+   */
+  shot?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +300,7 @@ export class ArenaScreen implements Screen {
   private ctxProfile: MotionProfile | null = null;
 
   // Frame state (reused, no per-frame allocation).
+  private renderedFrames = 0;
   private readonly clock = new THREE.Clock();
   private elapsed = 0;
   private latestFrame: LandmarkFrame | null = null;
@@ -350,6 +356,8 @@ export class ArenaScreen implements Screen {
     // --- World systems -----------------------------------------------------
     this.arena = buildArena(scene);
     this.rig = new CameraRig(camera);
+    const shotPose = context.shot !== undefined ? SHOT_POSES[context.shot] : undefined;
+    if (shotPose) this.rig.lockForShot(shotPose.position, shotPose.look);
     this.physics = await createPhysicsWorld();
     if (this.disposed) {
       // exit() raced the rapier init; tear down what enter built so far.
@@ -631,6 +639,13 @@ export class ArenaScreen implements Screen {
   }
 
   private tick(): void {
+    // Screenshot-harness stability signal: after 90 rendered frames the
+    // scene is warmed (lights settled, first particles alive) and
+    // tools/shots.ts may capture.
+    this.renderedFrames++;
+    if (this.renderedFrames === 90) {
+      (window as unknown as { __FB_READY?: boolean }).__FB_READY = true;
+    }
     const renderer = this.renderer;
     const camera = this.camera;
     const scene = this.scene;

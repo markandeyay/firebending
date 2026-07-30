@@ -52,6 +52,21 @@ const HOME_POSITION = new THREE.Vector3(0, 1.5, 0.6);
 const HOME_LOOK = new THREE.Vector3(0, 1.1, -6);
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+/**
+ * Fixed screenshot poses for the Phase-0 capture harness (tools/shots.ts,
+ * `npm run shots`). Deterministic: a locked rig skips travel, parallax,
+ * breathing and shake so before/after screenshots are pixel-comparable.
+ * 1 = gameplay POV, 2 = three-quarter side across the lane, 3 = low hero
+ * close-up on the construct.
+ */
+export const SHOT_POSES: Readonly<
+  Record<number, { position: [number, number, number]; look: [number, number, number] }>
+> = {
+  1: { position: [0, 1.5, 0.6], look: [0, 1.1, -6] },
+  2: { position: [4.2, 2.2, -2.5], look: [0, 1.2, -5] },
+  3: { position: [-1.6, 0.9, -3.8], look: [0, 1.4, -6] },
+};
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const TWO_PI = Math.PI * 2;
@@ -117,6 +132,7 @@ export class CameraRig {
   private travel: TravelState | null = null;
   private travelCount = 0;
   private yawSign: number = PARALLAX_YAW_SIGN;
+  private shotLocked = false;
 
   private shakes: ShakeState[] = [];
   private shakeSeed = 0x9e3779b9;
@@ -160,6 +176,20 @@ export class CameraRig {
    *  eases to the re-signed target over PARALLAX_TAU, so no camera snap. */
   set parallaxYawSign(sign: number) {
     this.yawSign = sign >= 0 ? 1 : -1;
+  }
+
+  /**
+   * Pin the camera to a fixed pose for deterministic screenshots. While
+   * locked, update() applies the base pose verbatim (no travel, parallax,
+   * breathing or shake) and travelTo() resolves immediately.
+   */
+  lockForShot(position: [number, number, number], look: [number, number, number]): void {
+    this.basePos.set(position[0], position[1], position[2]);
+    this.baseLook.set(look[0], look[1], look[2]);
+    this.shotLocked = true;
+    this.refreshBaseQuat();
+    this.camera.position.copy(this.basePos);
+    this.camera.quaternion.copy(this.baseQuat);
   }
 
   /** Debug view of the smoothed parallax delta currently applied (Task 4 HUD). */
@@ -242,6 +272,7 @@ export class CameraRig {
    * new spline starts from wherever the base pose currently is.
    */
   travelTo(targetAnchor: THREE.Vector3, opts: TravelOptions = {}): Promise<void> {
+    if (this.shotLocked) return Promise.resolve();
     const duration = THREE.MathUtils.clamp(opts.durationSec ?? 2.5, 2, 3);
     const viewDistance = opts.viewDistance ?? 5.5;
     const eyeHeight = opts.eyeHeight ?? 1.5;
@@ -330,6 +361,11 @@ export class CameraRig {
    * onto the camera. Call once per frame with the frame's dt in seconds.
    */
   update(dt: number): void {
+    if (this.shotLocked) {
+      this.camera.position.copy(this.basePos);
+      this.camera.quaternion.copy(this.baseQuat);
+      return;
+    }
     const step = Math.max(dt, 0);
     this.elapsed += step;
 
