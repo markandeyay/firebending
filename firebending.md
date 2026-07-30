@@ -196,8 +196,8 @@ Each phase ends with: tests green, a tagged git commit (`phase-N-complete`), a p
 Format: `ID | phase | title | depends-on | status (todo/doing/done/blocked) | owner-agent | notes`
 
 ```
-T000 | P0 | repo scaffold            | -          | todo |  |
-T001 | P0 | LandmarkSource iface     | T000       | todo |  |
+T000 | P0 | repo scaffold            | -          | done | orchestrator | vite+ts+three boot, cube renders, build+tests green
+T001 | P0 | LandmarkSource iface     | T000       | done | orchestrator | types.ts + ReplaySource with sync tick() for headless tests
 T002 | P0 | synthetic fixture gen    | T001       | todo |  |
 T003 | P0 | capture tool             | T001       | todo |  |
 T004 | P0 | test harness boots       | T002       | todo |  |
@@ -224,12 +224,14 @@ T080 | P8 | README + deploy + GIFs   | T070       | todo |  |
 ### 16.2 Session log
 Format: `[timestamp] agent | tasks touched | result | next`
 
-(empty)
+[2026-07-30 03:00] orchestrator | T000, T001 | repo init, pushed, scaffold builds, 3 tests green | fan out wave 1: T002, T003, T010+T011, T012, T030
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
 
-(empty)
+[2026-07-30 03:00] LandmarkFrame = {t, left, right, face} with 21-point hands in mirrored player space; mirroring happens in sources | one normalization point per Section 5 | S4, S5
+[2026-07-30 03:00] ReplaySource exposes sync tick()/drain() alongside real-time start() | headless deterministic tests need frame stepping | S13
+[2026-07-30 03:00] T012 (filters) starts concurrently with T002 (fixtures): unit tests use inline synthetic signals, fixture integration after merge | dependency is for tuning, not compilation; maximizes parallelism | S16.1
 
 ### 16.4 Known issues / debt
 
