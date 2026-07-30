@@ -215,7 +215,7 @@ T050 | P5 | constructs + physics     | T030       | done | agent-constructs | en
 T051 | P5 | combat + HUD             | T021,T050  | done | agent-combat | combat.ts damage table + duck/block; hud.ts ink HUD; 24 tests; combat claims manager.onDeath, director uses combat.onKill
 T052 | P5 | director chain           | T051       | doing | agent-director | includes arena screen integration + P5 exit replay loop test
 T060 | P6 | title + calibration      | T010       | done | agent-screens | ScreenManager + flameWipe + title + calibration + calibrationStats; 15 tests; main.ts wiring recipe in agent report, applied at P5/P6 integration
-T061 | P6 | audio pass               | T041       | doing | agent-audio | all sounds Web Audio synthesis, license-clean by construction
+T061 | P6 | audio pass               | T041       | done | agent-audio | engine.ts + moveAudio.ts, all synthesized, seeded deterministic buffers; 29 tests; unlock() on Play click
 T062 | P6 | juice tuning             | T052       | todo |  |
 T070 | P7 | hardening ladder         | T062       | todo |  |
 T080 | P8 | README + deploy + GIFs   | T070       | todo |  |
@@ -237,6 +237,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 04:04] orchestrator | moves debug merged, phase-2-complete tagged | 209/209 green; ?debug=moves cycles all 10 positives with latency footer | in flight: T041, T051
 [2026-07-30 04:12] orchestrator | T041 merged | 231/231 green; 9 named effects (Cinder Bolt, Third Strike Comet, Kiln Lance, Hearth Wave, Ember Fan, Furnace Shot, Kindled Wall, Cinder Lash, Inner Coal) | launched T061 audio; in flight: T051, T061
 [2026-07-30 04:20] orchestrator | T051 merged | 255/255 green | launched T052 director + arena screen; in flight: T052, T061; wall-active check is null-test only (VFX and gesture clocks share no epoch)
+[2026-07-30 04:32] orchestrator | T061 merged | 284/284 green | in flight: T052 only; audio wiring at integration: unlock+sealPress on Play, ignite in calibration, ambientStart on arena mount, moveAudio.handleEvent per MoveEvent, onKill/onHitStop/onCoal hooks from combat
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -276,6 +277,7 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 04:20] Combat treats rising-flame wall as active iff wallActiveUntil() non-null; the until value is opaque | VFX clock (seconds) and gesture clock (ms) share no epoch | S7, S8
 [2026-07-30 04:20] DuckDetector: enter = 400ms windowed drop > 20% baseline AND 15% below baseline; exit = within 10% of baseline; y-down space | slow drift never triggers | S8
 [2026-07-30 04:20] Breath penalty on player hit: combat exposes onBreathPenalty(15); MoveEngine.spend() added at integration | engine had no public spend | S7, S8
+[2026-07-30 04:32] Audio: Web Audio direct, Howler unused (drop dep at ship); charge rumble stops when a follow-up move consumes it or after 3s fallback; noise buffers seeded via mulberry32, one-shots slice a rotating cursor | determinism and variety without Math.random | S12
 
 ### 16.4 Known issues / debt
 
@@ -287,6 +289,7 @@ Format: `[timestamp] decision | reason | affected sections`
 - HUMAN: visual pass on title screen (ember density, wordmark spacing, seal emboss) and calibration ritual (hand outline SVG shape, ignite flare subtlety, flame wipe weight at 700ms).
 - HUMAN: fire shader visual judgment via mountFireDebug (wired behind ?debug=fire before ship): expect noise-torn licks not flat sprites, warm ramp, ember curl, faint smoke, light pooling; check fps under sustained load.
 - HUMAN: judge construct wobble feel live (SPRING_K 250, damping 3.5, ~1.4s period, tuned headless only), debris scatter/fade (damping may read viscous), and whether the tier 2 chest plates read as skeletal armor.
+- HUMAN: sound feel judgment needs ears (all params tuned by construction, never heard): jab reads as air not static; twin-cannon 32Hz sub may vanish on laptop speakers (raise SUB_F1 if so); fan vs stream distinctly airier; coal whistle Q=12 not ringing; ambient bed level; compressor pumping under twin+duck; MASTER volume headroom.
 - DEBT: fixtures/lib.ts GRIP_LOCAL vs FIST_LOCAL nearly indistinguishable to gripScore. Fix later: GRIP_LOCAL thumb rise >= 0.6, FIST_LOCAL flat tuck <= 0.1, then restore S6 grip thresholds (0.75/0.55) and re-verify whip suite plus real recordings.
 - DEBT: engine speed thresholds tuned on raw frames; filtered pipeline needs velocityScale 1.8 on replay. Retune SPIKE/RETRACT/WHIP/RISING thresholds against filtered real recordings when available, then drop the replay scale.
 
