@@ -208,7 +208,7 @@ T020 | P2 | pose functions           | T012       | done | agent-poses | poses.t
 T021 | P2 | move state machine       | T020       | doing | agent-moves | combined with T022 in one agent
 T022 | P2 | false-positive suite     | T021       | doing | agent-moves |
 T030 | P3 | arena environment        | T000       | done | agent-arena | 21 mesh nodes, 6 dynamic lights, headless-guarded canvas textures, seeded PRNG layout
-T031 | P3 | camera rig + parallax    | T011,T030  | doing | agent-rig |
+T031 | P3 | camera rig + parallax    | T011,T030  | done | agent-rig | cameraRig.ts + killTravel.ts, 13 tests; parallax jointly clamped 4deg/0.25m incl breathing sway
 T040 | P4 | fire particle core       | T030       | doing | agent-fire |
 T041 | P4 | per-move VFX             | T021,T040  | todo |  |
 T050 | P5 | constructs + physics     | T030       | doing | agent-constructs |
@@ -229,6 +229,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:15] orchestrator | T030, T003 merged | arena committed, capture tool committed | launched T031 rig, T040 fire core, T050 constructs; in flight: T002, T020, T060
 [2026-07-30 03:20] orchestrator | T002, T004 merged | 66/66 tests green, Phase 0 fully done | in flight: T020, T060, T031, T040, T050; T021 next when T020 lands
 [2026-07-30 03:22] orchestrator | phase-0-complete tagged; T020 merged | poses committed | launched T021+T022 combined agent + P1-exit debug overlay agent
+[2026-07-30 03:28] orchestrator | T031 merged | 108/108 tests green | in flight: T021+T022, T040, T050, T060, P1 debug overlay; anchors past z=-18 need director-side environment illusion (noted in killTravel.ts)
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
