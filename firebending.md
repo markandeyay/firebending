@@ -198,9 +198,9 @@ Format: `ID | phase | title | depends-on | status (todo/doing/done/blocked) | ow
 ```
 T000 | P0 | repo scaffold            | -          | done | orchestrator | vite+ts+three boot, cube renders, build+tests green
 T001 | P0 | LandmarkSource iface     | T000       | done | orchestrator | types.ts + ReplaySource with sync tick() for headless tests
-T002 | P0 | synthetic fixture gen    | T001       | todo |  |
+T002 | P0 | synthetic fixture gen    | T001       | done | agent-fixtures | fixtures/lib.ts engine + 15 seeded recordings (10 moves, 5 negatives)
 T003 | P0 | capture tool             | T001       | done | agent-capture | tools/capture.html self-contained, L/R overlay tags + swap-hands safety net
-T004 | P0 | test harness boots       | T002       | todo |  |
+T004 | P0 | test harness boots       | T002       | done | agent-fixtures | disk JSON through ReplaySource.drain() end to end, all 15 fixtures
 T010 | P1 | live hand source         | T001       | done | agent-tracking | handSource.ts, pure mirror/handedness fns tested; live path needs human camera check
 T011 | P1 | face source              | T001       | done | agent-tracking | faceSource.ts + liveSource.ts, face at 1/4 rate, degrade to 1/8 past 7ms budget
 T012 | P1 | filters + gating         | T002       | done | agent-filters | filters.ts: OneEuro, Hysteresis, ConfidenceGate, FilteredSource; 20 tests
@@ -227,6 +227,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:00] orchestrator | T000, T001 | repo init, pushed, scaffold builds, 3 tests green | fan out wave 1: T002, T003, T010+T011, T012, T030
 [2026-07-30 03:08] orchestrator | T012, T010, T011 merged | 38 tests green, committed | launch T020 poses + T060 screens; T031 waits on T030
 [2026-07-30 03:15] orchestrator | T030, T003 merged | arena committed, capture tool committed | launched T031 rig, T040 fire core, T050 constructs; in flight: T002, T020, T060
+[2026-07-30 03:20] orchestrator | T002, T004 merged | 66/66 tests green, Phase 0 fully done | in flight: T020, T060, T031, T040, T050; T021 next when T020 lands
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -241,6 +242,8 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:15] Arena canvas textures guarded behind typeof document check, flat-color fallback headless | Vitest runs in node env per S13 | S9, S13
 [2026-07-30 03:15] Capture tool: face sample-and-hold up to 500ms between 1/4-rate detections; recording fps = measured average not nominal; hand confidence = handedness score (no separate presence score in VIDEO mode) | recordings should mirror what a live source emits | S5, S13
 [2026-07-30 03:15] Capture tool self-detects facial matrix row/column-major layout via translation magnitude; YAW_SIGN/PITCH_SIGN constants exposed for live correction | matrix layout reported inconsistently across MediaPipe builds | S5
+[2026-07-30 03:20] fixtures/nodeShim.d.ts declares minimal node:fs typings | @types/node not installed and tsconfig pins types to vite/client; delete shim if @types/node added | S13
+[2026-07-30 03:20] Fixture hands translate without rotating during thrusts; hand-enter-leave coords legitimately exceed [0,1] like real MediaPipe partial-visibility output | distance-ratio classifiers are orientation-light; revisit if poses need orientation cues | S6, S13
 
 ### 16.4 Known issues / debt
 
