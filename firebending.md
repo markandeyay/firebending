@@ -209,12 +209,12 @@ T021 | P2 | move state machine       | T020       | doing | agent-moves | combin
 T022 | P2 | false-positive suite     | T021       | doing | agent-moves |
 T030 | P3 | arena environment        | T000       | done | agent-arena | 21 mesh nodes, 6 dynamic lights, headless-guarded canvas textures, seeded PRNG layout
 T031 | P3 | camera rig + parallax    | T011,T030  | done | agent-rig | cameraRig.ts + killTravel.ts, 13 tests; parallax jointly clamped 4deg/0.25m incl breathing sway
-T040 | P4 | fire particle core       | T030       | doing | agent-fire |
+T040 | P4 | fire particle core       | T030       | done | agent-fire | fire.ts FireSystem facade; 4700 instanced cap; shader-side particle motion; 20 tests
 T041 | P4 | per-move VFX             | T021,T040  | todo |  |
 T050 | P5 | constructs + physics     | T030       | doing | agent-constructs |
 T051 | P5 | combat + HUD             | T021,T050  | todo |  |
 T052 | P5 | director chain           | T051       | todo |  |
-T060 | P6 | title + calibration      | T010       | doing | agent-screens |
+T060 | P6 | title + calibration      | T010       | done | agent-screens | ScreenManager + flameWipe + title + calibration + calibrationStats; 15 tests; main.ts wiring recipe in agent report, applied at P5/P6 integration
 T061 | P6 | audio pass               | T041       | todo |  |
 T062 | P6 | juice tuning             | T052       | todo |  |
 T070 | P7 | hardening ladder         | T062       | todo |  |
@@ -231,6 +231,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:22] orchestrator | phase-0-complete tagged; T020 merged | poses committed | launched T021+T022 combined agent + P1-exit debug overlay agent
 [2026-07-30 03:28] orchestrator | T031 merged | 108/108 tests green | in flight: T021+T022, T040, T050, T060, P1 debug overlay; anchors past z=-18 need director-side environment illusion (noted in killTravel.ts)
 [2026-07-30 03:34] orchestrator | P1 debug overlay merged, phase-1-complete | 152/152 green, vite build ok, overlay at ?debug=tracking (&fixture=name, &live) | in flight: T021+T022, T040, T050, T060
+[2026-07-30 03:40] orchestrator | T060, T040 merged; liveSource gains mediaStream getter for calibration preview | 162 green, 2 failing in enemies.test.ts belong to still-running T050 agent | in flight: T021+T022, T050; next: T041 when moves land
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -252,6 +253,10 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:34] Live MediaPipe path loaded via dynamic import only; replay/debug never loads it; build splits it into a lazy chunk | enforces "live behind a flag" structurally and keeps main bundle small | S5, S14, S15
 [2026-07-30 03:34] LoopingReplaySource shifts t monotonically across loop seams | negative dt at seams would corrupt One Euro filters and gates | S13
 [2026-07-30 03:34] fixtures/synthetic not copied into dist; replay debug is dev-only | keep deploy small; revisit if deployed build needs demo replay mode | S14
+[2026-07-30 03:40] Calibration screen consumes the RAW source (runs its own Section 5 gates); FilteredSource wraps the same inner source for gameplay after | wrapping calibration in FilteredSource would double acquire delay to ~20 frames | S5, S8
+[2026-07-30 03:40] Fire particle motion computed in vertex shader from spawn attributes (start + v*age + 0.5*buoyancy*age^2); streams = continuous spawns; O(1) update pinned by attribute-version tests | zero per-frame attribute writes keeps 60fps budget | S10, S14
+[2026-07-30 03:40] FireLightPool defaults to 2 traveling lights; arena uses 7 of the 8-light budget; director may dim brazier lights during heavy fire and hand budget to the pool | S14 cap tension documented in fire.ts | S10, S14
+[2026-07-30 03:40] Ember/smoke layers folded into fire.ts; src/vfx/embers.ts intentionally not created | one system, one update clock; repo layout deviation recorded | S4, S10
 
 ### 16.4 Known issues / debt
 
@@ -259,6 +264,9 @@ Format: `[timestamp] decision | reason | affected sections`
 - HUMAN: MediaPipe model + WASM assets load from Google/jsdelivr CDNs at runtime. Confirm acceptable vs vendoring locally. Video frames still never leave the device either way.
 - HUMAN: record real gesture sessions. Open tools/capture.html in Chrome (if models fail from file://, run python -m http.server in repo root and open http://localhost:8000/tools/capture.html). Start camera. Verify: raise LEFT hand, overlay tag must read L (tick Swap hands if it reads R and note it); turn head right, yaw readout positive; look up, pitch positive. Then per chip (jab-blast, fire-stream, cross-combo, palm-wave, flame-fan, twin-cannon, rising-flame, fire-whip, breath-charge, idle, talking): Record after countdown, perform move 3 to 5 times, Stop, Download, save into fixtures/recorded/. Stand back, both hands and face in frame, good front lighting.
 - HUMAN: visual judgment of the arena (composition, flicker, haze, banner sway) via mountArenaDebug; orchestrator will wire a ?arena URL param before ship.
+- HUMAN: vendor an open-licensed brush/calligraphic display font (woff2 in repo, @font-face in src/ui/theme.css, first in --fb-font-display). Current stack is system serif fallbacks and reads engraved rather than brushstroke on Windows.
+- HUMAN: visual pass on title screen (ember density, wordmark spacing, seal emboss) and calibration ritual (hand outline SVG shape, ignite flare subtlety, flame wipe weight at 700ms).
+- HUMAN: fire shader visual judgment via mountFireDebug (wired behind ?debug=fire before ship): expect noise-torn licks not flat sprites, warm ramp, ember curl, faint smoke, light pooling; check fps under sustained load.
 
 ### 16.5 Tuning values that differ from spec defaults
 
