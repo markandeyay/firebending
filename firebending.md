@@ -270,6 +270,7 @@ Format: `[timestamp] decision | reason | affected sections`
 - HUMAN: vendor an open-licensed brush/calligraphic display font (woff2 in repo, @font-face in src/ui/theme.css, first in --fb-font-display). Current stack is system serif fallbacks and reads engraved rather than brushstroke on Windows.
 - HUMAN: visual pass on title screen (ember density, wordmark spacing, seal emboss) and calibration ritual (hand outline SVG shape, ignite flare subtlety, flame wipe weight at 700ms).
 - HUMAN: fire shader visual judgment via mountFireDebug (wired behind ?debug=fire before ship): expect noise-torn licks not flat sprites, warm ramp, ember curl, faint smoke, light pooling; check fps under sustained load.
+- HUMAN: judge construct wobble feel live (SPRING_K 250, damping 3.5, ~1.4s period, tuned headless only), debris scatter/fade (damping may read viscous), and whether the tier 2 chest plates read as skeletal armor.
 
 ### 16.5 Tuning values that differ from spec defaults
 
