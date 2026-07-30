@@ -230,6 +230,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:20] orchestrator | T002, T004 merged | 66/66 tests green, Phase 0 fully done | in flight: T020, T060, T031, T040, T050; T021 next when T020 lands
 [2026-07-30 03:22] orchestrator | phase-0-complete tagged; T020 merged | poses committed | launched T021+T022 combined agent + P1-exit debug overlay agent
 [2026-07-30 03:28] orchestrator | T031 merged | 108/108 tests green | in flight: T021+T022, T040, T050, T060, P1 debug overlay; anchors past z=-18 need director-side environment illusion (noted in killTravel.ts)
+[2026-07-30 03:34] orchestrator | P1 debug overlay merged, phase-1-complete | 152/152 green, vite build ok, overlay at ?debug=tracking (&fixture=name, &live) | in flight: T021+T022, T040, T050, T060
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -248,6 +249,9 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:20] Fixture hands translate without rotating during thrusts; hand-enter-leave coords legitimately exceed [0,1] like real MediaPipe partial-visibility output | distance-ratio classifiers are orientation-light; revisit if poses need orientation cues | S6, S13
 [2026-07-30 03:22] palmScore takes handedness param; palm normal from cross(indexMCP-wrist, pinkyMCP-wrist), z positive for facing right hand, sign flipped for left | abs() cannot distinguish palm from back of hand | S6
 [2026-07-30 03:22] gripScore raised-factor uses absolute wrist y band 0.55..0.65, to be replaced by calibrated shoulder-height estimate later | calibrationStats not yet merged when poses written | S6, S8
+[2026-07-30 03:34] Live MediaPipe path loaded via dynamic import only; replay/debug never loads it; build splits it into a lazy chunk | enforces "live behind a flag" structurally and keeps main bundle small | S5, S14, S15
+[2026-07-30 03:34] LoopingReplaySource shifts t monotonically across loop seams | negative dt at seams would corrupt One Euro filters and gates | S13
+[2026-07-30 03:34] fixtures/synthetic not copied into dist; replay debug is dev-only | keep deploy small; revisit if deployed build needs demo replay mode | S14
 
 ### 16.4 Known issues / debt
 
