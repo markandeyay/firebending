@@ -10,8 +10,8 @@ import * as THREE from 'three';
 export interface ArenaLights {
   /** Warm key light shining from the coal wall toward the player. */
   key: THREE.DirectionalLight;
-  /** Deep warm ambient floor level. */
-  ambient: THREE.AmbientLight;
+  /** Warm hemisphere whisper (ember bounce from below, near-black above). */
+  ambient: THREE.HemisphereLight;
   /** Flickering brazier point lights. */
   braziers: THREE.PointLight[];
 }
@@ -371,7 +371,9 @@ export function buildArena(scene: THREE.Scene): Arena {
     dummy.updateMatrix();
     bowls.setMatrixAt(i, dummy.matrix);
 
-    const light = new THREE.PointLight(FIRELIGHT, 2.4, 7.5, 2);
+    // Bigger, hotter pools (Phase 3): the braziers are the mid-field light
+    // story; physical decay 2 gives the deep falloff Section 9 asks for.
+    const light = new THREE.PointLight(FIRELIGHT, 3.4, 9.5, 2);
     light.name = `brazier-light-${i}`;
     light.position.set(x, 1.75, z);
     group.add(light);
@@ -472,11 +474,18 @@ export function buildArena(scene: THREE.Scene): Arena {
   }
 
   // --- Lighting ------------------------------------------------------------
-  // One warm key from the coal wall direction, the single shadow caster.
-  const key = new THREE.DirectionalLight(FIRELIGHT, 1.6);
+  // Hierarchy (Phase 3 rebuild): ONE dominant warm key raking low from the
+  // coal wall, brazier point pools on layered-noise flicker, and only a
+  // whisper of warm ambient so unlit surfaces fall to charcoal instead of
+  // gray. Under ACESFilmic the old flat 0.55 ambient read as a gray wash;
+  // depth now comes from falloff, not fill.
+  const key = new THREE.DirectionalLight(0xffa050, 2.6);
   key.name = 'coal-wall-key';
-  key.position.set(0, 4.5, -22.5);
-  key.target.position.set(0, 1.0, -2);
+  // Lower and closer to the coal wall: a raking angle stretches column
+  // shadows down the lane toward the player, the way a floor-level fire
+  // actually throws them.
+  key.position.set(0, 2.6, -22.5);
+  key.target.position.set(0, 0.8, -2);
   key.castShadow = true;
   key.shadow.mapSize.set(1024, 1024);
   key.shadow.camera.near = 1;
@@ -489,7 +498,10 @@ export function buildArena(scene: THREE.Scene): Arena {
   key.shadow.bias = -0.0015;
   group.add(key, key.target);
 
-  const ambient = new THREE.AmbientLight(0x3a2418, 0.55);
+  // Warm hemisphere whisper: ember glow from below, near-black from above.
+  // Replaces the flat AmbientLight; keeps silhouettes readable while letting
+  // everything outside a firelight pool sink toward charcoal.
+  const ambient = new THREE.HemisphereLight(0x140d08, 0x2a1408, 0.5);
   ambient.name = 'ember-ambient';
   group.add(ambient);
 
@@ -513,7 +525,7 @@ export function buildArena(scene: THREE.Scene): Arena {
         0.13 * Math.sin(elapsed * 9.7 + phase) +
         0.08 * Math.sin(elapsed * 23.3 + phase * 1.7) +
         0.05 * Math.sin(elapsed * 41.1 + phase * 0.6);
-      light.intensity = 2.4 * n;
+      light.intensity = 3.4 * n;
     }
 
     // The coal wall breathes very slowly.

@@ -9,6 +9,7 @@
 // particle counts. Returns an unmount function.
 
 import * as THREE from 'three';
+import { configureRenderer } from '../game/renderer';
 import { FireSystem } from './fire';
 
 const CHARCOAL = 0x14100d;
@@ -17,6 +18,7 @@ export function mountFireDebug(container: HTMLElement): () => void {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(container.clientWidth || 960, container.clientHeight || 540);
+  configureRenderer(renderer);
   renderer.domElement.style.display = 'block';
   container.appendChild(renderer.domElement);
 

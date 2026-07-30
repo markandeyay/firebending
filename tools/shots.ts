@@ -56,14 +56,26 @@ async function main(): Promise<void> {
   try {
     for (const n of SHOTS) {
       const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+      page.on('console', (m) => {
+        if (m.type() === 'error') console.error(`[shot-${n}] console.error:`, m.text());
+      });
+      page.on('pageerror', (e) => console.error(`[shot-${n}] pageerror:`, String(e)));
       const url = `${BASE}/?screen=arena&replay=${FIXTURE}&shot=${n}`;
       await page.goto(url);
-      await page.waitForFunction(
-        () => (window as unknown as { __FB_READY?: boolean }).__FB_READY === true,
-        undefined,
-        { timeout: 30_000 },
-      );
       const path = `${OUT_DIR}shot-${n}${SUFFIX}.png`;
+      try {
+        await page.waitForFunction(
+          () => (window as unknown as { __FB_READY?: boolean }).__FB_READY === true,
+          undefined,
+          { timeout: 60_000 },
+        );
+      } catch {
+        // Capture anyway so the failure mode is visible, then flag it.
+        await page.screenshot({ path: `${OUT_DIR}shot-${n}${SUFFIX}-timeout.png` });
+        console.error(`shot-${n}: __FB_READY never set; wrote diagnostic capture`);
+        await page.close();
+        continue;
+      }
       await page.screenshot({ path });
       console.log(`captured ${path}  (${url})`);
       await page.close();

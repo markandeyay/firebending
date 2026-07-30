@@ -74,6 +74,7 @@ import {
   PLAYER_WORLD_POSITION,
   type EffectsProvider,
 } from '../game/combat';
+import { configureRenderer } from '../game/renderer';
 import { Director } from '../game/director';
 import { FireSystem, type AmbientFlameHandle } from '../vfx/fire';
 import { MoveEffects } from '../vfx/moveEffects';
@@ -330,6 +331,7 @@ export class ArenaScreen implements Screen {
 
     // --- Renderer / scene / camera ---------------------------------------
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    configureRenderer(renderer);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
@@ -646,11 +648,12 @@ export class ArenaScreen implements Screen {
   }
 
   private tick(): void {
-    // Screenshot-harness stability signal: after 90 rendered frames the
+    // Screenshot-harness stability signal: after 30 rendered frames the
     // scene is warmed (lights settled, first particles alive) and
-    // tools/shots.ts may capture.
+    // tools/shots.ts may capture. Kept low because headless SwiftShader
+    // renders a few fps at best; 90 frames blew the harness timeout.
     this.renderedFrames++;
-    if (this.renderedFrames === 90) {
+    if (this.renderedFrames === 30) {
       (window as unknown as { __FB_READY?: boolean }).__FB_READY = true;
     }
     const renderer = this.renderer;

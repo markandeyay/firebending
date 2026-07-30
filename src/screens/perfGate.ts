@@ -21,6 +21,7 @@
  */
 
 import * as THREE from 'three';
+import { configureRenderer } from '../game/renderer';
 import { buildArena, type Arena } from '../game/arena';
 import { FireSystem, type FireLightHandle } from '../vfx/fire';
 import {
@@ -136,6 +137,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
   renderer.setSize(width, height);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  configureRenderer(renderer);
   renderer.domElement.style.display = 'block';
   container.appendChild(renderer.domElement);
   if (getComputedStyle(container).position === 'static') {

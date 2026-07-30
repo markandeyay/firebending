@@ -6,6 +6,7 @@
 //   }
 
 import * as THREE from 'three';
+import { configureRenderer } from './renderer';
 import { buildArena } from './arena';
 
 /**
@@ -19,8 +20,7 @@ export function mountArenaDebug(container: HTMLElement): () => void {
   renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  configureRenderer(renderer);
   renderer.domElement.style.display = 'block';
   container.appendChild(renderer.domElement);
 
