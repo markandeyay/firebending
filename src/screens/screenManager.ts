@@ -200,7 +200,10 @@ export async function flameWipe(
     new Promise((resolve) => {
       const start = performance.now();
       const step = (now: number): void => {
-        const p = Math.min(1, (now - start) / durationMs);
+        // rAF timestamps can predate the performance.now() captured above;
+        // an unclamped negative p maps through the reveal ease to a negative
+        // arc radius, which throws and kills the transition.
+        const p = Math.min(1, Math.max(0, (now - start) / durationMs));
         draw(p, now);
         if (p < 1) requestAnimationFrame(step);
         else resolve();
