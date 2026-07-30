@@ -211,7 +211,7 @@ T030 | P3 | arena environment        | T000       | done | agent-arena | 21 mesh
 T031 | P3 | camera rig + parallax    | T011,T030  | done | agent-rig | cameraRig.ts + killTravel.ts, 13 tests; parallax jointly clamped 4deg/0.25m incl breathing sway
 T040 | P4 | fire particle core       | T030       | done | agent-fire | fire.ts FireSystem facade; 4700 instanced cap; shader-side particle motion; 20 tests
 T041 | P4 | per-move VFX             | T021,T040  | todo |  |
-T050 | P5 | constructs + physics     | T030       | doing | agent-constructs |
+T050 | P5 | constructs + physics     | T030       | done | agent-constructs | enemies.ts: rapier world, spring-back wobble (gravityScale 0 + K=250), charring, debris, lob arcs
 T051 | P5 | combat + HUD             | T021,T050  | todo |  |
 T052 | P5 | director chain           | T051       | todo |  |
 T060 | P6 | title + calibration      | T010       | done | agent-screens | ScreenManager + flameWipe + title + calibration + calibrationStats; 15 tests; main.ts wiring recipe in agent report, applied at P5/P6 integration
@@ -232,6 +232,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:28] orchestrator | T031 merged | 108/108 tests green | in flight: T021+T022, T040, T050, T060, P1 debug overlay; anchors past z=-18 need director-side environment illusion (noted in killTravel.ts)
 [2026-07-30 03:34] orchestrator | P1 debug overlay merged, phase-1-complete | 152/152 green, vite build ok, overlay at ?debug=tracking (&fixture=name, &live) | in flight: T021+T022, T040, T050, T060
 [2026-07-30 03:40] orchestrator | T060, T040 merged; liveSource gains mediaStream getter for calibration preview | 162 green, 2 failing in enemies.test.ts belong to still-running T050 agent | in flight: T021+T022, T050; next: T041 when moves land
+[2026-07-30 03:46] orchestrator | T050 merged | 164/164 green, rapier runs for real in node tests | in flight: T021+T022 only; T041 + T051 launch when moves land
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -257,6 +258,8 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:40] Fire particle motion computed in vertex shader from spawn attributes (start + v*age + 0.5*buoyancy*age^2); streams = continuous spawns; O(1) update pinned by attribute-version tests | zero per-frame attribute writes keeps 60fps budget | S10, S14
 [2026-07-30 03:40] FireLightPool defaults to 2 traveling lights; arena uses 7 of the 8-light budget; director may dim brazier lights during heavy fire and hand budget to the pool | S14 cap tension documented in fire.ts | S10, S14
 [2026-07-30 03:40] Ember/smoke layers folded into fire.ts; src/vfx/embers.ts intentionally not created | one system, one update clock; repo layout deviation recorded | S4, S10
+[2026-07-30 03:46] Construct torso: gravityScale 0 + spring torque (K=250, ang damping 3.5) instead of gravity + spring | upright is a stable equilibrium, wobble tuning orthogonal, no tip-over drift | S11
+[2026-07-30 03:46] Coal lobs are closed-form parabolas, no rapier bodies; base body has no collider | keeps physics scope minimal per S3; avoids pivot contact jitter | S3, S11
 
 ### 16.4 Known issues / debt
 
