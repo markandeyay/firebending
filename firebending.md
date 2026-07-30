@@ -199,7 +199,7 @@ Format: `ID | phase | title | depends-on | status (todo/doing/done/blocked) | ow
 T000 | P0 | repo scaffold            | -          | done | orchestrator | vite+ts+three boot, cube renders, build+tests green
 T001 | P0 | LandmarkSource iface     | T000       | done | orchestrator | types.ts + ReplaySource with sync tick() for headless tests
 T002 | P0 | synthetic fixture gen    | T001       | todo |  |
-T003 | P0 | capture tool             | T001       | todo |  |
+T003 | P0 | capture tool             | T001       | done | agent-capture | tools/capture.html self-contained, L/R overlay tags + swap-hands safety net
 T004 | P0 | test harness boots       | T002       | todo |  |
 T010 | P1 | live hand source         | T001       | done | agent-tracking | handSource.ts, pure mirror/handedness fns tested; live path needs human camera check
 T011 | P1 | face source              | T001       | done | agent-tracking | faceSource.ts + liveSource.ts, face at 1/4 rate, degrade to 1/8 past 7ms budget
@@ -207,11 +207,11 @@ T012 | P1 | filters + gating         | T002       | done | agent-filters | filte
 T020 | P2 | pose functions           | T012       | doing | agent-poses |
 T021 | P2 | move state machine       | T020       | todo |  |
 T022 | P2 | false-positive suite     | T021       | todo |  |
-T030 | P3 | arena environment        | T000       | todo |  |
-T031 | P3 | camera rig + parallax    | T011,T030  | todo |  |
-T040 | P4 | fire particle core       | T030       | todo |  |
+T030 | P3 | arena environment        | T000       | done | agent-arena | 21 mesh nodes, 6 dynamic lights, headless-guarded canvas textures, seeded PRNG layout
+T031 | P3 | camera rig + parallax    | T011,T030  | doing | agent-rig |
+T040 | P4 | fire particle core       | T030       | doing | agent-fire |
 T041 | P4 | per-move VFX             | T021,T040  | todo |  |
-T050 | P5 | constructs + physics     | T030       | todo |  |
+T050 | P5 | constructs + physics     | T030       | doing | agent-constructs |
 T051 | P5 | combat + HUD             | T021,T050  | todo |  |
 T052 | P5 | director chain           | T051       | todo |  |
 T060 | P6 | title + calibration      | T010       | doing | agent-screens |
@@ -226,6 +226,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 
 [2026-07-30 03:00] orchestrator | T000, T001 | repo init, pushed, scaffold builds, 3 tests green | fan out wave 1: T002, T003, T010+T011, T012, T030
 [2026-07-30 03:08] orchestrator | T012, T010, T011 merged | 38 tests green, committed | launch T020 poses + T060 screens; T031 waits on T030
+[2026-07-30 03:15] orchestrator | T030, T003 merged | arena committed, capture tool committed | launched T031 rig, T040 fire core, T050 constructs; in flight: T002, T020, T060
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -237,11 +238,16 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:08] Handedness: raw feed is unmirrored so MediaPipe label Right fills frame.left, Left fills frame.right; landmarks mirrored x to 1-x | invariant: player's own left hand lands in left slot | S5
 [2026-07-30 03:08] Hand reacquisition resets filter banks via 0.5s time-gap detection, not explicit null notification | gated-out hands never reach the bank so gap-reset covers reacquisition automatically | S5
 [2026-07-30 03:08] 6-frame aim velocity window lives in gesture layer, not filters; filters export only two-frame wristVelocity | aim logic belongs next to move state machine | S6, S7
+[2026-07-30 03:15] Arena canvas textures guarded behind typeof document check, flat-color fallback headless | Vitest runs in node env per S13 | S9, S13
+[2026-07-30 03:15] Capture tool: face sample-and-hold up to 500ms between 1/4-rate detections; recording fps = measured average not nominal; hand confidence = handedness score (no separate presence score in VIDEO mode) | recordings should mirror what a live source emits | S5, S13
+[2026-07-30 03:15] Capture tool self-detects facial matrix row/column-major layout via translation magnitude; YAW_SIGN/PITCH_SIGN constants exposed for live correction | matrix layout reported inconsistently across MediaPipe builds | S5
 
 ### 16.4 Known issues / debt
 
 - HUMAN: live camera verification of handedness invariant (raise your left hand, left slot should light in debug overlay), yaw/pitch signs, and GPU delegate fallback in a real browser. Facial-matrix convention is unit-test pinned but only a live run proves it matches MediaPipe output.
 - HUMAN: MediaPipe model + WASM assets load from Google/jsdelivr CDNs at runtime. Confirm acceptable vs vendoring locally. Video frames still never leave the device either way.
+- HUMAN: record real gesture sessions. Open tools/capture.html in Chrome (if models fail from file://, run python -m http.server in repo root and open http://localhost:8000/tools/capture.html). Start camera. Verify: raise LEFT hand, overlay tag must read L (tick Swap hands if it reads R and note it); turn head right, yaw readout positive; look up, pitch positive. Then per chip (jab-blast, fire-stream, cross-combo, palm-wave, flame-fan, twin-cannon, rising-flame, fire-whip, breath-charge, idle, talking): Record after countdown, perform move 3 to 5 times, Stop, Download, save into fixtures/recorded/. Stand back, both hands and face in frame, good front lighting.
+- HUMAN: visual judgment of the arena (composition, flicker, haze, banner sway) via mountArenaDebug; orchestrator will wire a ?arena URL param before ship.
 
 ### 16.5 Tuning values that differ from spec defaults
 

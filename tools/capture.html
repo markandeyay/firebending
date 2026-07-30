@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firebending Landmark Capture</title>
+<style>
+  :root {
+    --charcoal: #1a1512;
+    --charcoal-2: #241d18;
+    --charcoal-3: #2e2620;
+    --parchment: #e6d9bd;
+    --parchment-dim: #b3a486;
+    --ink: #14100d;
+    --gold: #b08d47;
+    --gold-dim: #8a6f38;
+    --vermilion: #8c3b2e;
+    --ok: #7c9a5e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--charcoal);
+    color: var(--parchment);
+    font-family: Georgia, "Times New Roman", serif;
+    min-height: 100vh;
+    padding: 24px 16px 48px;
+  }
+  main { max-width: 960px; margin: 0 auto; }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: normal;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+    border-bottom: 1px solid var(--gold-dim);
+    padding-bottom: 10px;
+    margin-bottom: 4px;
+  }
+  .subtitle { color: var(--parchment-dim); font-size: 0.9rem; margin-bottom: 20px; }
+  .panel {
+    background: var(--charcoal-2);
+    border: 1px solid var(--charcoal-3);
+    border-radius: 4px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    background: var(--ink);
+    border: 1px solid var(--charcoal-3);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  /* The video preview is CSS-mirrored so the page acts like a mirror.
+     The overlay canvas is NOT mirrored: it is drawn from already-mirrored
+     player-space coordinates, so it lines up with the flipped video. */
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #bigMsg {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 5rem; color: var(--gold);
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+    pointer-events: none;
+  }
+  #recDot {
+    position: absolute; top: 12px; left: 12px;
+    display: none; align-items: center; gap: 8px;
+    color: var(--parchment); font-size: 0.85rem;
+    background: rgba(20,16,13,0.7); padding: 4px 10px; border-radius: 3px;
+  }
+  #recDot::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--vermilion); display: inline-block;
+  }
+  .statsbar {
+    display: flex; flex-wrap: wrap; gap: 18px;
+    font-size: 0.85rem; color: var(--parchment-dim);
+    padding: 10px 2px 0;
+  }
+  .statsbar b { color: var(--parchment); font-weight: normal; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+  label { color: var(--parchment-dim); font-size: 0.9rem; }
+  input[type="text"] {
+    background: var(--ink); color: var(--parchment);
+    border: 1px solid var(--gold-dim); border-radius: 3px;
+    padding: 8px 10px; font-family: inherit; font-size: 1rem; width: 220px;
+  }
+  input[type="text"]:focus { outline: 1px solid var(--gold); }
+  button {
+    background: var(--charcoal-3); color: var(--parchment);
+    border: 1px solid var(--gold-dim); border-radius: 3px;
+    padding: 8px 18px; font-family: inherit; font-size: 0.95rem;
+    cursor: pointer; letter-spacing: 0.05em;
+  }
+  button:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--vermilion); border-color: var(--vermilion); color: var(--parchment); }
+  button.primary:hover:not(:disabled) { filter: brightness(1.15); color: var(--parchment); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+  .chip {
+    background: var(--ink); border: 1px solid var(--charcoal-3);
+    color: var(--parchment-dim); border-radius: 14px;
+    padding: 5px 14px; font-size: 0.85rem; cursor: pointer; font-family: inherit;
+  }
+  .chip:hover { border-color: var(--gold-dim); color: var(--parchment); }
+  .chip.active { border-color: var(--gold); color: var(--gold); }
+  .hint { font-size: 0.85rem; color: var(--parchment-dim); line-height: 1.5; }
+  .hint code { color: var(--gold); font-family: Consolas, monospace; font-size: 0.85em; }
+  #status { font-size: 0.9rem; color: var(--parchment-dim); min-height: 1.3em; margin-top: 6px; }
+  #status.err { color: #c96a4f; }
+  #status.ok { color: var(--ok); }
+  h2 {
+    font-size: 0.95rem; font-weight: normal; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--gold-dim); margin-bottom: 10px;
+  }
+  ol.instructions { margin-left: 20px; line-height: 1.7; font-size: 0.92rem; color: var(--parchment-dim); }
+  ol.instructions li b { color: var(--parchment); font-weight: normal; }
+  .swaprow { font-size: 0.85rem; color: var(--parchment-dim); }
+  .swaprow input { accent-color: var(--gold); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Firebending Capture</h1>
+  <p class="subtitle">Records hand and head landmarks from your webcam into JSON fixtures. Everything runs locally, nothing is uploaded.</p>
+
+  <div class="panel">
+    <div class="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="bigMsg"></div>
+      <div id="recDot">REC</div>
+    </div>
+    <div class="statsbar">
+      <span>FPS <b id="fpsOut">0</b></span>
+      <span>Left hand <b id="leftConf">no track</b></span>
+      <span>Right hand <b id="rightConf">no track</b></span>
+      <span>Face yaw <b id="yawOut">0.00</b> pitch <b id="pitchOut">0.00</b></span>
+      <span>Frames <b id="frameOut">0</b></span>
+      <span>Duration <b id="durOut">0.0s</b></span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="swaprow">
+        <input type="checkbox" id="swapHands">
+        Swap hands. Check the tags first: raise your left hand, the tag on it should read L. If it reads R, tick this box before recording.
+      </label>
+    </div>
+    <div class="swaprow" style="margin-top:4px">
+      Head pose check: turn your head to your right, yaw should go positive. Look up, pitch should go positive. If a sign is wrong, note it for the dev log.
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Recording</h2>
+    <div class="chips" id="chips"></div>
+    <div class="row">
+      <label for="labelInput">Label</label>
+      <input type="text" id="labelInput" value="session" spellcheck="false">
+    </div>
+    <div class="row">
+      <button id="startCamBtn" class="primary">Start camera</button>
+      <button id="recordBtn" disabled>Record</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="downloadBtn" disabled>Download JSON</button>
+      <button id="copyBtn" disabled>Copy to clipboard</button>
+    </div>
+    <div id="status">Camera is off. Press Start camera to load the trackers.</div>
+  </div>
+
+  <div class="panel">
+    <h2>How to record good fixtures</h2>
+    <ol class="instructions">
+      <li>Stand back far enough that <b>both hands and your face</b> stay in frame while you punch and sweep.</li>
+      <li>Use <b>good, even lighting</b> from the front. Avoid strong backlight from windows.</li>
+      <li>Pick a move chip above, press Record, wait for the 3 second countdown, perform the move <b>3 to 5 times</b> with brief rests between reps, then press Stop.</li>
+      <li>Record one move per file. Also record <b>idle</b> (hands relaxed, small natural motion) and <b>talking</b> (gesturing as if in conversation) as negative cases.</li>
+      <li>Download each file and save it into <code>fixtures/recorded/</code> in the repo. Keep the suggested kebab-case names, add a suffix for repeats, for example <code>jab-blast-2.json</code>.</li>
+      <li>If the page cannot load models when opened as a plain file, serve the repo root locally, for example <code>python -m http.server</code>, then open <code>/tools/capture.html</code>.</li>
+    </ol>
+  </div>
+</main>
+
+<script type="module">
+/*
+ * Firebending landmark capture tool. Dev-only page, CDN use is fine here.
+ *
+ * Output contract (must match src/tracking/types.ts exactly):
+ *   LandmarkRecording = { version: 1, label, fps, frames: LandmarkFrame[] }
+ *   LandmarkFrame = { t (ms since recording start), left, right, face }
+ *   HandFrame = { landmarks: 21 x {x,y,z}, confidence }
+ *   FaceFrame = { yaw, pitch, position: {x,y,z}, confidence }
+ *
+ * COORDINATES are mirrored player space: x grows to the player's right
+ * (mirror MediaPipe x with x -> 1 - x), y grows downward (unchanged),
+ * z negative toward camera (MediaPipe's convention, unchanged).
+ *
+ * HANDEDNESS MAPPING (documented per contract):
+ * We feed the RAW, unmirrored webcam frame to HandLandmarker. MediaPipe's
+ * handedness classifier assumes its input is a mirrored selfie image; on an
+ * unmirrored frame its label comes out inverted relative to the player's
+ * real hand. Concretely: the player's physical left hand appears on the
+ * viewer's right of the raw image, looks like a left hand geometrically,
+ * and MediaPipe reports it as "Right". Therefore:
+ *   reported "Right" -> frame.left  (player's actual LEFT hand)
+ *   reported "Left"  -> frame.right (player's actual RIGHT hand)
+ * With this mapping, when the player raises the hand on THEIR left side,
+ * it lands in the `left` slot and draws on the left side of the mirrored
+ * preview. The on-screen L/R tags let the human verify; the Swap hands
+ * checkbox flips the mapping if a browser/build behaves differently.
+ */
+
+import {
+  FilesetResolver,
+  HandLandmarker,
+  FaceLandmarker,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+const FACE_EVERY_N_FRAMES = 4;   // per spec Section 5: face at ~15 Hz
+const FACE_HOLD_MS = 500;        // sample-and-hold window before face goes null
+// Flip these if the human's head-pose sign check fails; log the change.
+const YAW_SIGN = 1;              // +1 => positive yaw when player looks to their right
+const PITCH_SIGN = 1;            // +1 => positive pitch when player looks up
+
+const MOVE_LABELS = [
+  "jab-blast", "fire-stream", "cross-combo", "palm-wave", "flame-fan",
+  "twin-cannon", "rising-flame", "fire-whip", "breath-charge",
+  "idle", "talking",
+];
+
+// MediaPipe 21-point hand skeleton connections for the overlay.
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17],
+];
+
+// ---------- frame assembly (pure, mirrors the recording contract) ----------
+
+/** Mirror one raw MediaPipe hand into player space. x -> 1 - x, y and z kept. */
+function toPlayerHand(rawLandmarks, confidence) {
+  const landmarks = new Array(rawLandmarks.length);
+  for (let i = 0; i < rawLandmarks.length; i++) {
+    const p = rawLandmarks[i];
+    landmarks[i] = { x: 1 - p.x, y: p.y, z: p.z };
+  }
+  return { landmarks, confidence };
+}
+
+/**
+ * Route detected hands into player-left / player-right slots.
+ * See the handedness comment at the top of this script for why the
+ * reported label is inverted on a raw webcam frame.
+ */
+function assembleHands(handResult, swap) {
+  let left = null;
+  let right = null;
+  if (!handResult) return { left, right };
+  const lms = handResult.landmarks || [];
+  const handedness = handResult.handedness || [];
+  for (let i = 0; i < lms.length; i++) {
+    const cat = handedness[i] && handedness[i][0];
+    if (!cat || !lms[i] || lms[i].length !== 21) continue;
+    const hand = toPlayerHand(lms[i], cat.score);
+    // reported "Right" => player's LEFT hand (raw unmirrored input).
+    let slot = cat.categoryName === "Right" ? "left" : "right";
+    if (swap) slot = slot === "left" ? "right" : "left";
+    if (slot === "left") {
+      if (!left || hand.confidence > left.confidence) left = hand;
+    } else {
+      if (!right || hand.confidence > right.confidence) right = hand;
+    }
+  }
+  return { left, right };
+}
+
+/**
+ * Build a FaceFrame from a FaceLandmarker result.
+ * Yaw and pitch come from the facial transformation matrix, which maps the
+ * canonical face model into camera space (camera at origin looking down -Z,
+ * +X image right, +Y up; an identity rotation means the face looks straight
+ * at the camera along +Z). The face-forward direction is the third column
+ * of the rotation. The matrix data has been observed both row-major and
+ * column-major across builds, so we self-detect using the translation:
+ * the z translation is tens of centimeters, rotation entries are <= 1.
+ * Sign logic: turning the head to the player's right tips forward toward
+ * camera -X (image right is the player's left on the raw frame), so
+ * yaw = atan2(-fx, fz) is positive to the player's right. Looking up tips
+ * forward toward +Y, so pitch = asin(fy) is positive up. This matches the
+ * contract and is consistent in mirrored player space, where the player's
+ * right is +x. Position is the landmark centroid, mirrored like the hands.
+ */
+function assembleFace(faceResult) {
+  if (!faceResult) return null;
+  const lms = faceResult.faceLandmarks && faceResult.faceLandmarks[0];
+  if (!lms || lms.length === 0) return null;
+
+  let cx = 0, cy = 0, cz = 0;
+  for (const p of lms) { cx += p.x; cy += p.y; cz += p.z; }
+  const n = lms.length;
+  const position = { x: 1 - cx / n, y: cy / n, z: cz / n };
+
+  let yaw = 0, pitch = 0;
+  const mats = faceResult.facialTransformationMatrixes;
+  if (mats && mats[0] && mats[0].data && mats[0].data.length === 16) {
+    const d = mats[0].data;
+    // Row-major stores translation at d[3], d[7], d[11]; column-major at
+    // d[12], d[13], d[14]. |tz| is large (~20 to 60), so compare.
+    const rowMajor = Math.abs(d[11]) > Math.abs(d[14]);
+    const fx = rowMajor ? d[2] : d[8];
+    const fy = rowMajor ? d[6] : d[9];
+    const fz = d[10]; // same index in both layouts
+    yaw = YAW_SIGN * Math.atan2(-fx, fz);
+    pitch = PITCH_SIGN * Math.asin(Math.max(-1, Math.min(1, fy)));
+  }
+  return { yaw, pitch, position, confidence: 1 };
+}
+
+/** Assemble one LandmarkFrame exactly per the contract. */
+function assembleFrame(t, hands, face) {
+  return { t, left: hands.left, right: hands.right, face };
+}
+
+// ---------- app state ----------
+
+const $ = (id) => document.getElementById(id);
+const video = $("video");
+const overlay = $("overlay");
+const ctx = overlay.getContext("2d");
+
+let handLandmarker = null;
+let faceLandmarker = null;
+let running = false;
+let frameCounter = 0;
+
+let state = "off"; // off | loading | ready | countdown | recording | done
+let frames = [];
+let recordStart = 0;
+let recording = null; // finished LandmarkRecording
+let countdownTimer = null;
+
+let lastFace = null;      // last FaceFrame (sample-and-hold)
+let lastFaceAt = -1e9;    // performance.now() of last face detection
+let fpsEma = 0;
+let lastTick = 0;
+
+function setStatus(msg, cls) {
+  const el = $("status");
+  el.textContent = msg;
+  el.className = cls || "";
+}
+
+function setButtons() {
+  $("startCamBtn").disabled = state !== "off";
+  $("recordBtn").disabled = state !== "ready" && state !== "done";
+  $("stopBtn").disabled = state !== "recording" && state !== "countdown";
+  $("downloadBtn").disabled = !recording;
+  $("copyBtn").disabled = !recording;
+}
+
+// Label chips
+const chipsEl = $("chips");
+for (const name of MOVE_LABELS) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "chip";
+  b.textContent = name;
+  b.addEventListener("click", () => {
+    $("labelInput").value = name;
+    for (const c of chipsEl.children) c.classList.toggle("active", c === b);
+  });
+  chipsEl.appendChild(b);
+}
+$("labelInput").addEventListener("input", () => {
+  for (const c of chipsEl.children) c.classList.remove("active");
+});
+
+function sanitizeLabel(raw) {
+  const s = raw.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9._-]/g, "");
+  return s || "session";
+}
+
+// ---------- camera + trackers ----------
+
+async function createLandmarkers(delegate) {
+  const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
+  const hand = await HandLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+    runningMode: "VIDEO",
+    numHands: 2,
+  });
+  const face = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: FACE_MODEL, delegate },
+    runningMode: "VIDEO",
+    numFaces: 1,
+    outputFacialTransformationMatrixes: true,
+  });
+  return { hand, face };
+}
+
+async function startCamera() {
+  state = "loading";
+  setButtons();
+  setStatus("Loading models and camera...");
+  try {
+    let pair;
+    try {
+      pair = await createLandmarkers("GPU");
+    } catch (e) {
+      console.warn("GPU delegate failed, falling back to CPU", e);
+      setStatus("GPU delegate failed, falling back to CPU...");
+      pair = await createLandmarkers("CPU");
+    }
+    handLandmarker = pair.hand;
+    faceLandmarker = pair.face;
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    overlay.width = video.videoWidth || 1280;
+    overlay.height = video.videoHeight || 720;
+    // Match the stage to the real camera aspect so the overlay canvas maps
+    // 1:1 onto the (mirrored) video with no cropping or stretching.
+    document.querySelector(".stage").style.aspectRatio =
+      overlay.width + " / " + overlay.height;
+
+    state = "ready";
+    setStatus("Camera on. Check the L/R tags, pick a label, then press Record.", "ok");
+    running = true;
+    requestAnimationFrame(loop);
+  } catch (err) {
+    console.error(err);
+    state = "off";
+    setStatus("Failed to start: " + (err && err.message ? err.message : err), "err");
+  }
+  setButtons();
+}
+
+// ---------- main loop ----------
+
+function loop(now) {
+  if (!running) return;
+  if (video.readyState >= 2) {
+    // FPS estimate (exponential moving average of frame delta).
+    if (lastTick > 0) {
+      const inst = 1000 / Math.max(1, now - lastTick);
+      fpsEma = fpsEma === 0 ? inst : fpsEma * 0.9 + inst * 0.1;
+    }
+    lastTick = now;
+
+    const handResult = handLandmarker.detectForVideo(video, now);
+    frameCounter++;
+    if (frameCounter % FACE_EVERY_N_FRAMES === 0) {
+      const faceResult = faceLandmarker.detectForVideo(video, now);
+      const face = assembleFace(faceResult);
+      if (face) { lastFace = face; lastFaceAt = now; }
+    }
+    const face = (now - lastFaceAt) <= FACE_HOLD_MS ? lastFace : null;
+    const hands = assembleHands(handResult, $("swapHands").checked);
+
+    if (state === "recording") {
+      frames.push(assembleFrame(Math.round(now - recordStart), hands, face));
+      $("frameOut").textContent = String(frames.length);
+      $("durOut").textContent = ((now - recordStart) / 1000).toFixed(1) + "s";
+    }
+
+    draw(hands, face);
+    updateStats(hands, face);
+  }
+  requestAnimationFrame(loop);
+}
+
+function updateStats(hands, face) {
+  $("fpsOut").textContent = fpsEma.toFixed(0);
+  $("leftConf").textContent = hands.left ? hands.left.confidence.toFixed(2) : "no track";
+  $("rightConf").textContent = hands.right ? hands.right.confidence.toFixed(2) : "no track";
+  $("yawOut").textContent = face ? face.yaw.toFixed(2) : "-";
+  $("pitchOut").textContent = face ? face.pitch.toFixed(2) : "-";
+}
+
+// Overlay drawing. Coordinates are already player space (mirrored), and the
+// canvas is not CSS-flipped, so player x maps straight to canvas x and lines
+// up with the mirrored video underneath.
+function drawHand(hand, stroke, tag) {
+  if (!hand) return;
+  const w = overlay.width, h = overlay.height;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (const [a, b] of HAND_CONNECTIONS) {
+    const pa = hand.landmarks[a], pb = hand.landmarks[b];
+    ctx.moveTo(pa.x * w, pa.y * h);
+    ctx.lineTo(pb.x * w, pb.y * h);
+  }
+  ctx.stroke();
+  ctx.fillStyle = stroke;
+  for (const p of hand.landmarks) {
+    ctx.beginPath();
+    ctx.arc(p.x * w, p.y * h, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const wrist = hand.landmarks[0];
+  ctx.font = "bold 28px Georgia, serif";
+  ctx.fillStyle = "#e6d9bd";
+  ctx.fillText(tag, wrist.x * w + 12, wrist.y * h + 34);
+}
+
+function draw(hands, face) {
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  drawHand(hands.left, "#b08d47", "L");   // muted gold, player's left
+  drawHand(hands.right, "#c96a4f", "R");  // warm ember, player's right
+  if (face) {
+    ctx.fillStyle = "#e6d9bd";
+    ctx.beginPath();
+    ctx.arc(face.position.x * overlay.width, face.position.y * overlay.height, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ---------- record / stop / export ----------
+
+function beginCountdown() {
+  recording = null;
+  state = "countdown";
+  setButtons();
+  let n = 3;
+  $("bigMsg").textContent = String(n);
+  setStatus("Get ready...");
+  countdownTimer = setInterval(() => {
+    n--;
+    if (n > 0) {
+      $("bigMsg").textContent = String(n);
+    } else {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+      $("bigMsg").textContent = "";
+      startRecording();
+    }
+  }, 1000);
+}
+
+function startRecording() {
+  frames = [];
+  recordStart = performance.now();
+  state = "recording";
+  $("recDot").style.display = "flex";
+  setStatus("Recording. Perform the move 3 to 5 times, then press Stop.");
+  setButtons();
+}
+
+function stopRecording() {
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+    $("bigMsg").textContent = "";
+    state = "ready";
+    setStatus("Countdown cancelled.");
+    setButtons();
+    return;
+  }
+  $("recDot").style.display = "none";
+  const label = sanitizeLabel($("labelInput").value);
+  const durMs = frames.length > 0 ? frames[frames.length - 1].t : 0;
+  const fps = frames.length > 1 && durMs > 0
+    ? Math.round((frames.length - 1) / (durMs / 1000))
+    : 30;
+  recording = { version: 1, label, fps, frames };
+  state = "done";
+  setStatus(
+    "Stopped. " + frames.length + " frames, " + (durMs / 1000).toFixed(1) +
+    "s at ~" + fps + " fps. Download and save as fixtures/recorded/" + label + ".json",
+    "ok"
+  );
+  setButtons();
+}
+
+function download() {
+  if (!recording) return;
+  const blob = new Blob([JSON.stringify(recording)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = recording.label + ".json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function copyJson() {
+  if (!recording) return;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(recording));
+    setStatus("Copied " + recording.frames.length + " frames to clipboard. Paste into fixtures/recorded/" + recording.label + ".json", "ok");
+  } catch (err) {
+    setStatus("Clipboard failed: " + err.message, "err");
+  }
+}
+
+$("startCamBtn").addEventListener("click", startCamera);
+$("recordBtn").addEventListener("click", beginCountdown);
+$("stopBtn").addEventListener("click", stopRecording);
+$("downloadBtn").addEventListener("click", download);
+$("copyBtn").addEventListener("click", copyJson);
+setButtons();
+</script>
+</body>
+</html>
