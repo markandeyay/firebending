@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { mountTrackingDebug } from './screens/trackingDebug';
+import { mountMovesDebug } from './screens/movesDebug';
 
 /**
  * Boot and screen state machine. URL params are parsed once here; debug
@@ -17,6 +18,11 @@ const params = new URLSearchParams(window.location.search);
 if (params.get('debug') === 'tracking') {
   void mountTrackingDebug(app, {
     fixture: params.get('fixture') ?? 'jab-right',
+    live: params.has('live'),
+  });
+} else if (params.get('debug') === 'moves') {
+  void mountMovesDebug(app, {
+    fixture: params.get('fixture') ?? undefined,
     live: params.has('live'),
   });
 } else {
