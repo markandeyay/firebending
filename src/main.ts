@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { mountTrackingDebug } from './screens/trackingDebug';
 import { mountMovesDebug } from './screens/movesDebug';
+import { REPLAY_VELOCITY_SCALE } from './screens/movesDebug';
+import { ArenaScreen, LoopingReplaySource } from './screens/arena';
+import { DEFAULT_CALIBRATION } from './gestures/calibrationStats';
+import { ReplaySource } from './tracking/replaySource';
 
 /**
  * Boot and screen state machine. URL params are parsed once here; debug
@@ -25,8 +29,26 @@ if (params.get('debug') === 'tracking') {
     fixture: params.get('fixture') ?? undefined,
     live: params.has('live'),
   });
+} else if (params.get('screen') === 'arena') {
+  void bootArenaReplay(app, params.get('replay') ?? 'fixtures/synthetic/jab-right.json');
 } else {
   bootPlaceholder(app);
+}
+
+/**
+ * Dev entry (Phase 5 exit): mount the arena screen directly on looping replay
+ * input, skipping title/calibration. DEFAULT_CALIBRATION plus the replay-path
+ * velocity compensation (REPLAY_VELOCITY_SCALE; see movesDebug.ts). The full
+ * title -> calibration -> arena wiring lands with the P6 integration.
+ */
+async function bootArenaReplay(root: HTMLElement, replayUrl: string): Promise<void> {
+  const replay = await ReplaySource.load(replayUrl);
+  const screen = new ArenaScreen();
+  await screen.enter(root, {
+    source: new LoopingReplaySource(replay),
+    stats: DEFAULT_CALIBRATION,
+    velocityScale: REPLAY_VELOCITY_SCALE,
+  });
 }
 
 /** Phase 0 placeholder: a lit spinning cube proving the render loop. */

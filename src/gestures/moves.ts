@@ -338,6 +338,16 @@ export class MoveEngine {
     return this.breathValue;
   }
 
+  /**
+   * Spend Breath from outside the engine (player-hit penalties routed from
+   * CombatSystem.onBreathPenalty). Added at P5 integration per the combat.ts
+   * header note; clamps at 0 and ignores non-positive or non-finite amounts.
+   */
+  spend(amount: number): void {
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    this.breathValue = Math.max(0, this.breathValue - amount);
+  }
+
   /** The sustained move currently active, if any. */
   get activeSustain(): MoveName | null {
     return this.sustain ? this.sustain.move : null;
