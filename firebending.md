@@ -219,8 +219,8 @@ T060 | P6 | title + calibration      | T010       | done | agent-screens | Scree
 T061 | P6 | audio pass               | T041       | done | agent-audio | engine.ts + moveAudio.ts, all synthesized, seeded deterministic buffers; 29 tests; unlock() on Play click
 T062 | P6 | juice tuning             | T052       | todo |  |
 T070 | P7 | hardening ladder         | T062       | done | agent-hardening | degrade ladder, tracking-loss FSM, single-hand OK as-is, error states, mobile gate; 339 tests
-T080a| P8 | README + deploy prep     | T070       | doing | agent-ship | GIFs captured; README, vercel/netlify config, bundle audit, drop howler
-T080 | P8 | README + deploy + GIFs   | T070       | todo |  |
+T080a| P8 | README + deploy prep     | T070       | done | agent-ship | README + vercel.json + netlify.toml; bundle 238.9kB gzip JS vs 2MB budget PASS; howler dropped
+T080 | P8 | README + deploy + GIFs   | T070       | done | orchestrator | all done except live deploy (HUMAN credentials, steps in MORNING.md); v0.1.0 tagged; phase-8 tag waits on public URL
 ```
 
 ### 16.2 Session log
@@ -244,6 +244,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 05:05] orchestrator | T062a merged; browser verification via Chrome automation | PERFGATE on dev machine: 901 frames, median 16.70ms (vsync-locked 60fps), p95 17.3, max 18.1, 32 draw calls, 365 particles, 2 lights, PASS; screenshots in docs/screens/ (title, arena+HUD, fire, perf load); fixed ?screen=arena bare-name fixture resolution; phases 3-5 tagged | next: T070 hardening
 [2026-07-30 05:15] orchestrator | full flow verified in browser: title -> Play -> calibration gate-in on replay -> flame wipe -> arena; phase-6-complete tagged | launched T070 hardening | note: background-tab throttling makes unattended browser flows crawl; all interactive verification must actively drive the tab
 [2026-07-30 05:40] orchestrator | T070 merged, phase-7-complete tagged; FIXED live bug: flameWipe negative rAF delta -> negative arc radius exception hung the transition (clamp added); 3 gameplay GIFs captured in browser (demo incl. calibration+twin-cannon kill chain, fan cone, whip ambience) | launched T080a ship prep | remaining: deploy (HUMAN credentials), MORNING.md
+[2026-07-30 05:50] orchestrator | T080a, T080 merged; MORNING.md written; v0.1.0 tagged | build complete: 339 tests green, bundle 238.9kB gzip JS, perf gate PASS, phases 0-7 tagged | only live deploy remains (HUMAN); loop stopping
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
