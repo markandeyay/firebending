@@ -85,7 +85,7 @@ switch (routeFor(params)) {
     mountPerfGate(app);
     break;
   case 'arena-replay':
-    void bootArenaReplay(app, params.get('replay') ?? 'fixtures/synthetic/jab-right.json');
+    void bootArenaReplay(app, replayFixtureUrl(params.get('replay') ?? 'jab-right'));
     break;
   case 'title-flow-replay':
     void bootGameFlow(app, params.get('replay'));

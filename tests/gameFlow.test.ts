@@ -136,11 +136,16 @@ describe('perf gate math', () => {
     expect(s.maxMs).toBe(20);
   });
 
-  it('passes exactly at the budget and fails above it', () => {
+  it('passes within vsync slack and fails beyond it or on dropped frames', () => {
     expect(PERF_BUDGET_MS).toBeCloseTo(16.6, 10);
     expect(perfPass(12)).toBe(true);
     expect(perfPass(PERF_BUDGET_MS)).toBe(true);
-    expect(perfPass(16.61)).toBe(false);
+    // vsync-locked 60Hz median (~16.7) passes within the 0.5ms slack
+    expect(perfPass(16.7)).toBe(true);
+    expect(perfPass(17.2)).toBe(false);
+    // healthy median but dropped frames at p95 fails
+    expect(perfPass(16.7, 33)).toBe(false);
+    expect(perfPass(16.7, 18)).toBe(true);
   });
 });
 
