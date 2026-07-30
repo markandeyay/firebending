@@ -201,10 +201,10 @@ T001 | P0 | LandmarkSource iface     | T000       | done | orchestrator | types.
 T002 | P0 | synthetic fixture gen    | T001       | todo |  |
 T003 | P0 | capture tool             | T001       | todo |  |
 T004 | P0 | test harness boots       | T002       | todo |  |
-T010 | P1 | live hand source         | T001       | todo |  |
-T011 | P1 | face source              | T001       | todo |  |
-T012 | P1 | filters + gating         | T002       | todo |  |
-T020 | P2 | pose functions           | T012       | todo |  |
+T010 | P1 | live hand source         | T001       | done | agent-tracking | handSource.ts, pure mirror/handedness fns tested; live path needs human camera check
+T011 | P1 | face source              | T001       | done | agent-tracking | faceSource.ts + liveSource.ts, face at 1/4 rate, degrade to 1/8 past 7ms budget
+T012 | P1 | filters + gating         | T002       | done | agent-filters | filters.ts: OneEuro, Hysteresis, ConfidenceGate, FilteredSource; 20 tests
+T020 | P2 | pose functions           | T012       | doing | agent-poses |
 T021 | P2 | move state machine       | T020       | todo |  |
 T022 | P2 | false-positive suite     | T021       | todo |  |
 T030 | P3 | arena environment        | T000       | todo |  |
@@ -214,7 +214,7 @@ T041 | P4 | per-move VFX             | T021,T040  | todo |  |
 T050 | P5 | constructs + physics     | T030       | todo |  |
 T051 | P5 | combat + HUD             | T021,T050  | todo |  |
 T052 | P5 | director chain           | T051       | todo |  |
-T060 | P6 | title + calibration      | T010       | todo |  |
+T060 | P6 | title + calibration      | T010       | doing | agent-screens |
 T061 | P6 | audio pass               | T041       | todo |  |
 T062 | P6 | juice tuning             | T052       | todo |  |
 T070 | P7 | hardening ladder         | T062       | todo |  |
@@ -225,6 +225,7 @@ T080 | P8 | README + deploy + GIFs   | T070       | todo |  |
 Format: `[timestamp] agent | tasks touched | result | next`
 
 [2026-07-30 03:00] orchestrator | T000, T001 | repo init, pushed, scaffold builds, 3 tests green | fan out wave 1: T002, T003, T010+T011, T012, T030
+[2026-07-30 03:08] orchestrator | T012, T010, T011 merged | 38 tests green, committed | launch T020 poses + T060 screens; T031 waits on T030
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -232,14 +233,20 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:00] LandmarkFrame = {t, left, right, face} with 21-point hands in mirrored player space; mirroring happens in sources | one normalization point per Section 5 | S4, S5
 [2026-07-30 03:00] ReplaySource exposes sync tick()/drain() alongside real-time start() | headless deterministic tests need frame stepping | S13
 [2026-07-30 03:00] T012 (filters) starts concurrently with T002 (fixtures): unit tests use inline synthetic signals, fixture integration after merge | dependency is for tuning, not compilation; maximizes parallelism | S16.1
+[2026-07-30 03:08] Trackers run on main thread, no worker | GPU delegate already runs inference off JS thread; VideoFrame transfer adds copy cost; revisit only if profiling shows stalls | S5
+[2026-07-30 03:08] Handedness: raw feed is unmirrored so MediaPipe label Right fills frame.left, Left fills frame.right; landmarks mirrored x to 1-x | invariant: player's own left hand lands in left slot | S5
+[2026-07-30 03:08] Hand reacquisition resets filter banks via 0.5s time-gap detection, not explicit null notification | gated-out hands never reach the bank so gap-reset covers reacquisition automatically | S5
+[2026-07-30 03:08] 6-frame aim velocity window lives in gesture layer, not filters; filters export only two-frame wristVelocity | aim logic belongs next to move state machine | S6, S7
 
 ### 16.4 Known issues / debt
 
-(empty)
+- HUMAN: live camera verification of handedness invariant (raise your left hand, left slot should light in debug overlay), yaw/pitch signs, and GPU delegate fallback in a real browser. Facial-matrix convention is unit-test pinned but only a live run proves it matches MediaPipe output.
+- HUMAN: MediaPipe model + WASM assets load from Google/jsdelivr CDNs at runtime. Confirm acceptable vs vendoring locally. Video frames still never leave the device either way.
 
 ### 16.5 Tuning values that differ from spec defaults
 
-(empty)
+- All gesture and filter thresholds are PROVISIONAL: tuned on synthetic fixtures only, no real recordings yet.
+- Face One Euro: minCutoff 1.5 (hands use spec 1.0) | face parallax smoothing is light here because heavy smoothing belongs to the camera rig per S8.
 
 ## 17. README requirements (written in Phase 8, not before)
 
