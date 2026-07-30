@@ -234,6 +234,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:40] orchestrator | T060, T040 merged; liveSource gains mediaStream getter for calibration preview | 162 green, 2 failing in enemies.test.ts belong to still-running T050 agent | in flight: T021+T022, T050; next: T041 when moves land
 [2026-07-30 03:46] orchestrator | T050 merged | 164/164 green, rapier runs for real in node tests | in flight: T021+T022 only; T041 + T051 launch when moves land
 [2026-07-30 03:52] orchestrator | T021, T022 merged | 197/197 green, Phase 2 code complete | launching T041, T051, and moves debug scene (P2 exit criterion); tag phase-2 when debug scene lands
+[2026-07-30 04:04] orchestrator | moves debug merged, phase-2-complete tagged | 209/209 green; ?debug=moves cycles all 10 positives with latency footer | in flight: T041, T051
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -265,6 +266,8 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:52] Aim events carry screen-space velocity (punch toward camera = aim.z < 0); combat layer maps screen -z to world forward | one documented mapping point instead of per-move conversions | S7
 [2026-07-30 03:52] triggerLatencyMs measured from trigger-condition completion, not pose acquisition; hysteresis runs during wind-up | 4-frame hysteresis at 30fps would otherwise exceed the 120ms budget by construction | S7, S13
 [2026-07-30 03:52] Cross-combo: third alternating jab emits cross-combo INSTEAD of third jab-blast; blocked twin-cannon consumes both thrust records so it never leaks two jabs | S7 ambiguity resolved | S7
+[2026-07-30 04:04] FINDING: One Euro filtering attenuates synthetic thrust peaks ~45% (raw 1.45-1.65 u/s becomes 0.80-0.91 filtered); without correction palm-wave/fan/twin/whip never fire through FilteredSource | T022 tests feed raw frames, gameplay feeds filtered | S5, S7, S13
+[2026-07-30 04:04] Remedy: REPLAY_VELOCITY_SCALE 1.8 via the engine velocityScale hook on replay path only; live stays 1.0 with per-player scaling from calibrationStats | verified: all 10 positives fire, all 5 negatives silent through filtered pipeline at 1.8 | S7, S13
 
 ### 16.4 Known issues / debt
 
@@ -277,6 +280,7 @@ Format: `[timestamp] decision | reason | affected sections`
 - HUMAN: fire shader visual judgment via mountFireDebug (wired behind ?debug=fire before ship): expect noise-torn licks not flat sprites, warm ramp, ember curl, faint smoke, light pooling; check fps under sustained load.
 - HUMAN: judge construct wobble feel live (SPRING_K 250, damping 3.5, ~1.4s period, tuned headless only), debris scatter/fade (damping may read viscous), and whether the tier 2 chest plates read as skeletal armor.
 - DEBT: fixtures/lib.ts GRIP_LOCAL vs FIST_LOCAL nearly indistinguishable to gripScore. Fix later: GRIP_LOCAL thumb rise >= 0.6, FIST_LOCAL flat tuck <= 0.1, then restore S6 grip thresholds (0.75/0.55) and re-verify whip suite plus real recordings.
+- DEBT: engine speed thresholds tuned on raw frames; filtered pipeline needs velocityScale 1.8 on replay. Retune SPIKE/RETRACT/WHIP/RISING thresholds against filtered real recordings when available, then drop the replay scale.
 
 ### 16.5 Tuning values that differ from spec defaults
 
@@ -284,6 +288,7 @@ Format: `[timestamp] decision | reason | affected sections`
 - Face One Euro: minCutoff 1.5 (hands use spec 1.0) | face parallax smoothing is light here because heavy smoothing belongs to the camera rig per S8.
 - Grip hysteresis 0.45/0.28 over 5-frame average (spec says 0.75/0.55) | see Decision Log 03:52; revisit with real recordings.
 - Move thresholds: SPIKE_SPEED_MIN 0.9 u/s, SPIKE_TOWARD_MIN 0.6, RETRACT 0.5, EXTEND_HOLD 350ms, WHIP swing |vx| >= 1.0, RISING up-vel 1.0, TWIN chest y 0.4-0.68, BREATH hip y > 0.7. All provisional on synthetic data.
+- REPLAY_VELOCITY_SCALE 1.8 (replay/debug path only; live 1.0) | One Euro attenuation of synthetic thrusts, see Decision Log 04:04.
 
 ## 17. README requirements (written in Phase 8, not before)
 
