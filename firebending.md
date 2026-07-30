@@ -210,12 +210,12 @@ T022 | P2 | false-positive suite     | T021       | done | agent-moves | 33 test
 T030 | P3 | arena environment        | T000       | done | agent-arena | 21 mesh nodes, 6 dynamic lights, headless-guarded canvas textures, seeded PRNG layout
 T031 | P3 | camera rig + parallax    | T011,T030  | done | agent-rig | cameraRig.ts + killTravel.ts, 13 tests; parallax jointly clamped 4deg/0.25m incl breathing sway
 T040 | P4 | fire particle core       | T030       | done | agent-fire | fire.ts FireSystem facade; 4700 instanced cap; shader-side particle motion; 20 tests
-T041 | P4 | per-move VFX             | T021,T040  | doing | agent-movefx |
+T041 | P4 | per-move VFX             | T021,T040  | done | agent-movefx | moveEffects.ts: 9 named effects, screenToWorld reach-plane mapping; impact.ts decal pool; 22 tests
 T050 | P5 | constructs + physics     | T030       | done | agent-constructs | enemies.ts: rapier world, spring-back wobble (gravityScale 0 + K=250), charring, debris, lob arcs
 T051 | P5 | combat + HUD             | T021,T050  | doing | agent-combat |
 T052 | P5 | director chain           | T051       | todo |  |
 T060 | P6 | title + calibration      | T010       | done | agent-screens | ScreenManager + flameWipe + title + calibration + calibrationStats; 15 tests; main.ts wiring recipe in agent report, applied at P5/P6 integration
-T061 | P6 | audio pass               | T041       | todo |  |
+T061 | P6 | audio pass               | T041       | doing | agent-audio | all sounds Web Audio synthesis, license-clean by construction
 T062 | P6 | juice tuning             | T052       | todo |  |
 T070 | P7 | hardening ladder         | T062       | todo |  |
 T080 | P8 | README + deploy + GIFs   | T070       | todo |  |
@@ -235,6 +235,7 @@ Format: `[timestamp] agent | tasks touched | result | next`
 [2026-07-30 03:46] orchestrator | T050 merged | 164/164 green, rapier runs for real in node tests | in flight: T021+T022 only; T041 + T051 launch when moves land
 [2026-07-30 03:52] orchestrator | T021, T022 merged | 197/197 green, Phase 2 code complete | launching T041, T051, and moves debug scene (P2 exit criterion); tag phase-2 when debug scene lands
 [2026-07-30 04:04] orchestrator | moves debug merged, phase-2-complete tagged | 209/209 green; ?debug=moves cycles all 10 positives with latency footer | in flight: T041, T051
+[2026-07-30 04:12] orchestrator | T041 merged | 231/231 green; 9 named effects (Cinder Bolt, Third Strike Comet, Kiln Lance, Hearth Wave, Ember Fan, Furnace Shot, Kindled Wall, Cinder Lash, Inner Coal) | launched T061 audio; in flight: T051, T061
 
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
@@ -268,6 +269,9 @@ Format: `[timestamp] decision | reason | affected sections`
 [2026-07-30 03:52] Cross-combo: third alternating jab emits cross-combo INSTEAD of third jab-blast; blocked twin-cannon consumes both thrust records so it never leaks two jabs | S7 ambiguity resolved | S7
 [2026-07-30 04:04] FINDING: One Euro filtering attenuates synthetic thrust peaks ~45% (raw 1.45-1.65 u/s becomes 0.80-0.91 filtered); without correction palm-wave/fan/twin/whip never fire through FilteredSource | T022 tests feed raw frames, gameplay feeds filtered | S5, S7, S13
 [2026-07-30 04:04] Remedy: REPLAY_VELOCITY_SCALE 1.8 via the engine velocityScale hook on replay path only; live stays 1.0 with per-player scaling from calibrationStats | verified: all 10 positives fire, all 5 negatives silent through filtered pipeline at 1.8 | S7, S13
+[2026-07-30 04:12] Hand origin unprojects onto a reach plane 0.8m in front of camera, frustum-sized so frame-edge hands ignite at screen edge | the hand is the crosshair, one mapping point | S7, S10
+[2026-07-30 04:12] Sustained VFX cones self-terminate after 0.6s without ticks | lost sustain-end must never hold a pooled light forever | S10, S14
+[2026-07-30 04:12] All audio synthesized with Web Audio, zero external files | license-clean by construction, tiny bundle | S12
 
 ### 16.4 Known issues / debt
 
