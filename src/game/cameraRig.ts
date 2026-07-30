@@ -18,6 +18,15 @@ import type { FaceFrame } from '../tracking/types';
 
 /** Max parallax rotation away from the base orientation, radians (~4 deg). */
 export const MAX_PARALLAX_RAD = THREE.MathUtils.degToRad(4);
+/**
+ * Sign applied to player-space head yaw before the Y-axis camera rotation.
+ * Player space says positive yaw = the player looks to their own right, but a
+ * positive Three.js rotation about +Y pans the camera LEFT (forward -Z swings
+ * toward -X). That hidden flip previously inverted the parallax. -1 makes
+ * head-left pan the camera left, window style, per Section 8. Runtime
+ * togglable via CameraRig.parallaxYawSign (the P key in the arena).
+ */
+export const PARALLAX_YAW_SIGN = -1;
 /** Max positional deflection away from the base path, meters. */
 export const MAX_PARALLAX_OFFSET = 0.25;
 /** Parallax smoothing time constant, seconds. */
@@ -107,6 +116,7 @@ export class CameraRig {
 
   private travel: TravelState | null = null;
   private travelCount = 0;
+  private yawSign: number = PARALLAX_YAW_SIGN;
 
   private shakes: ShakeState[] = [];
   private shakeSeed = 0x9e3779b9;
@@ -141,6 +151,34 @@ export class CameraRig {
     return this.travel !== null;
   }
 
+  /** Current yaw sign (+1 or -1); see PARALLAX_YAW_SIGN. */
+  get parallaxYawSign(): number {
+    return this.yawSign;
+  }
+
+  /** Runtime toggle target (the P key). Snaps to +1/-1; the smoothed state
+   *  eases to the re-signed target over PARALLAX_TAU, so no camera snap. */
+  set parallaxYawSign(sign: number) {
+    this.yawSign = sign >= 0 ? 1 : -1;
+  }
+
+  /** Debug view of the smoothed parallax delta currently applied (Task 4 HUD). */
+  get parallaxState(): {
+    yaw: number;
+    pitch: number;
+    offset: { x: number; y: number; z: number };
+  } {
+    return {
+      yaw: this.parallaxYaw,
+      pitch: this.parallaxPitch,
+      offset: {
+        x: this.parallaxPos.x,
+        y: this.parallaxPos.y,
+        z: this.parallaxPos.z,
+      },
+    };
+  }
+
   /**
    * Feed the latest (already upstream-filtered) head pose. Yaw/pitch/position
    * drive a small camera offset, hard clamped and heavily smoothed here on top
@@ -153,7 +191,7 @@ export class CameraRig {
     const targetPos = this.tmpA.set(0, 0, 0);
 
     if (face !== null) {
-      targetYaw = face.yaw * ROT_GAIN;
+      targetYaw = this.yawSign * face.yaw * ROT_GAIN;
       targetPitch = face.pitch * ROT_GAIN;
       // Clamp the combined rotation magnitude so yaw + pitch together can
       // never exceed the 4 degree budget.

@@ -45,6 +45,37 @@ describe('CameraRig home pose', () => {
   });
 });
 
+describe('CameraRig parallax yaw sign (Section 8, window style)', () => {
+  // Player space: positive yaw = the player looks to their own right.
+  // Window style: looking right must pan the camera right. At the home pose
+  // (forward -z, up +y) camera-right is world +x, so the settled forward
+  // vector must tilt toward +x for positive yaw and -x for negative.
+  it('head right pans the camera right, head left pans left', () => {
+    const settle = (yaw: number): number => {
+      const { camera, rig } = makeRig();
+      const f = face(yaw, 0, 0.5, 0.5);
+      for (let i = 0; i < 300; i++) {
+        rig.applyHeadPose(f, DT);
+        rig.update(DT);
+      }
+      return camera.getWorldDirection(new THREE.Vector3()).x;
+    };
+    expect(settle(0.2)).toBeGreaterThan(0.005); // looks right -> pans right
+    expect(settle(-0.2)).toBeLessThan(-0.005); // looks left -> pans left
+  });
+
+  it('the runtime sign toggle flips the settled direction', () => {
+    const { camera, rig } = makeRig();
+    rig.parallaxYawSign = -rig.parallaxYawSign;
+    const f = face(0.2, 0, 0.5, 0.5);
+    for (let i = 0; i < 300; i++) {
+      rig.applyHeadPose(f, DT);
+      rig.update(DT);
+    }
+    expect(camera.getWorldDirection(new THREE.Vector3()).x).toBeLessThan(-0.005);
+  });
+});
+
 describe('CameraRig parallax clamps', () => {
   it('never exceeds 4 degrees rotation or 0.25 m offset under extreme input', () => {
     const { camera, rig } = makeRig();

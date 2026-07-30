@@ -278,6 +278,11 @@ export class ArenaScreen implements Screen {
   private faultLayer: HTMLElement | null = null;
   private onContextLost: ((e: Event) => void) | null = null;
 
+  // Runtime debug keys (Task 1): P flips the parallax yaw sign with a toast.
+  private onKeyDown: ((e: KeyboardEvent) => void) | null = null;
+  private toastEl: HTMLElement | null = null;
+  private toastTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Frame state (reused, no per-frame allocation).
   private readonly clock = new THREE.Clock();
   private elapsed = 0;
@@ -439,6 +444,23 @@ export class ArenaScreen implements Screen {
     this.buildLossOverlay(root);
     this.buildHintChip(root);
 
+    // Runtime keys: P toggles the parallax yaw sign (Section 8 verification).
+    this.onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'p' || e.key === 'P') {
+        const rig = this.rig;
+        if (!rig) return;
+        rig.parallaxYawSign = -rig.parallaxYawSign;
+        const windowStyle = rig.parallaxYawSign < 0;
+        this.showToast(
+          root,
+          windowStyle
+            ? 'Parallax yaw: head left pans left (window style, default)'
+            : 'Parallax yaw: head left pans right (flipped)',
+        );
+      }
+    };
+    window.addEventListener('keydown', this.onKeyDown);
+
     // WebGL context loss: the flame guttered.
     this.onContextLost = (e: Event) => {
       e.preventDefault();
@@ -479,6 +501,16 @@ export class ArenaScreen implements Screen {
       );
     }
     this.onContextLost = null;
+    if (this.onKeyDown) {
+      window.removeEventListener('keydown', this.onKeyDown);
+      this.onKeyDown = null;
+    }
+    if (this.toastTimer !== null) {
+      clearTimeout(this.toastTimer);
+      this.toastTimer = null;
+    }
+    this.toastEl?.remove();
+    this.toastEl = null;
     this.degrade = null;
     this.loss = null;
     this.hint = null;
@@ -732,6 +764,35 @@ export class ArenaScreen implements Screen {
     root.appendChild(layer);
     this.lossLayer = layer;
     this.lossCountEl = count;
+  }
+
+  /** Transient bottom-center chip for runtime toggles (P key feedback). */
+  private showToast(root: HTMLElement, text: string): void {
+    if (!this.toastEl) {
+      const el = document.createElement('div');
+      el.style.position = 'absolute';
+      el.style.bottom = '12%';
+      el.style.left = '50%';
+      el.style.transform = 'translateX(-50%)';
+      el.style.padding = '8px 18px';
+      el.style.background = 'rgba(13, 10, 8, 0.85)';
+      el.style.border = '1px solid rgba(201, 119, 46, 0.5)';
+      el.style.borderRadius = '4px';
+      el.style.color = '#e0a458';
+      el.style.font = '14px/1.4 serif';
+      el.style.letterSpacing = '0.04em';
+      el.style.pointerEvents = 'none';
+      el.style.zIndex = '40';
+      root.appendChild(el);
+      this.toastEl = el;
+    }
+    this.toastEl.textContent = text;
+    this.toastEl.style.display = 'block';
+    if (this.toastTimer !== null) clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => {
+      if (this.toastEl) this.toastEl.style.display = 'none';
+      this.toastTimer = null;
+    }, 2500);
   }
 
   /** Non-blocking single-hand hint chip (hidden until the FSM says show). */
