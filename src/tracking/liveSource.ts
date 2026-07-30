@@ -70,6 +70,11 @@ export interface LiveSourceStats {
 export class LiveLandmarkSource implements LandmarkSource {
   private listeners = new Set<FrameListener>();
   private stream: MediaStream | null = null;
+
+  /** Camera stream for UI preview (calibration's dimmed feed). Null before start(). */
+  get mediaStream(): MediaStream | null {
+    return this.stream;
+  }
   private video: HTMLVideoElement | null = null;
   private handLandmarker: HandLandmarker | null = null;
   private faceLandmarker: FaceLandmarker | null = null;

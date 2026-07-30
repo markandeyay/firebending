@@ -1,0 +1,269 @@
+/*
+ * Firebending shared UI theme. Ink, parchment, lacquered wood, firelight.
+ * Aesthetic law (spec Section 2): no neon, no cyan or blue, no sci-fi glow,
+ * no gradients as decoration. All light is warm firelight. UI motion is fast
+ * and weighty, never bouncy.
+ */
+
+:root {
+  /* Palette */
+  --fb-lacquer: #0d0a08;
+  --fb-charcoal: #1a1512;
+  --fb-oxblood: #6b1f15;
+  --fb-vermilion: #8a2f1d;
+  --fb-gold: #a8853c;
+  --fb-parchment: #d8c8a8;
+  --fb-parchment-dim: rgba(216, 200, 168, 0.55);
+  --fb-ember: #c9772e;
+  --fb-ember-bright: #e0a458;
+
+  /*
+   * Font stacks. TODO(orchestrator): vendor an open-licensed brush or
+   * calligraphic display font (a woff2 checked into the repo, declared via
+   * @font-face here) and put its family name first in --fb-font-display.
+   * Until then this stack leans on licensed system serif and mincho faces
+   * that carry a calligraphic feel on each platform.
+   */
+  --fb-font-display: 'Yu Mincho', 'Hiragino Mincho ProN', 'Palatino Linotype',
+    'Book Antiqua', Georgia, serif;
+  --fb-font-body: Georgia, 'Palatino Linotype', 'Times New Roman', serif;
+}
+
+/* ------------------------------------------------------------------ */
+/* Screen layers                                                       */
+/* ------------------------------------------------------------------ */
+
+.fb-screen-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  font-family: var(--fb-font-body);
+  color: var(--fb-parchment);
+  user-select: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared controls                                                     */
+/* ------------------------------------------------------------------ */
+
+/* Wax seal button: deep vermilion disc, embossed with inset shadows,
+   muted gold rim. Press feel is a small heavy sink, no bounce. */
+.fb-seal-btn {
+  width: 122px;
+  height: 122px;
+  border-radius: 50%;
+  background-color: var(--fb-vermilion);
+  border: 2px solid rgba(168, 133, 60, 0.55);
+  color: var(--fb-parchment);
+  font-family: var(--fb-font-display);
+  font-size: 1.3rem;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+  cursor: pointer;
+  box-shadow:
+    inset 0 3px 6px rgba(224, 164, 88, 0.2),
+    inset 0 -6px 12px rgba(13, 10, 8, 0.6),
+    inset 0 0 0 7px rgba(107, 31, 21, 0.9),
+    0 5px 16px rgba(0, 0, 0, 0.65);
+  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+
+.fb-seal-btn:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 3px 6px rgba(224, 164, 88, 0.28),
+    inset 0 -6px 12px rgba(13, 10, 8, 0.6),
+    inset 0 0 0 7px rgba(107, 31, 21, 0.9),
+    0 7px 20px rgba(0, 0, 0, 0.7);
+}
+
+.fb-seal-btn:active {
+  transform: translateY(2px) scale(0.98);
+  box-shadow:
+    inset 0 4px 9px rgba(13, 10, 8, 0.55),
+    inset 0 0 0 7px rgba(107, 31, 21, 0.95),
+    0 2px 8px rgba(0, 0, 0, 0.6);
+}
+
+.fb-seal-btn:focus-visible {
+  outline: 2px solid var(--fb-gold);
+  outline-offset: 4px;
+}
+
+/* Parchment panel for HUD and dialogs. */
+.fb-panel {
+  background-color: var(--fb-parchment);
+  color: var(--fb-charcoal);
+  border: 1px solid rgba(26, 21, 18, 0.4);
+  box-shadow:
+    inset 0 0 24px rgba(107, 31, 21, 0.12),
+    0 4px 14px rgba(0, 0, 0, 0.5);
+  padding: 0.9rem 1.2rem;
+  font-family: var(--fb-font-body);
+}
+
+.fb-smallprint {
+  color: var(--fb-parchment-dim);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Title screen                                                        */
+/* ------------------------------------------------------------------ */
+
+.fb-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Black lacquer with a subtle firelit vignette. Lighting, not decoration. */
+  background: radial-gradient(
+    ellipse at 50% 44%,
+    var(--fb-charcoal) 0%,
+    #120e0b 58%,
+    var(--fb-lacquer) 100%
+  );
+}
+
+.fb-title-embers {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.fb-title-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3rem;
+  text-align: center;
+}
+
+.fb-wordmark {
+  margin: 0;
+  font-family: var(--fb-font-display);
+  font-weight: 600;
+  font-size: clamp(3rem, 9vw, 6.5rem);
+  letter-spacing: 0.3em;
+  text-indent: 0.3em;
+  color: var(--fb-parchment);
+  /* Ink depth plus a faint warm cast from the embers. Kept restrained. */
+  text-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.85),
+    0 0 24px rgba(201, 119, 46, 0.2);
+}
+
+/* ------------------------------------------------------------------ */
+/* Calibration screen                                                  */
+/* ------------------------------------------------------------------ */
+
+.fb-cal {
+  background-color: var(--fb-lacquer);
+}
+
+.fb-cal-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Mirror so the player sees themselves as in a mirror. */
+  transform: scaleX(-1);
+  opacity: 0.3;
+  filter: brightness(0.75) saturate(0.6);
+}
+
+.fb-cal-shade {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(13, 10, 8, 0.35);
+  pointer-events: none;
+}
+
+.fb-hand {
+  position: absolute;
+  width: 108px;
+  height: 140px;
+  transform: translate(-50%, -50%);
+  transition: left 140ms ease-out, top 140ms ease-out;
+  pointer-events: none;
+}
+
+.fb-hand--left svg {
+  transform: scaleX(-1);
+}
+
+.fb-hand svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.fb-hand path {
+  fill: none;
+  stroke: rgba(216, 200, 168, 0.55);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 200ms ease-out;
+}
+
+/* Ignition: a fast heavy settle and a warm flicker. Subtle, firelight only. */
+.fb-hand.ignited {
+  animation:
+    fb-ignite 240ms ease-out,
+    fb-hand-flicker 1.1s ease-in-out 240ms infinite alternate;
+}
+
+.fb-hand.ignited path {
+  stroke: var(--fb-ember-bright);
+  filter: drop-shadow(0 0 9px rgba(201, 119, 46, 0.55));
+}
+
+@keyframes fb-ignite {
+  from {
+    transform: translate(-50%, -50%) scale(1.16);
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes fb-hand-flicker {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.82;
+  }
+}
+
+.fb-cal-text {
+  position: absolute;
+  left: 50%;
+  bottom: 16%;
+  transform: translateX(-50%);
+  font-family: var(--fb-font-display);
+  font-size: clamp(1.2rem, 3vw, 2rem);
+  letter-spacing: 0.2em;
+  text-indent: 0.2em;
+  color: var(--fb-parchment);
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+  animation: fb-text-in 260ms ease-out;
+}
+
+@keyframes fb-text-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
