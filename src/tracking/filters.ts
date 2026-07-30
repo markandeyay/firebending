@@ -185,7 +185,14 @@ export class HandFilterBank {
       return f ? f.filter(lm, tSec) : { x: lm.x, y: lm.y, z: lm.z };
     });
 
-    return { landmarks, confidence: hand.confidence };
+    // World landmarks pass through unfiltered: they are metric SHAPE data
+    // (finger pose for the gloves), where crisp curl response matters more
+    // than smoothness, and the glove anchor is already spring-damped.
+    return {
+      landmarks,
+      confidence: hand.confidence,
+      ...(hand.world ? { world: hand.world } : {}),
+    };
   }
 
   reset(): void {

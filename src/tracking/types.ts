@@ -43,6 +43,15 @@ export interface HandFrame {
   landmarks: Vec3[];
   /** Presence confidence 0..1. */
   confidence: number;
+  /**
+   * OPTIONAL MediaPipe world landmarks: 21 points in METERS, roughly
+   * hand-centered, mirrored into player space consistently with `landmarks`
+   * (x negated; y down and z unchanged, matching the MediaPipe axes). Live
+   * detection fills it; recordings and fixtures that predate the field lack
+   * it, and all downstream code must treat its absence as fully supported
+   * (see vfx/gloves.ts shapeLandmarks for the screen-space fallback).
+   */
+  world?: Vec3[];
 }
 
 export interface FaceFrame {

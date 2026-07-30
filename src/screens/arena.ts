@@ -78,6 +78,8 @@ import { configureRenderer } from '../game/renderer';
 import { Director } from '../game/director';
 import { FireSystem, type AmbientFlameHandle } from '../vfx/fire';
 import { MoveEffects } from '../vfx/moveEffects';
+import { GloveSystem } from '../vfx/gloves';
+import { WebcamPip } from '../ui/pip';
 import { ImpactSystem } from '../vfx/impact';
 import { HUD } from '../ui/hud';
 import { EmpowerGlow } from '../ui/empowerGlow';
@@ -139,6 +141,11 @@ export interface ArenaContext {
    * The rig pins to that pose and skips travel/parallax/shake entirely.
    */
   shot?: number;
+  /**
+   * Live camera stream for the webcam PIP panel (Phase 2). Replay paths
+   * omit it; the panel then draws skeletons over near-black lacquer.
+   */
+  stream?: MediaStream;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +271,8 @@ export class ArenaScreen implements Screen {
   private manager: ConstructManager | null = null;
   private fire: FireSystem | null = null;
   private fx: MoveEffects | null = null;
+  private gloves: GloveSystem | null = null;
+  private pip: WebcamPip | null = null;
   private impacts: ImpactSystem | null = null;
   private engine: MoveEngine | null = null;
   private combat: CombatSystem | null = null;
@@ -377,6 +386,11 @@ export class ArenaScreen implements Screen {
     }
     this.fx = new MoveEffects(scene, this.fire, camera, this.rig);
     this.impacts = new ImpactSystem(scene, this.fire);
+
+    // In-world gloves (Phase 2): the player's hands, always on.
+    this.gloves = new GloveSystem(scene, this.fire, camera);
+    // Webcam PIP mirror panel (Phase 2): C toggles, on by default.
+    this.pip = new WebcamPip(root, context.stream);
 
     // --- Gesture engine ----------------------------------------------------
     // Real shoulder width (body pose) preferred over the wrist-span proxy.
@@ -493,6 +507,13 @@ export class ArenaScreen implements Screen {
             ? 'Parallax yaw: head left pans left (window style, default)'
             : 'Parallax yaw: head left pans right (flipped)',
         );
+      } else if (e.key === 'c' || e.key === 'C') {
+        const pip = this.pip;
+        if (!pip) return;
+        this.showToast(
+          root,
+          pip.toggle() ? 'Camera panel shown' : 'Camera panel hidden',
+        );
       } else if (e.key === 'd' || e.key === 'D') {
         const hud = this.debugHud;
         const eng = this.engine;
@@ -521,6 +542,7 @@ export class ArenaScreen implements Screen {
       this.latestFrame = frame;
       this.frameFresh = true;
       this.sinceFrameSec = 0;
+      this.pip?.setFrame(frame);
       // While the tracking-loss overlay is up the world is frozen: keep the
       // engine idle too so no move can fire into the paused arena.
       if (this.loss && this.loss.paused) return;
@@ -584,6 +606,10 @@ export class ArenaScreen implements Screen {
     this.glow?.dispose();
     this.glow = null;
     this.trackedCoals = [];
+    this.pip?.dispose();
+    this.pip = null;
+    this.gloves?.dispose();
+    this.gloves = null;
     this.fx?.dispose();
     this.fx = null;
     this.impacts?.dispose();
@@ -713,6 +739,13 @@ export class ArenaScreen implements Screen {
       this.fire?.update(dt);
       this.impacts?.update(dt);
       this.arena?.update(dt, this.elapsed);
+      // Gloves ARE the hands: pose from the latest frame on world dt so
+      // hit-stop freezes them with everything else.
+      this.gloves?.update(
+        dt,
+        this.latestFrame,
+        this.fx !== null && this.fx.chargeActive !== null,
+      );
       this.pollCoals();
 
       // Breath Charge empowerment glow follows the exposed charge window.
@@ -728,6 +761,9 @@ export class ArenaScreen implements Screen {
     rig.update(rawDt);
 
     this.updateHud(rawDt, camera, renderer.domElement);
+
+    // Webcam PIP mirror: display-rate redraw, skips itself while hidden.
+    this.pip?.render();
 
     // Debug HUD: pulls engine/rig state; internally throttled to ~10 Hz.
     if (this.debugHud && this.debugHud.visible && this.engine) {

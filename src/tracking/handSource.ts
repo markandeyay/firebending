@@ -49,6 +49,8 @@ export interface RawHand {
   label: 'Left' | 'Right';
   /** Handedness/presence score 0..1. */
   score: number;
+  /** World landmarks (meters, hand-centered), when the model provides them. */
+  world?: readonly RawLandmark[];
 }
 
 /**
@@ -60,6 +62,20 @@ export function mirrorLandmarks(landmarks: readonly RawLandmark[]): Vec3[] {
   const out: Vec3[] = [];
   for (const lm of landmarks) {
     out.push({ x: 1 - lm.x, y: lm.y, z: lm.z });
+  }
+  return out;
+}
+
+/**
+ * Mirror raw WORLD landmarks (meters, hand-centered) into player space.
+ * World coordinates are metric with x along image-right, so the mirror is a
+ * simple x negation (same convention as poseSource.ts worldVec); y (down)
+ * and z are unchanged. Pure; returns fresh plain Vec3 objects.
+ */
+export function mirrorWorldLandmarks(landmarks: readonly RawLandmark[]): Vec3[] {
+  const out: Vec3[] = [];
+  for (const lm of landmarks) {
+    out.push({ x: -lm.x, y: lm.y, z: lm.z });
   }
   return out;
 }
@@ -94,6 +110,9 @@ export function normalizeHands(hands: readonly RawHand[]): {
     const frame: HandFrame = {
       landmarks: mirrorLandmarks(hand.landmarks),
       confidence: hand.score,
+      ...(hand.world && hand.world.length >= HAND_LANDMARK_COUNT
+        ? { world: mirrorWorldLandmarks(hand.world) }
+        : {}),
     };
     const preferred = playerSlotForLabel(hand.label);
     const fallback = preferred === 'left' ? 'right' : 'left';
@@ -143,7 +162,8 @@ export function detectHands(
     const category = result.handedness[i]?.[0];
     if (!landmarks || !category) continue;
     const label = category.categoryName === 'Right' ? 'Right' : 'Left';
-    raw.push({ landmarks, label, score: category.score });
+    const world = result.worldLandmarks[i];
+    raw.push({ landmarks, label, score: category.score, ...(world ? { world } : {}) });
   }
   return normalizeHands(raw);
 }

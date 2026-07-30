@@ -158,6 +158,8 @@ async function bootGameFlow(
       ...(replayFixture !== null
         ? { velocityScale: REPLAY_VELOCITY_SCALE }
         : {}),
+      // Live camera feed for the webcam PIP panel; replay paths pass none.
+      ...(liveStream !== null ? { stream: liveStream } : {}),
     };
     void manager.show('arena', ctx).then(() => {
       // Brazier crackle bed once the hall is on screen.
