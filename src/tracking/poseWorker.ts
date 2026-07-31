@@ -26,6 +26,7 @@
  */
 
 import type { PoseLandmarker } from '@mediapipe/tasks-vision';
+import { installWorkerWasmShim } from './workerWasmShim';
 import { createPoseLandmarker } from './poseSource';
 import type { PoseModelVariant, RawPoseLandmark } from './poseSource';
 
@@ -86,6 +87,12 @@ const scope = self as unknown as {
   postMessage(msg: PoseWorkerResponse): void;
   onmessage: ((e: MessageEvent<PoseWorkerRequest>) => void) | null;
 };
+
+// MODULE-worker wasm loading fix (workerWasmShim.ts): without it the
+// MediaPipe loader never sets its ModuleFactory global inside a module
+// worker and init ALWAYS failed, silently falling this worker back to the
+// main-thread pose path. Must run before any createPoseLandmarker.
+installWorkerWasmShim();
 
 scope.onmessage = (e: MessageEvent<PoseWorkerRequest>): void => {
   const msg = e.data;

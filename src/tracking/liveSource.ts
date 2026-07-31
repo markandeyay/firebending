@@ -1,72 +1,84 @@
 /**
  * LiveLandmarkSource: the real-camera implementation of LandmarkSource.
  *
- * WORKER DECISION (revised, Round 3 Phase 2): HANDS run on the main thread
- * (the MediaPipe GPU delegate already runs inference off the JS thread and
- * the ROI crop path needs the video element + 2d canvases); POSE runs in a
- * dedicated Worker (poseWorker.ts) that owns its own PoseLandmarker. The
- * main thread grabs frames with createImageBitmap(video) (transferable, no
- * copy) at a target 25 Hz cadence and posts them over; the worker answers
- * with the RAW landmark arrays and the main thread runs the pure extraction
- * (extractPoseFrame + headPoseFromPose) so all coordinate math stays
- * unit-testable. BACKPRESSURE: never more than ONE frame in flight; while
- * the worker is busy, capture is skipped, so the achieved pose Hz (reported
- * in stats) self-regulates to what the machine can do. If Worker or
- * createImageBitmap is unavailable (or worker init fails), pose falls back
- * to the main thread on the classic every-2nd-frame schedule.
+ * WORKER DECISION (revised, quality round Phase 1): BOTH models now run in
+ * dedicated Workers. Pose kept its worker (poseWorker.ts); hands moved into
+ * handWorker.ts, which owns all three HandLandmarker instances (2-hand
+ * full-frame + two 1-hand ROI crop instances) and the two OffscreenCanvas
+ * crop targets. The previous revision ran hand inference SYNCHRONOUSLY
+ * inside requestVideoFrameCallback (up to two crop detects plus a full-frame
+ * detect per frame), which collapsed the video frame callback rate to
+ * whatever inference allowed (~14 fps observed in studio recordings). Now
+ * the main thread only: grabs frames with createImageBitmap(video)
+ * (transferable, no copy), computes the pure crop-box math, and runs the
+ * pure result extraction, so main-thread ML cost is bookkeeping only.
  *
- * HEAD POSE: FaceLandmarker is GONE (Phase 2). Every pose sample also
- * derives frame.face via headPoseFromPose (nose + ears), sample-and-held at
- * pose rate. FaceFrame and all its consumers are unchanged.
+ * EMISSION (decoupled): exactly ONE LandmarkFrame is emitted per fresh
+ * hand-worker result. Hands are the fast channel: the emission rate equals
+ * the achieved hand Hz (target: the camera's 30 Hz), independent of the
+ * render loop. Pose interpolates onto each emitted frame as before
+ * (lerpPoseFrames, `interpolated` flag, elbow tracker skips interpolated).
  *
- * POSE INTERPOLATION (worker path): between worker results, per-frame
- * emission linearly interpolates the last two pose samples
- * (lerpPoseFrames, extrapolation capped at 80 ms) so downstream consumers
- * see smooth per-frame pose. Interpolated frames carry `interpolated:
- * true`; the move engine's elbow angular-velocity tracker skips them and
- * differences only real samples. The frame on which a fresh sample arrives
- * emits the RAW sample itself.
+ * BACKPRESSURE (hands): LATEST-FRAME-WINS via LatestWinsChannel: at most one
+ * frame in flight to the worker; a newer capture REPLACES a parked pending
+ * one (its bitmap is closed), so latency stays bounded at one worker
+ * round-trip plus one capture and never queues. Pose keeps its classic
+ * one-in-flight skip-while-busy rule.
  *
- * Scheduling: hand detection every video frame; pose per the worker cadence
- * above (fallback: every 2nd frame ~15 Hz, every 4th when degraded).
- * Degrade rule: if the rolling average (60 frames) of total MAIN-THREAD ML
- * time per frame exceeds the 7 ms budget, the internal ladder halves the
- * pose rate (worker cadence and fallback interval both respect it). Hands
- * are never degraded.
+ * FALLBACK: if Worker/OffscreenCanvas/createImageBitmap are unavailable or a
+ * worker fails (init or runtime), that model falls back to the exact
+ * pre-worker main-thread path (sync hand detection per frame, pose every
+ * 2nd frame), same graceful-failure style for both.
  *
- * ROI CROP HAND PATH (Round 3 Phase 1): per side, when the held pose is
- * FRESH (sample within POSE_FRESH_MS) and that wrist is visible, the hand
- * detector runs on a square crop around the pose wrist, drawn upscaled into
- * a reused 256x256 canvas, instead of on the full frame. Landmarks map back
- * to full-frame space (roiCrop.ts) and then get the exact same mirroring as
- * before; the frame slot comes from the POSE side, not the MediaPipe
- * handedness label, which removes label flips entirely on this path. Sides
- * whose pose is stale or wrist not visible fall back to the legacy
- * full-frame 2-hand detection, which stays alive for that purpose; the two
- * paths never both run for the same side in one frame.
+ * CAPTURE TIMESTAMP: every emitted frame carries captureTs, the
+ * performance.now()-domain capture time of the source video frame
+ * (rvfc metadata.captureTime, else presentationTime, else the callback
+ * now). Fixtures/recordings lack it; absence is fully supported downstream.
  *
- * CROP ARCHITECTURE CHOICE: (a) two dedicated 1-hand HandLandmarker
- * instances, one per side, VIDEO mode, rather than (b) one 2-hand instance
- * over a composite side-by-side canvas. Rationale: each instance keeps its
- * own temporal tracking state locked to one hand's crop stream, so tracking
- * continuity survives the other hand appearing/disappearing; there is no
- * composite-canvas bookkeeping, no gap tuning, and no ambiguity when a
- * detection straddles the split line; timestamps are trivially monotonic
- * per instance (each is called at most once per frame with the shared
- * strictly-increasing frame timestamp). The cost is one extra hand-model
- * instance in memory (a few MB), which profiling has not shown to matter.
+ * PREDICTION: predictedHands(nowMs) extrapolates the last two REAL emitted
+ * hand samples by constant wrist velocity (rigid whole-hand offset, capped
+ * at +100 ms; see predict.ts) so the glove render path can sample hands at
+ * render rate. Gesture code keeps consuming real emitted frames only.
+ *
+ * HEAD POSE: derived from pose samples (headPoseFromPose), unchanged.
+ *
+ * DEGRADE: the internal ML-budget rule (7 ms) protects the MAIN THREAD and
+ * therefore keeps evaluating main-thread cost only (on the worker paths
+ * that is crop math + extraction, ~0); worker-side detect costs are
+ * reported separately in stats. setPoseIntervalMultiplier still works on
+ * both pose paths.
+ *
+ * ROI CROP HAND PATH: unchanged in substance: per side, when the held pose
+ * is FRESH and that wrist is visible, the hand detector runs on a square
+ * crop around the pose wrist; the box math and the crop->player mapping are
+ * the same pure roiCrop.ts functions, now split main/worker: the MAIN
+ * thread computes and keeps the smoothed boxes and maps results back to
+ * player space; the worker only draws the region and detects. Sides
+ * without a box are covered by one full-frame 2-hand detect (only when at
+ * least one side lacks a box). The frame slot comes from the POSE side.
+ *
+ * CROP ARCHITECTURE CHOICE (unchanged): two dedicated 1-hand HandLandmarker
+ * instances, one per side, each keeping its own temporal tracking state and
+ * trivially monotonic per-instance timestamps; cost is one extra hand-model
+ * instance in memory.
  */
 
 import type { HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import type {
   FaceFrame,
   FrameListener,
+  HandFrame,
   LandmarkFrame,
   LandmarkSource,
   PoseFrame,
 } from './types';
-import type { HandFrame, PoseArm } from './types';
-import { createHandLandmarker, detectHands, detectTopHand } from './handSource';
+import type { PoseArm } from './types';
+import {
+  createHandLandmarker,
+  detectHands,
+  detectTopHand,
+  normalizeHands,
+} from './handSource';
 import {
   createPoseLandmarker,
   detectPoseAndHead,
@@ -75,6 +87,7 @@ import {
   lerpPoseFrames,
 } from './poseSource';
 import type { PoseWorkerRequest, PoseWorkerResponse } from './poseWorker';
+import type { HandWorkerRequest, HandWorkerResponse } from './handWorker';
 import {
   CROP_SIZE_PX,
   CropSmoother,
@@ -85,9 +98,15 @@ import {
   frameSlotForPoseSide,
   playerToRaw,
   selectHandPath,
+  type CropBox,
 } from './roiCrop';
+import { LatestWinsChannel } from './latestWins';
+import { HandPredictor, type PredictedHands } from './predict';
+import { LatencyMeter, RateMeter, type Percentiles } from './meters';
 
-/** Combined ML budget per frame in ms (Section 14). */
+/** Combined ML budget per frame in ms (Section 14). MAIN-THREAD only: the
+ * budget exists to protect the frame loop, and worker-side detect cost never
+ * touches it (reported separately in rateStats). */
 const ML_BUDGET_MS = 7;
 const ROLLING_WINDOW = 60;
 const POSE_INTERVAL_NORMAL = 2;
@@ -132,7 +151,9 @@ class RollingAverage {
 }
 
 export interface LiveSourceStats {
-  /** Rolling average TOTAL hand-path time per frame (crop + fallback), ms. */
+  /** Rolling average MAIN-THREAD hand-path time per frame, ms. On the
+   * worker path this is crop-box math + capture bookkeeping (~0); on the
+   * fallback it is the full synchronous crop + detect cost as before. */
   handMs: number;
   /** Rolling average pose inference time per detection, ms (worker path:
    * measured inside the worker, off the main thread). */
@@ -143,21 +164,59 @@ export interface LiveSourceStats {
   poseHz: number;
   /** True while pose runs in the dedicated worker; false on the fallback. */
   poseWorkerActive: boolean;
-  /** Rolling average frames per second of the emit loop. */
+  /** True while hands run in the dedicated worker; false on the fallback. */
+  handWorkerActive: boolean;
+  /** Rolling average frames per second of the video frame callback loop. */
   fps: number;
-  /** Rolling average ROI crop draw+detect time (frames where crops ran), ms. */
+  /** Rolling average main-thread crop-path time (frames where crops ran), ms. */
   cropMs: number;
   /** Whether each side used the ROI crop path on the most recent frame. */
   cropActive: { left: boolean; right: boolean };
 }
 
-/** Per-side state for the ROI crop path. */
+/** Measured rates and latencies (exact p50/p95 over ~240-sample windows). */
+export interface LiveRateStats {
+  /** Video frame callback cadence (the camera's delivered rate). */
+  cameraHz: Percentiles;
+  /** Fresh hand results = emitted LandmarkFrames per second. */
+  handHz: Percentiles;
+  /** Achieved pose sample rate. */
+  poseHz: Percentiles;
+  /** Emit wallclock minus captureTs, per emitted frame, ms. */
+  photonToEmitMs: Percentiles;
+  /** Rolling average MAIN-THREAD ML/bookkeeping ms per video frame (the
+   * degrade rule's input; ~0 when both workers run). */
+  mainMlMs: number;
+  /** Rolling average in-worker hand draw+detect ms (0 on the fallback,
+   * where the cost is main-thread and lives in mainMlMs). */
+  workerHandDetectMs: number;
+  /** Rolling average in-worker pose detect ms (0 on the fallback). */
+  workerPoseDetectMs: number;
+  handWorkerActive: boolean;
+  poseWorkerActive: boolean;
+}
+
+/** Per-side state for the ROI crop path (main-thread fallback canvases; the
+ * worker path only uses the smoother and the active flag). */
 interface CropSide {
   landmarker: HandLandmarker | null;
   canvas: HTMLCanvasElement | null;
   ctx: CanvasRenderingContext2D | null;
   smoother: CropSmoother;
   active: boolean;
+}
+
+/** One captured video frame on its way to (or through) the hand worker.
+ * The main thread KEEPS the crop boxes: they are needed to map the crop
+ * results back to full-frame space when the worker answers. */
+interface HandCapture {
+  bitmap: ImageBitmap;
+  timestampMs: number;
+  /** Frame-clock time (ms since source start) of the capture. */
+  frameT: number;
+  /** performance.now()-domain capture time of the video frame. */
+  captureTs: number;
+  crops: { left: CropBox | null; right: CropBox | null };
 }
 
 export class LiveLandmarkSource implements LandmarkSource {
@@ -191,11 +250,18 @@ export class LiveLandmarkSource implements LandmarkSource {
   private cropMsAvg = new RollingAverage(ROLLING_WINDOW);
   private totalMsAvg = new RollingAverage(ROLLING_WINDOW);
   private fpsAvg = new RollingAverage(ROLLING_WINDOW);
+  private workerHandMsAvg = new RollingAverage(ROLLING_WINDOW);
 
-  // --- Pose worker state (see the header WORKER DECISION note) -------------
+  // --- Rate/latency meters (quality round Phase 1) -------------------------
+  private readonly cameraRate = new RateMeter();
+  private readonly handRate = new RateMeter();
+  private readonly poseRate = new RateMeter();
+  private readonly photonToEmit = new LatencyMeter();
+
+  // --- Pose worker state ---------------------------------------------------
   private poseWorker: Worker | null = null;
   private poseWorkerReady = false;
-  /** Backpressure: at most ONE frame in flight to the worker. */
+  /** Backpressure: at most ONE frame in flight to the pose worker. */
   private poseInFlight = false;
   private lastPoseSendAt = -Infinity;
   /** Frame-clock time of the capture currently in flight. */
@@ -207,6 +273,20 @@ export class LiveLandmarkSource implements LandmarkSource {
   private poseSampleLast: PoseFrame | null = null;
   /** True exactly until the newest raw sample has been emitted once. */
   private poseSampleFresh = false;
+
+  // --- Hand worker state ---------------------------------------------------
+  private handWorker: Worker | null = null;
+  private handWorkerReady = false;
+  /** Latest-frame-wins channel; send transfers the bitmap to the worker. */
+  private handChannel: LatestWinsChannel<HandCapture> | null = null;
+  /** The capture whose result we are waiting on (its crop boxes map the
+   * answer back to player space). */
+  private inFlightHandCapture: HandCapture | null = null;
+  /** Monotonic guard on offered captures (createImageBitmap resolution
+   * order is FIFO in practice; this makes out-of-order impossible). */
+  private lastOfferedTimestamp = -1;
+  private readonly predictor = new HandPredictor();
+
   private readonly cropSides: { left: CropSide; right: CropSide } = {
     left: LiveLandmarkSource.emptyCropSide(),
     right: LiveLandmarkSource.emptyCropSide(),
@@ -233,6 +313,7 @@ export class LiveLandmarkSource implements LandmarkSource {
       poseMs: this.poseMsAvg.average,
       poseHz: this.poseHzAvg.average,
       poseWorkerActive: this.poseWorker !== null && this.poseWorkerReady,
+      handWorkerActive: this.handWorker !== null && this.handWorkerReady,
       fps: this.fpsAvg.average,
       cropMs: this.cropMsAvg.average,
       cropActive: {
@@ -240,6 +321,34 @@ export class LiveLandmarkSource implements LandmarkSource {
         right: this.cropSides.right.active,
       },
     };
+  }
+
+  /** Measured rates and latencies (see LiveRateStats). */
+  get rateStats(): LiveRateStats {
+    const poseWorkerActive = this.poseWorker !== null && this.poseWorkerReady;
+    return {
+      cameraHz: this.cameraRate.hz,
+      handHz: this.handRate.hz,
+      poseHz: this.poseRate.hz,
+      photonToEmitMs: this.photonToEmit.ms,
+      mainMlMs: this.totalMsAvg.average,
+      workerHandDetectMs: this.workerHandMsAvg.average,
+      workerPoseDetectMs: poseWorkerActive ? this.poseMsAvg.average : 0,
+      handWorkerActive: this.handWorker !== null && this.handWorkerReady,
+      poseWorkerActive,
+    };
+  }
+
+  /**
+   * Per-side hands extrapolated to `perfNowMs` (performance.now() domain)
+   * from the last two REAL emitted samples: constant wrist velocity applied
+   * as a rigid offset to the whole hand, horizon-capped at +100 ms (see
+   * predict.ts). RENDER-ONLY: the glove path samples this at render rate;
+   * gesture code must keep consuming emitted frames. The returned HandFrames
+   * are reused across calls; consume immediately.
+   */
+  predictedHands(perfNowMs: number): PredictedHands {
+    return this.predictor.predict(perfNowMs - this.startTime);
   }
 
   /** True once the degrade rule has halved the pose detection rate. */
@@ -252,9 +361,7 @@ export class LiveLandmarkSource implements LandmarkSource {
    * 1 restores the normal schedule; 2 halves the pose rate (worker cadence
    * and main-thread fallback both respect it). Composes with the internal
    * ML-budget degrade; hands are never touched. Replay sources have no such
-   * method and the ladder wiring treats that as a no-op. (The old
-   * setFaceIntervalMultiplier hook is gone with FaceLandmarker: head pose
-   * now rides the pose samples for free.)
+   * method and the ladder wiring treats that as a no-op.
    */
   setPoseIntervalMultiplier(multiplier: number): void {
     this.poseIntervalMult = Math.max(1, Math.round(multiplier));
@@ -267,6 +374,7 @@ export class LiveLandmarkSource implements LandmarkSource {
       video: {
         width: { ideal: 640 },
         height: { ideal: 480 },
+        frameRate: { ideal: 30 },
         facingMode: 'user',
       },
       audio: false,
@@ -286,25 +394,30 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.video = video;
     await video.play();
 
-    // Pose: dedicated worker when the platform supports it (Worker +
-    // createImageBitmap), main-thread landmarker otherwise. The worker
-    // initializes in the background; pose frames are simply absent until it
-    // reports ready, and an init failure swaps in the main-thread fallback.
-    const workerCapable =
+    // Workers when the platform supports them; classic main-thread paths
+    // otherwise. Both workers initialize in the background: frames flow
+    // immediately (hands/pose absent until each worker reports ready), and
+    // an init failure swaps in the matching main-thread fallback.
+    const poseWorkerCapable =
       typeof Worker === 'function' && typeof createImageBitmap === 'function';
-    if (workerCapable) this.startPoseWorker();
+    const handWorkerCapable =
+      poseWorkerCapable && typeof OffscreenCanvas === 'function';
+    if (poseWorkerCapable) this.startPoseWorker();
+    if (handWorkerCapable) this.startHandWorker();
 
-    const [hand, cropLeft, cropRight] = await Promise.all([
-      createHandLandmarker(),
-      createHandLandmarker(1),
-      createHandLandmarker(1),
-    ]);
-    this.handLandmarker = hand;
-    if (!workerCapable) {
+    if (!handWorkerCapable) {
+      const [hand, cropLeft, cropRight] = await Promise.all([
+        createHandLandmarker(),
+        createHandLandmarker(1),
+        createHandLandmarker(1),
+      ]);
+      this.handLandmarker = hand;
+      this.initCropSide('left', cropLeft);
+      this.initCropSide('right', cropRight);
+    }
+    if (!poseWorkerCapable) {
       this.poseLandmarker = await createPoseLandmarker();
     }
-    this.initCropSide('left', cropLeft);
-    this.initCropSide('right', cropRight);
 
     this.running = true;
     this.startTime = performance.now();
@@ -347,6 +460,17 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.poseSamplePrev = null;
     this.poseSampleLast = null;
     this.poseSampleFresh = false;
+    if (this.handWorker) {
+      // An in-flight bitmap was transferred and dies with the worker.
+      this.handWorker.terminate();
+      this.handWorker = null;
+    }
+    this.handWorkerReady = false;
+    this.handChannel?.reset(); // closes any parked pending bitmap via onDrop
+    this.handChannel = null;
+    this.inFlightHandCapture = null;
+    this.lastOfferedTimestamp = -1;
+    this.predictor.reset();
     for (const side of ['left', 'right'] as const) {
       const crop = this.cropSides[side];
       crop.landmarker?.close();
@@ -360,7 +484,8 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.lastPose = null;
   }
 
-  /** Wire one side's crop landmarker and its reused upscale canvas. */
+  /** Wire one side's crop landmarker and its reused upscale canvas
+   * (main-thread fallback path only). */
   private initCropSide(side: 'left' | 'right', landmarker: HandLandmarker): void {
     const crop = this.cropSides[side];
     crop.landmarker = landmarker;
@@ -372,6 +497,10 @@ export class LiveLandmarkSource implements LandmarkSource {
     crop.smoother.reset();
     crop.active = false;
   }
+
+  // -------------------------------------------------------------------------
+  // Pose worker plumbing
+  // -------------------------------------------------------------------------
 
   /**
    * Spin up the dedicated pose worker (Vite worker syntax). Failures at any
@@ -438,6 +567,7 @@ export class LiveLandmarkSource implements LandmarkSource {
     if (!this.running) return;
     const frameT = this.pendingPoseFrameT;
     this.poseMsAvg.push(msg.detectMs);
+    this.poseRate.push(performance.now());
     if (this.lastPoseResultFrameT !== null) {
       const dt = frameT - this.lastPoseResultFrameT;
       if (dt > 0) this.poseHzAvg.push(1000 / dt);
@@ -470,7 +600,7 @@ export class LiveLandmarkSource implements LandmarkSource {
   }
 
   /**
-   * Worker-path capture: at most one frame in flight, target cadence
+   * Pose worker-path capture: at most one frame in flight, target cadence
    * POSE_WORKER_INTERVAL_MS scaled by the degrade multipliers. The bitmap
    * is transferable, so the post is copy-free.
    */
@@ -507,7 +637,7 @@ export class LiveLandmarkSource implements LandmarkSource {
   }
 
   /**
-   * The PoseFrame to emit on this video frame:
+   * The PoseFrame to emit on this frame:
    * - the frame right after a worker result emits the RAW sample (the elbow
    *   tracker differences these);
    * - between results, the last two samples interpolate to the frame time
@@ -527,25 +657,231 @@ export class LiveLandmarkSource implements LandmarkSource {
     return lerpPoseFrames(prev, last, frameT);
   }
 
+  // -------------------------------------------------------------------------
+  // Hand worker plumbing
+  // -------------------------------------------------------------------------
+
+  /** Spin up the dedicated hand worker; failures fall back to the classic
+   * synchronous main-thread path (same style as the pose worker). */
+  private startHandWorker(): void {
+    try {
+      const worker = new Worker(new URL('./handWorker.ts', import.meta.url), {
+        type: 'module',
+      });
+      this.handWorker = worker;
+      this.handChannel = new LatestWinsChannel<HandCapture>(
+        (capture) => {
+          this.inFlightHandCapture = capture;
+          const msg: HandWorkerRequest = {
+            type: 'frame',
+            bitmap: capture.bitmap,
+            timestampMs: capture.timestampMs,
+            crops: capture.crops,
+          };
+          worker.postMessage(msg, [capture.bitmap]);
+        },
+        (dropped) => dropped.bitmap.close(),
+      );
+      worker.onmessage = (e: MessageEvent<HandWorkerResponse>) =>
+        this.onHandWorkerMessage(e.data);
+      worker.onerror = (err) => {
+        console.warn('hand worker error, falling back to main-thread hands', err);
+        this.failHandWorker();
+      };
+      const init: HandWorkerRequest = { type: 'init', cropSizePx: CROP_SIZE_PX };
+      worker.postMessage(init);
+    } catch (err) {
+      console.warn('hand worker unavailable, falling back to main-thread hands', err);
+      this.failHandWorker();
+    }
+  }
+
+  /** Tear down the hand worker and adopt the main-thread hand path. */
+  private failHandWorker(): void {
+    if (this.handWorker) {
+      this.handWorker.terminate();
+      this.handWorker = null;
+    }
+    this.handWorkerReady = false;
+    this.handChannel?.reset();
+    this.handChannel = null;
+    this.inFlightHandCapture = null;
+    if (this.handLandmarker) return;
+    void Promise.all([
+      createHandLandmarker(),
+      createHandLandmarker(1),
+      createHandLandmarker(1),
+    ]).then(
+      ([hand, cropLeft, cropRight]) => {
+        if (this.video === null) {
+          hand.close();
+          cropLeft.close();
+          cropRight.close();
+          return;
+        }
+        this.handLandmarker = hand;
+        this.initCropSide('left', cropLeft);
+        this.initCropSide('right', cropRight);
+      },
+      (err: unknown) => console.warn('main-thread hand fallback failed', err),
+    );
+  }
+
+  /**
+   * A hand-worker answer: run the PURE extraction on the main thread
+   * (cropHandToPlayer with the boxes this side kept, normalizeHands for the
+   * full-frame remainder), then EMIT exactly one LandmarkFrame. This is the
+   * emission point of the worker path: emission rate = achieved hand Hz.
+   */
+  private onHandWorkerMessage(msg: HandWorkerResponse): void {
+    if (msg.type === 'ready') {
+      this.handWorkerReady = true;
+      return;
+    }
+    if (msg.type === 'init-error') {
+      console.warn('hand worker init failed, falling back', msg.message);
+      this.failHandWorker();
+      return;
+    }
+    // 'result'
+    const capture = this.inFlightHandCapture;
+    this.inFlightHandCapture = null;
+    if (!this.running || capture === null) return; // stop() raced the answer
+    this.workerHandMsAvg.push(msg.detectMs);
+
+    const hands: { left: HandFrame | null; right: HandFrame | null } = {
+      left: null,
+      right: null,
+    };
+    for (const side of ['left', 'right'] as const) {
+      const box = capture.crops[side];
+      if (box === null) continue;
+      const raw = msg.crop[side];
+      if (!raw) continue;
+      hands[frameSlotForPoseSide(side)] = cropHandToPlayer(
+        raw.landmarks,
+        raw.world,
+        raw.score,
+        box,
+      );
+    }
+    if (msg.full) {
+      const full = normalizeHands(msg.full);
+      if (capture.crops.left === null) hands.left = full.left;
+      if (capture.crops.right === null) hands.right = full.right;
+    }
+
+    const frame: LandmarkFrame = {
+      t: capture.frameT,
+      left: hands.left,
+      right: hands.right,
+      face: this.lastFace,
+      pose: this.poseForEmit(capture.frameT),
+      captureTs: capture.captureTs,
+    };
+    this.predictor.feed(capture.frameT, hands.left, hands.right);
+    const emitNow = performance.now();
+    this.handRate.push(emitNow);
+    this.photonToEmit.push(emitNow - capture.captureTs);
+    this.frameIndex++;
+    for (const l of this.listeners) l(frame);
+
+    // Release the slot LAST: settle() may immediately send the parked
+    // pending capture, which re-fills inFlightHandCapture via the channel's
+    // send callback.
+    this.handChannel?.settle();
+  }
+
+  /**
+   * Worker-path capture: compute the pure crop boxes from the held pose
+   * (smoothers live on the main thread so they see every capture), grab the
+   * frame as a transferable bitmap, and offer it to the latest-wins channel.
+   * Returns the main-thread cost of the box math (the only ML-adjacent work
+   * left on this thread).
+   */
+  private captureForHandWorker(
+    video: HTMLVideoElement,
+    now: number,
+    timestamp: number,
+    captureTs: number,
+  ): number {
+    const mainStart = performance.now();
+    const frameT = now - this.startTime;
+    const pose = this.lastPose;
+    const poseFresh = pose !== null && frameT - pose.t <= POSE_FRESH_MS;
+    const crops: { left: CropBox | null; right: CropBox | null } = {
+      left: null,
+      right: null,
+    };
+    for (const side of ['left', 'right'] as const) {
+      const crop = this.cropSides[side];
+      const visibility = pose?.wristVisibility?.[side] ?? 1;
+      const path = selectHandPath(poseFresh, visibility > WRIST_VISIBILITY_MIN);
+      if (path === 'crop' && pose !== null && video.videoWidth > 0) {
+        const arm: PoseArm = side === 'left' ? pose.left : pose.right;
+        const rawWrist = playerToRaw(arm.wrist);
+        const rawElbow = playerToRaw(arm.elbow);
+        const target = cropBoxForWrist(
+          rawWrist,
+          rawElbow,
+          video.videoWidth / video.videoHeight,
+        );
+        crops[side] = crop.smoother.update(target, rawWrist, now);
+        crop.active = true;
+      } else {
+        crop.active = false;
+        crop.smoother.reset();
+      }
+    }
+    const mainMs = performance.now() - mainStart;
+
+    void createImageBitmap(video).then(
+      (bitmap) => {
+        if (!this.running || !this.handWorkerReady || this.handChannel === null) {
+          bitmap.close();
+          return;
+        }
+        // Monotonic guard: never offer an older capture after a newer one.
+        if (timestamp <= this.lastOfferedTimestamp) {
+          bitmap.close();
+          return;
+        }
+        this.lastOfferedTimestamp = timestamp;
+        this.handChannel.offer({ bitmap, timestampMs: timestamp, frameT, captureTs, crops });
+      },
+      () => {
+        /* a failed grab simply skips this frame */
+      },
+    );
+    return mainMs;
+  }
+
+  // -------------------------------------------------------------------------
+  // Frame loop
+  // -------------------------------------------------------------------------
+
   private scheduleNext(): void {
     const video = this.video;
     if (!this.running || !video) return;
     if (typeof video.requestVideoFrameCallback === 'function') {
-      this.rvfcHandle = video.requestVideoFrameCallback(() => this.processFrame());
+      this.rvfcHandle = video.requestVideoFrameCallback((now, meta) =>
+        this.processFrame(meta.captureTime ?? meta.presentationTime ?? now),
+      );
     } else {
-      this.rafHandle = requestAnimationFrame(() => this.processFrame());
+      this.rafHandle = requestAnimationFrame((now) => this.processFrame(now));
     }
   }
 
-  private processFrame(): void {
+  private processFrame(captureTs: number): void {
     const video = this.video;
-    if (!this.running || !video || !this.handLandmarker) return;
+    if (!this.running || !video) return;
 
     const now = performance.now();
     // MediaPipe VIDEO mode requires strictly increasing timestamps.
     const timestamp = Math.max(now, this.lastTimestamp + 1);
     this.lastTimestamp = timestamp;
 
+    this.cameraRate.push(now);
     if (this.frameIndex > 0) {
       const dt = now - this.lastFrameTime;
       if (dt > 0) this.fpsAvg.push(1000 / dt);
@@ -556,12 +892,6 @@ export class LiveLandmarkSource implements LandmarkSource {
 
     // Pose runs FIRST within the frame so the ROI crop path below always
     // uses the freshest wrist.
-    // Worker path: post a bitmap when the cadence and the one-in-flight
-    // backpressure allow; results land asynchronously in
-    // onPoseWorkerMessage, which also derives the head-pose FaceFrame.
-    // Fallback path: main-thread detection every poseInterval-th frame,
-    // sample-and-held; PoseFrame.t is re-stamped into frame time so
-    // downstream freshness and angular-velocity math share the frame clock.
     if (this.poseWorker !== null) {
       this.maybeSendPoseFrame(video, now, timestamp);
     } else {
@@ -577,11 +907,24 @@ export class LiveLandmarkSource implements LandmarkSource {
       }
     }
 
-    // Hand path selection, per side: ROI crop when the held pose is fresh
-    // and that wrist is visible, legacy full-frame otherwise. The two
-    // paths never both run for the same side in one frame: a full-frame
-    // detection (at most one per frame) only fills the slots of the sides
-    // that did NOT run a crop.
+    if (this.handWorker !== null) {
+      // WORKER PATH: capture-and-post only; the frame EMITS when the worker
+      // answers (onHandWorkerMessage), decoupling emission from this loop.
+      // Until the worker reports ready no frames are emitted (hands are the
+      // emission channel), matching the pre-worker behavior where start()
+      // blocked until the landmarkers existed.
+      if (this.handWorkerReady) {
+        totalMs += this.captureForHandWorker(video, now, timestamp, captureTs);
+      }
+      this.totalMsAvg.push(totalMs);
+      this.stepDegrade();
+      this.frameIndex++;
+      this.scheduleNext();
+      return;
+    }
+
+    // FALLBACK PATH (no hand worker): the classic synchronous per-frame
+    // detection and emission, exactly as before workers existed.
     const frameT = now - this.startTime;
     const pose = this.lastPose;
     const poseFresh = pose !== null && frameT - pose.t <= POSE_FRESH_MS;
@@ -614,7 +957,7 @@ export class LiveLandmarkSource implements LandmarkSource {
         needFull = true;
       }
     }
-    if (needFull) {
+    if (needFull && this.handLandmarker) {
       const full = detectHands(this.handLandmarker, video, timestamp);
       if (!this.cropSides.left.active) hands.left = full.left;
       if (!this.cropSides.right.active) hands.right = full.right;
@@ -625,16 +968,7 @@ export class LiveLandmarkSource implements LandmarkSource {
     totalMs += handMs;
 
     this.totalMsAvg.push(totalMs);
-    if (this.totalMsAvg.full && this.totalMsAvg.average > ML_BUDGET_MS) {
-      // Over budget consistently. Internal ML-budget ladder: halve the pose
-      // rate (hands never degrade; face is free since it rides the pose
-      // samples). The window resets after the step so the next verdict
-      // measures the new configuration instead of the old one's backlog.
-      if (this.poseInterval === POSE_INTERVAL_NORMAL) {
-        this.poseInterval = POSE_INTERVAL_DEGRADED;
-        this.totalMsAvg.reset();
-      }
-    }
+    this.stepDegrade();
 
     const frame: LandmarkFrame = {
       t: frameT,
@@ -642,19 +976,37 @@ export class LiveLandmarkSource implements LandmarkSource {
       right: hands.right,
       face: this.lastFace,
       pose: this.poseForEmit(frameT),
+      captureTs,
     };
+    this.predictor.feed(frameT, hands.left, hands.right);
+    const emitNow = performance.now();
+    this.handRate.push(emitNow);
+    this.photonToEmit.push(emitNow - captureTs);
     this.frameIndex++;
     for (const l of this.listeners) l(frame);
 
     this.scheduleNext();
   }
 
+  /** Internal ML-budget ladder: halve the pose rate when the rolling
+   * MAIN-THREAD ML cost per frame exceeds the budget (hands never degrade).
+   * The window resets after the step so the next verdict measures the new
+   * configuration instead of the old one's backlog. */
+  private stepDegrade(): void {
+    if (this.totalMsAvg.full && this.totalMsAvg.average > ML_BUDGET_MS) {
+      if (this.poseInterval === POSE_INTERVAL_NORMAL) {
+        this.poseInterval = POSE_INTERVAL_DEGRADED;
+        this.totalMsAvg.reset();
+      }
+    }
+  }
+
   /**
-   * Run one side's ROI crop detection: smooth the crop box around the pose
-   * wrist (unmirrored back into raw image space), draw that video region
-   * upscaled into the side's reused CROP_SIZE_PX canvas, detect the single
-   * hand, and map it back to player space. Returns null when the crop
-   * contains no hand.
+   * Run one side's ROI crop detection on the MAIN-THREAD FALLBACK: smooth
+   * the crop box around the pose wrist (unmirrored back into raw image
+   * space), draw that video region upscaled into the side's reused
+   * CROP_SIZE_PX canvas, detect the single hand, and map it back to player
+   * space. Returns null when the crop contains no hand.
    */
   private detectCropSide(
     side: 'left' | 'right',

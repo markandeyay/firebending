@@ -15,6 +15,7 @@
  */
 
 import type { LandmarkFrame } from '../tracking/types';
+import type { Percentiles } from '../tracking/meters';
 import type {
   MoveEngine,
   MoveName,
@@ -26,6 +27,41 @@ import type { Handedness } from '../gestures/poses';
 
 /** Maximum text refresh rate. */
 export const REFRESH_HZ = 10;
+
+/** handHz p50 below this reads as degraded (camera target is 30 Hz). */
+export const HAND_HZ_BAD_BELOW = 28;
+
+/** Warm ink-red for degraded readings (firelight family, never neon). */
+const BAD_COLOR = '#d0532f';
+
+/** Newline constant (kept out of template literals for tooling clarity). */
+const NL = String.fromCharCode(10);
+
+/**
+ * Measured pipeline rates for the RATES block (quality round Phase 1).
+ * Percentile fields render as "name p50/p95"; a null block hides the
+ * section entirely (replay paths without a live source).
+ */
+export interface RatesBlock {
+  cameraHz: Percentiles;
+  handHz: Percentiles;
+  poseHz: Percentiles;
+  renderHz: Percentiles;
+  photonToEmitMs: Percentiles;
+  photonToFireMs: Percentiles;
+  /** Rolling averages (ms), not percentiles. */
+  mainMlMs: number;
+  workerHandDetectMs: number;
+  workerPoseDetectMs: number;
+  handWorkerActive: boolean;
+  poseWorkerActive: boolean;
+}
+
+/** "p50/p95" with one decimal, or "-" before any sample exists. Pure. */
+export function formatPercentiles(p: Percentiles): string {
+  if (p.count === 0) return '-';
+  return `${p.p50.toFixed(1)}/${p.p95.toFixed(1)}`;
+}
 
 /** Short move labels for near-miss lines. */
 const SHORT_NAME: Partial<Record<MoveName, string>> = {
@@ -41,6 +77,8 @@ export interface DebugHudInputs {
   profile: MotionProfile | null;
   parallax: { yaw: number; pitch: number; offset: { x: number; y: number; z: number } };
   parallaxYawSign: number;
+  /** Measured pipeline rates; omit/null on paths without live tracking. */
+  rates?: RatesBlock | null;
 }
 
 /**
@@ -67,8 +105,11 @@ export function formatNearMiss(rec: NearMissRecord): string {
 
 export class DebugHud {
   private readonly el: HTMLElement;
+  private readonly textEl: HTMLElement;
+  private readonly ratesEl: HTMLElement;
   private lastUpdateMs = -Infinity;
   private lastText = '';
+  private lastRatesText = '';
   private readonly missScratch: NearMissRecord[] = [];
   private visibleState = false;
 
@@ -88,8 +129,15 @@ export class DebugHud {
     el.style.pointerEvents = 'none';
     el.style.zIndex = '50';
     el.style.display = 'none';
+    // Two children: the engine text block, then the RATES block (its own
+    // element so the degraded-handHz reading can carry a color span).
+    const textEl = document.createElement('div');
+    const ratesEl = document.createElement('div');
+    el.append(textEl, ratesEl);
     root.appendChild(el);
     this.el = el;
+    this.textEl = textEl;
+    this.ratesEl = ratesEl;
   }
 
   get visible(): boolean {
@@ -120,8 +168,46 @@ export class DebugHud {
     const text = this.compose(inputs);
     if (text !== this.lastText) {
       this.lastText = text;
-      this.el.textContent = text;
+      this.textEl.textContent = text;
     }
+    this.updateRates(inputs.rates ?? null);
+  }
+
+  /** Render the RATES block: each metric as "name p50/p95"; handHz gets the
+   * degraded color when its p50 falls below HAND_HZ_BAD_BELOW. */
+  private updateRates(rates: RatesBlock | null): void {
+    if (rates === null) {
+      if (this.lastRatesText !== '') {
+        this.lastRatesText = '';
+        this.ratesEl.replaceChildren();
+      }
+      return;
+    }
+    const handStr = `hand ${formatPercentiles(rates.handHz)}Hz`;
+    const before = [
+      `rates (p50/p95)`,
+      `  camera ${formatPercentiles(rates.cameraHz)}Hz  `,
+    ].join(NL);
+    const after = [
+      ``,
+      `  pose ${formatPercentiles(rates.poseHz)}Hz  render ${formatPercentiles(rates.renderHz)}Hz`,
+      `  photon>emit ${formatPercentiles(rates.photonToEmitMs)}ms  photon>fire ${formatPercentiles(rates.photonToFireMs)}ms`,
+      `  main ml ${rates.mainMlMs.toFixed(1)}ms  wk hand ${rates.workerHandDetectMs.toFixed(1)}ms  wk pose ${rates.workerPoseDetectMs.toFixed(1)}ms`,
+      `  workers  hand:${rates.handWorkerActive ? 'on' : 'OFF'}  pose:${rates.poseWorkerActive ? 'on' : 'OFF'}`,
+    ].join(NL);
+    const bad = rates.handHz.count > 0 && rates.handHz.p50 < HAND_HZ_BAD_BELOW;
+    const key = `${before}${handStr}${after}|${bad}`;
+    if (key === this.lastRatesText) return;
+    this.lastRatesText = key;
+    // Plain text around a single span carrying the handHz reading.
+    const span = document.createElement('span');
+    span.textContent = handStr;
+    if (bad) span.style.color = BAD_COLOR;
+    this.ratesEl.replaceChildren(
+      document.createTextNode(NL + before),
+      span,
+      document.createTextNode(after),
+    );
   }
 
   private compose(inputs: DebugHudInputs): string {

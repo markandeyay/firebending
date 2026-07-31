@@ -89,6 +89,9 @@ switch (routeFor(params)) {
   case 'debug-perf':
     mountPerfGate(app);
     break;
+  case 'debug-rates':
+    void bootRatesProbe(app);
+    break;
   case 'arena-replay':
     void bootArenaReplay(
       app,
@@ -235,6 +238,29 @@ async function bootGameFlow(
   // no-op on a cold load and rings only when the title mounts with audio
   // already unlocked.
   engine.titleBell();
+}
+
+/**
+ * Headless rates probe (?debug=rates, quality round Phase 1): boot the LIVE
+ * tracking source straight into the arena, skipping title/calibration, so
+ * tools/perfrun.ts (rates mode, fake-device camera flags) can measure the
+ * real end-to-end pipeline: camera cadence, hand/pose worker rates,
+ * emission and render rates, photon-to-emit latency. DEBUG ONLY: no
+ * calibration profile, default stats, no framing gate (the synthetic feed
+ * has no person and would pause the arena forever). Results are read via
+ * the window.__FB_RATES hook the arena installs.
+ */
+async function bootRatesProbe(root: HTMLElement): Promise<void> {
+  const { LiveLandmarkSource } = await import('./tracking/liveSource');
+  const live = new LiveLandmarkSource();
+  await live.start();
+  const stream = live.mediaStream;
+  const screen = new ArenaScreen();
+  await screen.enter(root, {
+    source: live,
+    stats: DEFAULT_CALIBRATION,
+    ...(stream !== null ? { stream } : {}),
+  } satisfies ArenaContext);
 }
 
 /**

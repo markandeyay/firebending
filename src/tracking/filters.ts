@@ -497,6 +497,9 @@ export class FilteredSource implements LandmarkSource {
       right: this.processHand(frame.right, this.rightGate, this.rightBank, tSec),
       face: this.processFace(frame.face, tSec),
       pose: this.processPose(frame.pose ?? null, tSec),
+      // Capture timestamp passes through untouched (latency instrumentation
+      // downstream); absent on fixtures/recordings and stays absent.
+      ...(frame.captureTs !== undefined ? { captureTs: frame.captureTs } : {}),
     };
     for (const l of this.listeners) l(out);
   }

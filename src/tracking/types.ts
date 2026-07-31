@@ -198,6 +198,18 @@ export interface LandmarkFrame {
    * treat an absent/null pose as a fully supported state.
    */
   pose?: PoseFrame | null;
+  /**
+   * OPTIONAL capture timestamp of the SOURCE VIDEO FRAME this LandmarkFrame
+   * was derived from, in the performance.now() clock domain (LIVE camera
+   * only: requestVideoFrameCallback metadata.captureTime when the browser
+   * provides it, else the metadata presentation time, else the callback
+   * now). It measures photon-to-X latency: performance.now() minus captureTs
+   * at any pipeline stage is the age of the light that produced the frame.
+   * Fixtures and recordings NEVER carry it (their t is a synthetic clock
+   * with no wall-time meaning), and all downstream code must treat its
+   * absence as fully supported.
+   */
+  captureTs?: number;
 }
 
 export type FrameListener = (frame: LandmarkFrame) => void;

@@ -52,6 +52,9 @@ import type {
   LandmarkSource,
 } from '../tracking/types';
 import { FilteredSource } from '../tracking/filters';
+import { LatencyMeter, RateMeter } from '../tracking/meters';
+import type { PredictedHands } from '../tracking/predict';
+import type { LiveRateStats } from '../tracking/liveSource';
 import type { ReplaySource } from '../tracking/replaySource';
 import { MoveEngine, type MoveEvent } from '../gestures/moves';
 import {
@@ -90,7 +93,7 @@ import { DegradeLadder } from '../game/degrade';
 import { SingleHandHint, TrackingLoss } from '../game/trackingLoss';
 import { FramingLossWatch } from '../game/framingGate';
 import { handOutline } from '../ui/handOutlines';
-import { DebugHud } from '../ui/debugHud';
+import { DebugHud, type RatesBlock } from '../ui/debugHud';
 import type { MotionProfile } from '../gestures/profile';
 
 // ---------------------------------------------------------------------------
@@ -350,6 +353,26 @@ export class ArenaScreen implements Screen {
   // Debug HUD (D key): engine internals overlay, live and replay alike.
   private debugHud: DebugHud | null = null;
   private ctxProfile: MotionProfile | null = null;
+
+  // Rate/latency instrumentation (quality round Phase 1): renderHz is the
+  // game render loop cadence; photonToFire is fire-spawn wallclock minus the
+  // triggering frame's captureTs. The live source (duck-typed probe) carries
+  // the camera/hand/pose meters; replay paths have no probe and the RATES
+  // block stays hidden.
+  private readonly renderRate = new RateMeter();
+  private readonly photonToFire = new LatencyMeter();
+  private liveProbe: Partial<{
+    predictedHands(nowMs: number): PredictedHands;
+    rateStats: LiveRateStats;
+  }> | null = null;
+  /** Reused glove-path frame (predicted hands substituted; no per-frame alloc). */
+  private readonly gloveFrame: LandmarkFrame = {
+    t: 0,
+    left: null,
+    right: null,
+    face: null,
+    pose: null,
+  };
 
   // Frame state (reused, no per-frame allocation).
   private renderedFrames = 0;
@@ -657,6 +680,17 @@ export class ArenaScreen implements Screen {
     renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
 
     // --- Input pipeline ----------------------------------------------------
+    // Live-source probe (duck-typed like the degrade hook): prediction for
+    // the glove render path and the measured rate meters. Replay sources
+    // expose neither and every use below no-ops.
+    this.liveProbe = context.source as Partial<{
+      predictedHands(nowMs: number): PredictedHands;
+      rateStats: LiveRateStats;
+    }>;
+    // Headless rates report hook (tools/perfrun.ts rates mode): debug-only,
+    // same channel as __FB_DAMAGE.
+    (window as unknown as { __FB_RATES?: () => RatesBlock | null }).__FB_RATES =
+      () => this.composeRates();
     this.filtered = new FilteredSource(context.source);
     this.detachFrames = this.filtered.onFrame((frame) => {
       this.latestFrame = frame;
@@ -703,6 +737,8 @@ export class ArenaScreen implements Screen {
     this.debugHud?.dispose();
     this.debugHud = null;
     this.ctxProfile = null;
+    this.liveProbe = null;
+    delete (window as unknown as { __FB_RATES?: unknown }).__FB_RATES;
     this.degrade = null;
     this.loss = null;
     this.hint = null;
@@ -771,12 +807,68 @@ export class ArenaScreen implements Screen {
   // -------------------------------------------------------------------------
 
   private routeEvent(e: MoveEvent): void {
+    // Photon-to-fire: the fire effect for this event spawns in the
+    // fx.handleEvent call below, so "now minus the triggering frame's
+    // capture time" is the full camera-to-flame latency. Only ignition
+    // events count (sustain ticks would just re-measure frame cadence);
+    // fixtures lack captureTs and record nothing.
+    if (
+      e.captureTs !== undefined &&
+      (e.kind === 'trigger' || e.kind === 'sustain-start')
+    ) {
+      this.photonToFire.push(performance.now() - e.captureTs);
+    }
     this.fx?.handleEvent(e);
     this.combat?.handleMoveEvent(e);
     this.audio.onMoveEvent?.(e);
     if (e.empowered && (e.kind === 'trigger' || e.kind === 'sustain-start')) {
       this.empoweredHotUntil = this.elapsed + EMPOWERED_HOT_SEC;
     }
+  }
+
+  /**
+   * The frame the GLOVES pose from this render tick: on the live path the
+   * hands are replaced by predictedHands (constant-wrist-velocity rigid
+   * extrapolation, horizon-capped; see predict.ts) so the gloves track at
+   * render rate instead of stepping at emission rate. Prediction replaces
+   * the raw input position only; the gloves' own follow spring stays and is
+   * the single smoothing layer on top. A hand the FILTERED pipeline gated
+   * out stays null (prediction never resurrects an untracked hand).
+   * Gesture/move code is untouched: it consumes real emitted frames only.
+   */
+  private frameForGloves(): LandmarkFrame | null {
+    const latest = this.latestFrame;
+    const predictedHands = this.liveProbe?.predictedHands;
+    if (!latest || !predictedHands) return latest;
+    const pred = predictedHands.call(this.liveProbe, performance.now());
+    const gf = this.gloveFrame;
+    gf.t = latest.t;
+    gf.left = latest.left ? (pred.left ?? latest.left) : null;
+    gf.right = latest.right ? (pred.right ?? latest.right) : null;
+    gf.face = latest.face;
+    gf.pose = latest.pose ?? null;
+    return gf;
+  }
+
+  /** Combined RATES report for the debug HUD and the headless rates probe:
+   * live-source meters plus the arena's render/fire meters. Null on replay
+   * paths (no live probe). */
+  private composeRates(): RatesBlock | null {
+    const live = this.liveProbe?.rateStats;
+    if (!live) return null;
+    return {
+      cameraHz: live.cameraHz,
+      handHz: live.handHz,
+      poseHz: live.poseHz,
+      renderHz: this.renderRate.hz,
+      photonToEmitMs: live.photonToEmitMs,
+      photonToFireMs: this.photonToFire.ms,
+      mainMlMs: live.mainMlMs,
+      workerHandDetectMs: live.workerHandDetectMs,
+      workerPoseDetectMs: live.workerPoseDetectMs,
+      handWorkerActive: live.handWorkerActive,
+      poseWorkerActive: live.poseWorkerActive,
+    };
   }
 
   /**
@@ -828,6 +920,7 @@ export class ArenaScreen implements Screen {
     const rig = this.rig;
     if (!renderer || !camera || !scene || !rig) return;
 
+    this.renderRate.push(performance.now());
     const rawDt = Math.min(this.clock.getDelta(), MAX_FRAME_DT_SEC);
     this.sinceFrameSec += rawDt;
 
@@ -891,10 +984,12 @@ export class ArenaScreen implements Screen {
       this.impacts?.update(dt);
       this.arena?.update(dt, this.elapsed);
       // Gloves ARE the hands: pose from the latest frame on world dt so
-      // hit-stop freezes them with everything else.
+      // hit-stop freezes them with everything else. On the LIVE path the
+      // wrist position is extrapolated to render time (predictedHands);
+      // replay paths pass the frame through unchanged.
       this.gloves?.update(
         dt,
-        this.latestFrame,
+        this.frameForGloves(),
         this.fx !== null && this.fx.chargeIsActive,
       );
       this.pollCoals();
@@ -924,6 +1019,7 @@ export class ArenaScreen implements Screen {
         profile: this.ctxProfile,
         parallax: rig.parallaxState,
         parallaxYawSign: rig.parallaxYawSign,
+        rates: this.composeRates(),
       });
     }
 

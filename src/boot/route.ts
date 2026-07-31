@@ -10,6 +10,7 @@ export type RouteName =
   | 'debug-arena'
   | 'debug-fire'
   | 'debug-perf'
+  | 'debug-rates'
   | 'arena-replay'
   | 'title-flow-replay'
   | 'title-flow';
@@ -32,6 +33,11 @@ export function routeFor(params: URLSearchParams): RouteName {
       return 'debug-fire';
     case 'perf':
       return 'debug-perf';
+    case 'rates':
+      // Headless rates probe (tools/perfrun.ts rates mode): boots the LIVE
+      // source straight into the arena, skipping title/calibration. Debug
+      // only; the fake-device flags make it work without a real camera.
+      return 'debug-rates';
     default:
       break; // unknown or absent debug value falls through to the game routes
   }

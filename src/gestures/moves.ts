@@ -118,6 +118,14 @@ export interface MoveEvent {
   kind: MoveEventKind;
   /** Emission time minus trigger-condition completion time; see LATENCY above. */
   triggerLatencyMs: number;
+  /**
+   * OPTIONAL: the captureTs of the LandmarkFrame that triggered this event
+   * (performance.now()-domain capture time of the source video frame; see
+   * types.ts). Live frames carry it; fixtures and recordings never do, and
+   * every consumer must treat its absence as fully supported. Used for
+   * photon-to-fire latency instrumentation.
+   */
+  captureTs?: number;
 }
 
 export interface MoveEngineConfig {
@@ -757,7 +765,7 @@ export class MoveEngine {
     if (this.sustain) {
       // An active sustained move locks out every other trigger.
       this.updateSustain(events, t, dtSec);
-      return events;
+      return this.stampCapture(events, frame);
     }
 
     // Priority order (Section 7): two-hand > grip > pose-agnostic thrusts.
@@ -769,6 +777,15 @@ export class MoveEngine {
     this.evalThrust(events, t, 'left');
     this.evalThrust(events, t, 'right');
 
+    return this.stampCapture(events, frame);
+  }
+
+  /** Stamp every event of this frame with the frame's captureTs (live
+   * frames only; fixtures lack the field and events stay byte-identical). */
+  private stampCapture(events: MoveEvent[], frame: LandmarkFrame): MoveEvent[] {
+    if (frame.captureTs !== undefined) {
+      for (const e of events) e.captureTs = frame.captureTs;
+    }
     return events;
   }
 
