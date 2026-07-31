@@ -255,6 +255,8 @@ Format: `[timestamp] agent | tasks touched | result | next`
 
 [2026-07-31 night] orchestrator | FINAL PASS begun; drill export ingested (11 takes) | CRITICAL: 0 reps confirmed in review on every take (user recorded but never clicked confirm), 5 takes absent (palm strikes x2, all 3 negatives); palm-static take: 83/83 frames >0.75 on BOTH palm scorers (palm detection vindicated on real data) | P1: analyze extended to auto-peak rep windows (data-derived, logged, not guessed); moveset simplification to 7 pose-agnostic moves per user directive
 
+[2026-07-31 night] orchestrator | FINAL P2+P4+P5+P6 merged (P6 committed separately); P1b elbow-only rule validated on drill data (stream 0->40%, jabs capture-limited at 14fps) | fire rebuilt on blackbody temp ramp + curl noise + soft particles + sub-frame emission + density-driven flicker + shimmer + landing embers, half-res pass kept for worst-case fill (no measurable saving at vsync, honest); constructs rebuilt (straw/rope/iron/stone, burn-dissolve damage, 6 station variants, staged captures); adaptive score all-procedural (Tone.js rejected ~150kB for 5% use), zero bundled audio without verified license, ATTRIBUTIONS.md lists HUMAN-fetchable candidates; title = woodblock card, 5 iterations | one merge commit for the entangled arena.ts cluster (deviation from commit-per-task, logged) | 624 tests
+
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
 

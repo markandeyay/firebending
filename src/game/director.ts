@@ -235,6 +235,9 @@ export class Director {
       constructTierFor(index),
       constructHpFor(index),
       st.floorY,
+      // Visual variant is tied to the STATION, so each courtyard spot
+      // fields the same recognizable dummy build every cycle.
+      stationIndexFor(index),
     );
     this.deps.hud?.attachConstruct(construct);
     return construct;

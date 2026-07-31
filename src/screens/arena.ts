@@ -108,6 +108,8 @@ export interface AudioHooks {
   onSlowMo?(scale: number, ms: number): void;
   /** A coal reached the player (screen flash moment). */
   onPlayerHit?(damage: number): void;
+  /** A player projectile struck the current construct (damage dealt). */
+  onConstructImpact?(damage: number): void;
   /** Camera travel toward construct `index` began / arrived. */
   onTravelStart?(index: number): void;
   onTravelEnd?(index: number): void;
@@ -204,6 +206,9 @@ const SHADOW_MAP_FULL = 1024;
 const FRAME_STALE_SEC = 1.0;
 
 const UP = new THREE.Vector3(0, 1, 0);
+/** Scratch for construct wound-smoke emission (single threaded). */
+const _woundV = new THREE.Vector3();
+const WOUND_SMOKE_VEL = new THREE.Vector3(0, 0.55, 0);
 
 // ---------------------------------------------------------------------------
 // Looping replay adapter (same seam-safe design as the tracking overlay's
@@ -348,6 +353,8 @@ export class ArenaScreen implements Screen {
 
   // Frame state (reused, no per-frame allocation).
   private renderedFrames = 0;
+  /** Wound-smoke puff accumulator (constructs above 50% damage smolder). */
+  private woundSmokeAcc = 0;
   private readonly clock = new THREE.Clock();
   private elapsed = 0;
   private latestFrame: LandmarkFrame | null = null;
@@ -402,9 +409,15 @@ export class ArenaScreen implements Screen {
     };
     window.addEventListener('resize', this.onResize);
 
-    // Post chain (Phase 6): bloom + grain + vignette. The perf gate renders
-    // through the same pipeline, so the budget numbers cover it.
-    this.post = createPostPipeline(renderer, scene, camera);
+    // Fire before post: the pipeline's half-res fire pass and soft-particle
+    // depth fade need the FireSystem at construction (brazier ambients attach
+    // after the arena builds, below).
+    this.fire = new FireSystem(scene);
+
+    // Post chain (Phase 6 + fire rebuild): half-res fire pass with depth-aware
+    // upsample and heat shimmer, then bloom + grain + vignette. The perf gate
+    // renders through the same pipeline, so the budget numbers cover it.
+    this.post = createPostPipeline(renderer, scene, camera, { fire: this.fire });
 
     // --- World systems -----------------------------------------------------
     this.arena = buildArena(scene);
@@ -429,7 +442,8 @@ export class ArenaScreen implements Screen {
     }
     this.manager = new ConstructManager(this.physics, scene);
 
-    this.fire = new FireSystem(scene);
+    // FireSystem was constructed before the post chain (see above); the
+    // brazier ambients attach here once the arena's anchors exist.
     for (const anchor of this.arena.brazierAnchors) {
       // Handles kept so the degrade ladder can scale ambient flames (T070).
       this.ambientHandles.push(this.fire.attachAmbient(anchor, BRAZIER_FLAME_SCALE));
@@ -496,6 +510,7 @@ export class ArenaScreen implements Screen {
           Math.min(IMPACT_SHAKE_BASE + damage * IMPACT_SHAKE_PER_DAMAGE, IMPACT_SHAKE_MAX),
           IMPACT_SHAKE_SEC,
         );
+        this.audio.onConstructImpact?.(damage);
       },
       onPlayerHit: (damage) => {
         hud?.playerHitFlash();
@@ -544,6 +559,21 @@ export class ArenaScreen implements Screen {
     // The four relocatable station lights start at the first construct's
     // station (relevant when the shot harness starts mid-cycle).
     this.arena.setActiveStation(stationIndexFor(startIndex));
+
+    // Screenshot/debug hook: drive the active construct to an exact damage
+    // percent (0..100; 100 kills it). Zero impulse keeps stills clean.
+    (window as unknown as { __FB_DAMAGE?: (pct: number) => void }).__FB_DAMAGE = (pct) => {
+      const construct = this.manager?.activeConstruct;
+      if (!construct) return;
+      const target = construct.maxHp * (1 - Math.min(Math.max(pct, 0), 100) / 100);
+      const damage = construct.hp - target;
+      if (damage <= 0) return;
+      construct.takeHit(
+        damage,
+        new THREE.Vector3(0, 0, 0),
+        construct.group.position.clone().add(new THREE.Vector3(0, 1.3, 0)),
+      );
+    };
 
     // --- Hardening (T070) --------------------------------------------------
     // Degrade ladder: particle scale -> MoveEffects + ambient braziers, pose
@@ -747,6 +777,34 @@ export class ArenaScreen implements Screen {
     }
   }
 
+  /**
+   * Damage staging (Section 11): constructs above 50% damage smolder. Thin
+   * dark smoke rises from the wound point, rate scaling with damage. Uses
+   * the shared smoke emitter pool; a fraction of a puff per frame at most.
+   */
+  private updateWoundSmoke(dt: number): void {
+    const fire = this.fire;
+    const manager = this.manager;
+    if (!fire || !manager) return;
+    for (const c of manager.constructs) {
+      const s = c.smokeIntensity;
+      if (s <= 0) continue;
+      this.woundSmokeAcc += (1.5 + 5 * s) * dt;
+      const n = Math.floor(this.woundSmokeAcc);
+      if (n > 0 && c.smokeSource(_woundV)) {
+        this.woundSmokeAcc -= n;
+        fire.smoke.spawn({
+          position: _woundV,
+          count: Math.min(n, 3),
+          size: 0.3 + 0.25 * s,
+          lifetime: 2.4,
+          velocity: WOUND_SMOKE_VEL,
+          spread: 0.12,
+        });
+      }
+    }
+  }
+
   private startSlowMo(scale: number, ms: number): void {
     this.slowMoScale = scale;
     this.slowMoMs = Math.max(this.slowMoMs, ms);
@@ -823,6 +881,7 @@ export class ArenaScreen implements Screen {
       const frame = this.frameFresh ? this.latestFrame : null;
       this.frameFresh = false;
       this.manager?.update(dt);
+      this.updateWoundSmoke(dt);
       this.fx?.update(dt);
       if (frame) this.combat?.update(dt, frame);
       else this.combat?.update(dt);

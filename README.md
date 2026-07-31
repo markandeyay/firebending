@@ -58,6 +58,10 @@ The whole game runs without a webcam via recorded landmark fixtures:
 
 The pose score thresholds were tuned against real hands using the HaGRID dataset (Kapitanov et al.), via the `cj-mills/hagrid-sample-500k-384p` sample on HuggingFace, licensed CC-BY-SA-4.0. Only the landmark annotations were used: no images were downloaded and no models were trained. See `docs/hagrid-report.md` for the full methodology.
 
+### Audio
+
+All music and sound is synthesized at runtime with plain Web Audio: seeded noise, oscillators, and filters. No audio files ship in the repo and no samples were used, so the audio is license-clean by construction. The arena runs an adaptive procedural score: a low drone that swells with combat intensity, synthesized taiko hits on kills and Furnace Shot impacts, and a breathy flute phrase on camera travels; the title screen is silence and a single struck bell. Candidate CC-BY ambient tracks that a human could add later are listed with verification steps in `docs/ATTRIBUTIONS.md`.
+
 ## Tech stack
 
 Vite, TypeScript (strict), Three.js, MediaPipe Tasks Vision, Rapier physics (WASM), and pure Web Audio synthesis for every sound. No React, no framework: a game loop, plain TS modules, and a single HTML entry.

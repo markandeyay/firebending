@@ -315,8 +315,11 @@ export class ProjectileEffect extends BaseEffect {
   private readonly trailAcc: RateAccumulator;
   private readonly emberAcc: RateAccumulator;
   private readonly params: ProjectileParams;
+  /** Previous frame's head position: spawns distribute along the segment. */
+  private readonly prevPosition: THREE.Vector3;
   private readonly tmp = new THREE.Vector3();
   private readonly tmp2 = new THREE.Vector3();
+  private readonly tmp3 = new THREE.Vector3();
 
   constructor(
     fx: MoveEffects,
@@ -333,6 +336,7 @@ export class ProjectileEffect extends BaseEffect {
     this.size = empowered ? params.empoweredSize : params.size;
     this.radius = params.radius * (empowered ? params.empoweredSize / params.size : 1);
     this.position = origin.clone();
+    this.prevPosition = origin.clone();
     this.velocity = direction.clone().multiplyScalar(params.speed);
     this.coreAcc = new RateAccumulator(params.perFrameCap);
     this.trailAcc = new RateAccumulator(Math.max(2, params.perFrameCap - 1));
@@ -348,6 +352,7 @@ export class ProjectileEffect extends BaseEffect {
   update(dt: number): void {
     if (!this.alive) return;
     this.age += dt;
+    this.prevPosition.copy(this.position);
     this.position.addScaledVector(this.velocity, dt);
     if (this.age >= PROJECTILE_LIFETIME_SEC) {
       this.expire();
@@ -356,32 +361,43 @@ export class ProjectileEffect extends BaseEffect {
     const fire = this.fx.fire;
     const rateScale = this.fx.rateScale(this.empowered);
 
+    // SUB-FRAME EMISSION: a fast comet crosses ~0.25 m/frame at 60 fps and
+    // far more when a frame hiccups; point-spawning at the head beads the
+    // trail. Every spawn below distributes along the segment the head swept
+    // THIS frame (prevPosition -> position) with spawn times back-dated
+    // across dt, so the ribbon is continuous at any speed and frame rate.
     // Bright core: continuous small hot flames at the head.
     const nCore = this.coreAcc.take(this.params.coreRate * rateScale, dt);
     if (nCore > 0) {
       fire.flames.spawn({
         position: this.position,
+        positionEnd: this.prevPosition,
+        timeSpread: dt,
         velocity: this.tmp.copy(this.velocity).multiplyScalar(0.18),
         size: this.size,
         lifetime: 0.16,
         count: nCore,
         spread: this.size * 0.16,
+        temperature: 0.95, // the comet head is the hottest thing on screen
       });
     }
 
     // Trailing flames: near-zero velocity so the comet leaves them behind.
     const nTrail = this.trailAcc.take(this.params.trailRate * rateScale, dt);
     if (nTrail > 0) {
-      this.tmp2
-        .copy(this.position)
-        .addScaledVector(this.tmp.copy(this.velocity).normalize(), -this.size * 0.6);
+      this.tmp3.copy(this.velocity).normalize().multiplyScalar(-this.size * 0.6);
+      this.tmp2.copy(this.position).add(this.tmp3);
+      this.tmp3.add(this.prevPosition);
       fire.flames.spawn({
         position: this.tmp2,
+        positionEnd: this.tmp3,
+        timeSpread: dt,
         velocity: this.tmp.copy(this.velocity).multiplyScalar(0.06),
         size: this.size * 0.8,
         lifetime: 0.38,
         count: nTrail,
         spread: this.size * 0.3,
+        temperature: 0.72, // cooler than the core: orange wake
       });
     }
 
@@ -392,6 +408,8 @@ export class ProjectileEffect extends BaseEffect {
       this.tmp.y += 0.4;
       fire.embers.spawn({
         position: this.position,
+        positionEnd: this.prevPosition,
+        timeSpread: dt,
         velocity: this.tmp,
         lifetime: 1.1,
         count: nEmber,
@@ -722,10 +740,12 @@ class WhipEffect extends BaseEffect {
       fire.flames.spawn({
         position: pos,
         velocity: this.tmp2,
-        size: 0.3 * scale,
-        lifetime: 0.3,
-        count: this.fx.count(2, this.empowered),
+        size: 0.38 * scale,
+        lifetime: 0.45,
+        count: this.fx.count(3, this.empowered),
         spread: 0.06,
+        // The lash heats toward the tip: the crack end burns white-hot.
+        temperature: 0.72 + 0.24 * s,
       });
     }
     this.prevU = u;
@@ -740,8 +760,9 @@ class WhipEffect extends BaseEffect {
         position: this.p2,
         velocity: this.tmp2,
         lifetime: 0.8,
-        count: this.fx.count(14, this.empowered),
+        count: this.fx.count(18, this.empowered),
         spread: 0.22,
+        temperature: 0.9, // white-hot crack spray
       });
     }
     if (this.age >= WHIP_PULSE_SEC + 0.1) this.dispose();
@@ -808,6 +829,9 @@ class ChargeEffect extends BaseEffect {
         lifetime: FLIGHT,
         size: 0.05,
         count: 1,
+        // Hot and tight: gathered embers must not sink or scatter mid-flight
+        // (temperature drives buoyancy in the ember shader).
+        temperature: 0.95,
       });
     }
     // Small pulsing light at the fists.

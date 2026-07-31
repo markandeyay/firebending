@@ -12,6 +12,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AudioEngine } from '../src/audio/engine';
 import {
+  AdaptiveScore,
+  computeIntensity,
+  decayHitRate,
+  SCORE,
+  type ScoreEngineLike,
+} from '../src/audio/score';
+import {
   CHARGE_FALLBACK_MS,
   DUCK_AMOUNT,
   MoveAudio,
@@ -62,6 +69,7 @@ function makeMock() {
       return h;
     }),
     killHit: vi.fn(),
+    impactThud: vi.fn(),
     coalWhistle: vi.fn((_flightTimeSec: number) => {
       const h = { land: vi.fn() };
       coals.push(h);
@@ -103,17 +111,23 @@ describe('AudioEngine headless', () => {
       engine.killHit();
       engine.sealPress();
       engine.wipe();
+      engine.titleBell();
+      engine.taiko();
+      engine.taiko(0.4);
+      engine.shakuhachi();
+      engine.impactThud(8);
       engine.duck(0.65, 120);
       engine.setMasterVolume(0.5);
     }).not.toThrow();
   });
 
-  it('sustain, charge, ambient, and coal handles no-op safely', () => {
+  it('sustain, charge, ambient, drone, and coal handles no-op safely', () => {
     const engine = new AudioEngine();
     const stream = engine.streamStart();
     const fan = engine.fanStart();
     const charge = engine.breathCharge();
     const ambient = engine.ambientStart();
+    const drone = engine.droneStart();
     const coalA = engine.coalWhistle(1.2);
     const coalB = engine.coalWhistle(0);
     expect(() => {
@@ -124,6 +138,9 @@ describe('AudioEngine headless', () => {
       fan.stop();
       charge.stop();
       ambient.stop();
+      drone.setIntensity(0.7);
+      drone.stop();
+      drone.stop(); // idempotent
       coalA.land(true);
       coalB.land(false);
       coalB.land(false); // idempotent
@@ -400,5 +417,188 @@ describe('MoveAudio combat hooks', () => {
       audio.onCoalLanded();
     }).not.toThrow();
     expect(engine.coalWhistle).not.toHaveBeenCalled();
+  });
+
+  it('onConstructImpact plays the impact thud with the damage dealt', () => {
+    const { engine } = makeMock();
+    const audio = new MoveAudio(engine);
+    audio.onConstructImpact(12);
+    expect(engine.impactThud).toHaveBeenCalledTimes(1);
+    expect(engine.impactThud).toHaveBeenCalledWith(12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AdaptiveScore: the procedural score state machine (pure parts + spy engine)
+// ---------------------------------------------------------------------------
+
+function makeScoreMock() {
+  const drones: Array<{
+    setIntensity: ReturnType<typeof vi.fn>;
+    stop: ReturnType<typeof vi.fn>;
+  }> = [];
+  const engine = {
+    droneStart: vi.fn(() => {
+      const h = { setIntensity: vi.fn(), stop: vi.fn() };
+      drones.push(h);
+      return h;
+    }),
+    taiko: vi.fn(),
+    shakuhachi: vi.fn(),
+  } satisfies ScoreEngineLike;
+  return { engine, drones };
+}
+
+describe('score pure functions', () => {
+  it('decayHitRate halves-ish over the time constant and is identity at dt 0', () => {
+    expect(decayHitRate(2, 0)).toBe(2);
+    expect(decayHitRate(2, -1)).toBe(2);
+    const one = decayHitRate(1, SCORE.HIT_DECAY_SEC);
+    expect(one).toBeCloseTo(Math.exp(-1), 6);
+    expect(decayHitRate(1, 100)).toBeLessThan(1e-6);
+  });
+
+  it('computeIntensity is BASE at rest and clamped to 0..1 at full boil', () => {
+    expect(
+      computeIntensity({ sustainActive: false, hitRate: 0, constructDamage01: 0 })
+    ).toBeCloseTo(SCORE.BASE, 6);
+    const full = computeIntensity({
+      sustainActive: true,
+      hitRate: 999,
+      constructDamage01: 1,
+    });
+    expect(full).toBeLessThanOrEqual(1);
+    expect(full).toBeGreaterThan(0.9);
+  });
+
+  it('each input contributes monotonically', () => {
+    const rest = computeIntensity({ sustainActive: false, hitRate: 0, constructDamage01: 0 });
+    const sustain = computeIntensity({ sustainActive: true, hitRate: 0, constructDamage01: 0 });
+    const hits = computeIntensity({ sustainActive: false, hitRate: 1, constructDamage01: 0 });
+    const dmg = computeIntensity({ sustainActive: false, hitRate: 0, constructDamage01: 0.5 });
+    expect(sustain).toBeGreaterThan(rest);
+    expect(hits).toBeGreaterThan(rest);
+    expect(dmg).toBeGreaterThan(rest);
+    // Hit contribution saturates at HIT_RATE_FULL.
+    expect(
+      computeIntensity({ sustainActive: false, hitRate: SCORE.HIT_RATE_FULL, constructDamage01: 0 })
+    ).toBeCloseTo(
+      computeIntensity({ sustainActive: false, hitRate: SCORE.HIT_RATE_FULL * 5, constructDamage01: 0 }),
+      6
+    );
+  });
+});
+
+describe('AdaptiveScore state machine', () => {
+  it('start opens the drone once and pushes the resting intensity', () => {
+    vi.useFakeTimers();
+    const { engine, drones } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    expect(score.running).toBe(false);
+    score.start(0);
+    score.start(0); // idempotent
+    expect(engine.droneStart).toHaveBeenCalledTimes(1);
+    expect(score.running).toBe(true);
+    expect(drones[0]?.setIntensity).toHaveBeenCalledWith(SCORE.BASE);
+    score.dispose();
+  });
+
+  it('sustain start raises intensity, sustain end lowers it again', () => {
+    // No start(): the interval is never armed; drive via explicit timestamps.
+    const { engine, drones } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.tick(0);
+    expect(score.intensity).toBeCloseTo(SCORE.BASE, 6);
+    score.onMoveEvent({ kind: 'sustain-start' }, 100);
+    expect(score.intensity).toBeCloseTo(SCORE.BASE + SCORE.W_SUSTAIN, 6);
+    score.onMoveEvent({ kind: 'sustain-end' }, 200);
+    expect(score.intensity).toBeCloseTo(SCORE.BASE, 6);
+    expect(drones.length).toBe(0); // never started: intensity math is pure
+  });
+
+  it('hits swell the bed and decay back down over time', () => {
+    const { engine } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.tick(0);
+    score.onHitStop(120, 1000);
+    score.onKill(1100);
+    const hot = score.intensity;
+    expect(hot).toBeGreaterThan(SCORE.BASE);
+    // A long lull decays the tracker to nothing.
+    score.tick(1100 + SCORE.HIT_DECAY_SEC * 1000 * 10);
+    expect(score.intensity).toBeCloseTo(SCORE.BASE, 3);
+  });
+
+  it('onHitStop plays the score taiko at the impact strength', () => {
+    const { engine } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.onHitStop(120, 0);
+    expect(engine.taiko).toHaveBeenCalledTimes(1);
+    expect(engine.taiko).toHaveBeenCalledWith(SCORE.IMPACT_TAIKO_STRENGTH);
+    expect(engine.shakuhachi).not.toHaveBeenCalled();
+  });
+
+  it('onKill does NOT double the taiko (killHit plays via MoveAudio)', () => {
+    const { engine } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.onKill(0);
+    expect(engine.taiko).not.toHaveBeenCalled();
+  });
+
+  it('onTravelStart plays a shakuhachi note and resets the damage proxy', () => {
+    const { engine } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.onConstructImpact(SCORE.DAMAGE_FULL, 0); // full damage proxy
+    score.tick(SCORE.HIT_DECAY_SEC * 1000 * 10); // hits decayed, damage stays
+    expect(score.intensity).toBeCloseTo(SCORE.BASE + SCORE.W_DAMAGE, 3);
+    score.onTravelStart(SCORE.HIT_DECAY_SEC * 1000 * 10 + 1);
+    expect(engine.shakuhachi).toHaveBeenCalledTimes(1);
+    expect(score.intensity).toBeCloseTo(SCORE.BASE, 3);
+  });
+
+  it('setIntensity overrides the model until released with null', () => {
+    vi.useFakeTimers();
+    const { engine, drones } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.start(0);
+    score.setIntensity(0.9);
+    expect(score.intensity).toBe(0.9);
+    expect(drones[0]?.setIntensity).toHaveBeenLastCalledWith(0.9);
+    score.setIntensity(null);
+    expect(score.intensity).toBeCloseTo(SCORE.BASE, 6);
+    score.dispose();
+  });
+
+  it('the interval ticks push intensity to the drone and dispose clears it', () => {
+    vi.useFakeTimers();
+    const { engine, drones } = makeScoreMock();
+    const score = new AdaptiveScore(engine);
+    score.start(Date.now());
+    const pushesAfterStart = drones[0]?.setIntensity.mock.calls.length ?? 0;
+    vi.advanceTimersByTime(SCORE.TICK_MS * 3 + 5);
+    const pushesAfterTicks = drones[0]?.setIntensity.mock.calls.length ?? 0;
+    expect(pushesAfterTicks).toBeGreaterThan(pushesAfterStart);
+    score.dispose();
+    expect(drones[0]?.stop).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(SCORE.TICK_MS * 5);
+    expect(drones[0]?.setIntensity.mock.calls.length).toBe(pushesAfterTicks);
+    expect(score.running).toBe(false);
+  });
+
+  it('headless AudioEngine satisfies ScoreEngineLike and runs silently', () => {
+    const engine = new AudioEngine();
+    const score = new AdaptiveScore(engine);
+    expect(() => {
+      score.start(0);
+      score.onMoveEvent({ kind: 'sustain-start' }, 10);
+      score.onHitStop(120, 20);
+      score.onKill(30);
+      score.onConstructImpact(5, 40);
+      score.onTravelStart(50);
+      score.tick(60);
+      score.setIntensity(0.5);
+      score.dispose();
+      score.dispose(); // idempotent
+    }).not.toThrow();
   });
 });

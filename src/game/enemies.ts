@@ -1,13 +1,24 @@
-// Training constructs and physics (T050, Section 11): straw-and-wood sparring
-// dummies on weighted iron bases. They wobble on a Rapier joint when hit, char
-// progressively with damage, and on death break into loose debris that settles
-// and fades. Tier 2 constructs lob arcing coal projectiles (kinematic parabola,
-// no rapier body). Scope per Section 3: wobble + knockback only, no ragdolls.
+// Training constructs and physics (T050 / final P4, Section 11): straw-bound
+// sparring dummies lashed to a weathered timber post on a weighted stone base.
+// Visible rope bindings (merged torus wraps), dark iron banding, and frayed
+// straw silhouettes (alpha-tested fin planes) dress the physics capsule. They
+// wobble on a Rapier joint when hit and stage damage readably: straw chars
+// darker, burn patches erode away (dissolve shader with a glowing ember rim
+// on the erode boundary), smoke rises from wounds above 50% (integration
+// layer reads smokeIntensity/smokeSource), and death breaks the dummy into
+// debris that settles under rapier. Tier 2 constructs lob arcing coal
+// projectiles (kinematic parabola, no rapier body). Six deterministic visual
+// variants (CONSTRUCT_VARIANTS, one per courtyard station) vary proportions,
+// band count, straw tone and the tier 2 armor silhouette.
 //
-// Rapier is imported dynamically inside createPhysicsWorld() so this module
-// stays cheap to load and tests control WASM init explicitly.
+// All canvas textures are headless-guarded (shared module cache, null in
+// node) and every construct falls back to flat colors, so the whole module
+// stays testable without a DOM. Rapier is imported dynamically inside
+// createPhysicsWorld() so this module stays cheap to load and tests control
+// WASM init explicitly.
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type * as RapierNS from '@dimforge/rapier3d-compat';
 
 type RapierModule = typeof import('@dimforge/rapier3d-compat');
@@ -58,11 +69,16 @@ export const DEBRIS_KEEP_CAP = 24;
 // Charring: straw and wood lerp toward charcoal with damage percent.
 const CHAR_TARGET = new THREE.Color(0x171310);
 const CHAR_MAX_MIX = 0.85; // never fully black, keeps silhouette readable
+/** Peak burn-dissolve threshold: never erode more than ~60% of the straw
+ *  while alive so the silhouette stays readable. */
+const BURN_MAX = 0.6;
+/** Damage percent above which wounds smoke (integration layer emits). */
+export const SMOKE_THRESHOLD = 0.5;
 
 // Palette (Section 9 adjacent: dummy materials, fire stays the only saturation)
-const STRAW_TAN = 0xc2a468;
 const POST_WOOD = 0x6e4a28;
 const DARK_IRON = 0x2c2a2b;
+const BASE_STONE = 0x46392c;
 const COAL_BODY = 0x1c0f08;
 const COAL_EMBER = 0xe8551c;
 
@@ -87,6 +103,381 @@ function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// ---------------------------------------------------------------------------
+// Canvas textures (shared module cache; null in headless node so tests and
+// the flat-color fallback path never touch a DOM)
+// ---------------------------------------------------------------------------
+
+function make2d(w: number, h = w): CanvasRenderingContext2D | null {
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  return canvas.getContext('2d');
+}
+
+function colorTex(ctx: CanvasRenderingContext2D, repeat?: [number, number]): THREE.Texture {
+  const tex = new THREE.CanvasTexture(ctx.canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  if (repeat) tex.repeat.set(repeat[0], repeat[1]);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Non-color data (the burn noise field): stays LINEAR. */
+function dataTex(ctx: CanvasRenderingContext2D): THREE.Texture {
+  const tex = new THREE.CanvasTexture(ctx.canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.NoColorSpace;
+  return tex;
+}
+
+/** Tightly packed straw: slanted strand streaks, near-white multiplier so the
+ *  per-variant material color leads. */
+function makeStrawTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#cdb787';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 110; i++) {
+    const x0 = rng() * 128;
+    const slant = (rng() - 0.5) * 22;
+    const dark = rng() < 0.3;
+    const a = 0.14 + rng() * 0.2;
+    ctx.strokeStyle = dark ? `rgba(74, 54, 28, ${a})` : `rgba(226, 202, 148, ${a})`;
+    ctx.lineWidth = dark ? 1 : 1 + rng();
+    ctx.beginPath();
+    ctx.moveTo(x0, -4);
+    ctx.lineTo(x0 + slant, 132);
+    ctx.stroke();
+  }
+  // A few crushed horizontal kinks where the bindings cinch the bale.
+  for (let i = 0; i < 8; i++) {
+    const y = rng() * 128;
+    ctx.strokeStyle = 'rgba(96, 72, 40, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(128, y + (rng() - 0.5) * 8);
+    ctx.stroke();
+  }
+  return colorTex(ctx, [3, 2]);
+}
+
+/** Frayed straw for the alpha-tested fin planes: strands hang from the top
+ *  edge (v = 1) and taper into transparency, so plane tips read as loose
+ *  straw instead of a hard quad edge. */
+function makeFrayTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.clearRect(0, 0, 128, 128);
+  for (let i = 0; i < 84; i++) {
+    const x = rng() * 128;
+    const len = 46 + rng() * 78;
+    const slant = (rng() - 0.5) * 26;
+    const tone = rng() < 0.3 ? '92, 68, 36' : '206, 180, 124';
+    const grad = ctx.createLinearGradient(x, 0, x + slant, len);
+    grad.addColorStop(0, `rgba(${tone}, 0.95)`);
+    grad.addColorStop(0.75, `rgba(${tone}, 0.85)`);
+    grad.addColorStop(1, `rgba(${tone}, 0)`);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 1 + rng() * 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x, -2);
+    ctx.quadraticCurveTo(x + slant * 0.4, len * 0.55, x + slant, len);
+    ctx.stroke();
+  }
+  return colorTex(ctx);
+}
+
+/** Twisted rope: tight diagonal strand ridges over a hemp base. */
+function makeRopeTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(64);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#a58a5e';
+  ctx.fillRect(0, 0, 64, 64);
+  for (let x = -64; x < 64; x += 7) {
+    ctx.strokeStyle = 'rgba(52, 38, 20, 0.55)';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x + 64, 64);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(232, 210, 160, 0.28)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(x + 3, 0);
+    ctx.lineTo(x + 67, 64);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 26; i++) {
+    ctx.fillStyle = 'rgba(60, 44, 24, 0.25)';
+    ctx.fillRect(rng() * 64, rng() * 64, 1 + rng() * 2, 1);
+  }
+  return colorTex(ctx, [6, 1]);
+}
+
+/** Weathered timber: wavy grain, deep scores, a couple of knots (the arena
+ *  kit's wood-grain recipe, grayed for sun-bleached training posts). */
+function makeTimberTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#c9bcaa';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 48; i++) {
+    const x0 = rng() * 128;
+    const drift = (rng() - 0.5) * 12;
+    const dark = rng() < 0.28;
+    ctx.strokeStyle = dark ? 'rgba(48, 32, 20, 0.32)' : 'rgba(86, 62, 40, 0.16)';
+    ctx.lineWidth = dark ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(x0, -4);
+    ctx.bezierCurveTo(x0 + drift, 44, x0 - drift, 88, x0 + drift * 0.6, 132);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 3; i++) {
+    const kx = 16 + rng() * 96;
+    const ky = 16 + rng() * 96;
+    ctx.strokeStyle = 'rgba(44, 30, 18, 0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(kx, ky, 3 + rng() * 3, 5 + rng() * 4, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Gray weathering streaks.
+  for (let i = 0; i < 10; i++) {
+    const x = rng() * 128;
+    ctx.fillStyle = 'rgba(150, 150, 145, 0.10)';
+    ctx.fillRect(x, 0, 2 + rng() * 5, 128);
+  }
+  return colorTex(ctx, [1, 2]);
+}
+
+/** Coarse stone blotches + hairline cracks (arena stone recipe). */
+function makeBaseStoneTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#cfc6b8';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 120; i++) {
+    const light = rng() < 0.35;
+    ctx.fillStyle = light ? 'rgba(235, 224, 200, 0.10)' : 'rgba(30, 22, 14, 0.13)';
+    ctx.beginPath();
+    ctx.ellipse(rng() * 128, rng() * 128, 2 + rng() * 7, 2 + rng() * 5, rng() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (let i = 0; i < 6; i++) {
+    ctx.strokeStyle = 'rgba(30, 22, 14, 0.4)';
+    ctx.lineWidth = 1;
+    const x = rng() * 128;
+    const y = rng() * 128;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + (rng() - 0.5) * 40, y + (rng() - 0.5) * 40);
+    ctx.stroke();
+  }
+  return colorTex(ctx, [2, 2]);
+}
+
+/** Hammered dark iron: horizontal tool streaks and pit specks. */
+function makeIronTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(64);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#d6d6d6';
+  ctx.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 22; i++) {
+    const y = rng() * 64;
+    ctx.fillStyle = `rgba(40, 40, 42, ${0.1 + rng() * 0.18})`;
+    ctx.fillRect(0, y, 64, 1 + rng() * 2);
+  }
+  for (let i = 0; i < 30; i++) {
+    ctx.fillStyle = 'rgba(20, 20, 22, 0.35)';
+    ctx.fillRect(rng() * 64, rng() * 64, 1 + rng(), 1 + rng());
+  }
+  return colorTex(ctx, [3, 1]);
+}
+
+/**
+ * Grayscale burn-noise field: three octaves of wrapped value noise with the
+ * histogram stretched wide, so the dissolve threshold eats the straw in
+ * coherent patches AND the eaten fraction tracks the threshold roughly
+ * linearly (a mid-heavy histogram made 50% damage erode nothing and 90%
+ * turn the whole bale into rim glow).
+ */
+function makeBurnNoiseTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  const size = 128;
+  const octaves = [
+    { cells: 6, amp: 0.55 },
+    { cells: 12, amp: 0.3 },
+    { cells: 24, amp: 0.15 },
+  ].map(({ cells, amp }) => {
+    const g = new Float32Array(cells * cells);
+    for (let i = 0; i < g.length; i++) g[i] = rng();
+    return { cells, amp, g };
+  });
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let v = 0;
+      for (const { cells, amp, g } of octaves) {
+        const fx = (x / size) * cells;
+        const fy = (y / size) * cells;
+        const x0 = Math.floor(fx) % cells;
+        const y0 = Math.floor(fy) % cells;
+        const x1 = (x0 + 1) % cells;
+        const y1 = (y0 + 1) % cells;
+        const tx = fx - Math.floor(fx);
+        const ty = fy - Math.floor(fy);
+        const sx = tx * tx * (3 - 2 * tx);
+        const sy = ty * ty * (3 - 2 * ty);
+        const a = g[y0 * cells + x0] ?? 0;
+        const b = g[y0 * cells + x1] ?? 0;
+        const c = g[y1 * cells + x0] ?? 0;
+        const d = g[y1 * cells + x1] ?? 0;
+        v += amp * ((a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy);
+      }
+      // Stretch the mid-heavy octave sum toward a full 0..1 spread.
+      const stretched = Math.min(Math.max(0.5 + (v - 0.5) * 2.1, 0), 1);
+      const i = (y * size + x) * 4;
+      const t = Math.round(stretched * 255);
+      img.data[i] = t;
+      img.data[i + 1] = t;
+      img.data[i + 2] = t;
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return dataTex(ctx);
+}
+
+interface ConstructTextures {
+  straw: THREE.Texture;
+  fray: THREE.Texture;
+  rope: THREE.Texture;
+  timber: THREE.Texture;
+  stone: THREE.Texture;
+  iron: THREE.Texture;
+  burn: THREE.Texture;
+}
+
+// Shared for the module lifetime (constructs come and go constantly; the
+// seven small canvases are cheaper kept than rebuilt). Never disposed.
+let texturesBuilt = false;
+let texturesCache: ConstructTextures | null = null;
+
+function constructTextures(): ConstructTextures | null {
+  if (texturesBuilt) return texturesCache;
+  texturesBuilt = true;
+  const straw = makeStrawTexture(0x57a1);
+  const fray = makeFrayTexture(0xf4a1);
+  const rope = makeRopeTexture(0x40be);
+  const timber = makeTimberTexture(0x71b3);
+  const stone = makeBaseStoneTexture(0x5709);
+  const iron = makeIronTexture(0x1409);
+  const burn = makeBurnNoiseTexture(0xb42);
+  if (straw && fray && rope && timber && stone && iron && burn) {
+    texturesCache = { straw, fray, rope, timber, stone, iron, burn };
+  }
+  return texturesCache;
+}
+
+// ---------------------------------------------------------------------------
+// Burn-dissolve shader: patches erode where the shared noise field drops
+// below uBurn; surviving texels within the rim width glow ember-orange, so
+// every scorched patch has a bright burning edge. Injected into the standard
+// material via onBeforeCompile (per-construct uniform, shared program).
+// ---------------------------------------------------------------------------
+
+function installBurnShader(
+  mat: THREE.MeshStandardMaterial,
+  uBurn: { value: number },
+  burnMap: THREE.Texture,
+  // vMapUv carries the color map's repeat transform; this rescales the burn
+  // sample so patch size stays ~a third of the torso regardless of repeat.
+  burnScale: [number, number],
+): void {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms['uBurn'] = uBurn;
+    shader.uniforms['uBurnMap'] = { value: burnMap };
+    shader.uniforms['uBurnScale'] = { value: new THREE.Vector2(burnScale[0], burnScale[1]) };
+    shader.fragmentShader =
+      'uniform float uBurn;\nuniform sampler2D uBurnMap;\nuniform vec2 uBurnScale;\n' +
+      shader.fragmentShader
+        .replace(
+          '#include <map_fragment>',
+          [
+            '#include <map_fragment>',
+            'float burnN = texture2D( uBurnMap, vMapUv * uBurnScale ).r;',
+            'if ( burnN < uBurn ) discard;',
+          ].join('\n'),
+        )
+        .replace(
+          '#include <emissivemap_fragment>',
+          [
+            '#include <emissivemap_fragment>',
+            'if ( uBurn > 0.001 ) {',
+            '\tfloat burnRim = 1.0 - smoothstep( uBurn, uBurn + 0.12, burnN );',
+            '\ttotalEmissiveRadiance += vec3( 0.95, 0.30, 0.08 ) * burnRim * ( 1.3 + 0.8 * uBurn );',
+            '}',
+          ].join('\n'),
+        );
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Visual variants: one per courtyard station (killTravel.ts STATIONS order),
+// selected deterministically by station index. Proportions, iron band count,
+// straw tone (muted tans only, Section 9: fire stays the only saturation)
+// and the tier 2 armor silhouette all vary; the physics capsule does not.
+// ---------------------------------------------------------------------------
+
+export interface ConstructVariantSpec {
+  /** Straw bale height / radii (visual only; collider stays fixed). */
+  torsoH: number;
+  torsoTopR: number;
+  torsoBotR: number;
+  headR: number;
+  armLen: number;
+  /** Arm roll in radians (a slightly cocked crossbar reads hand-lashed). */
+  armTilt: number;
+  postH: number;
+  /** Iron bands riding the torso IN ADDITION to the loose band-1 debris piece. */
+  bands: number;
+  /** Straw tone within the muted tan family. */
+  straw: number;
+  rope: number;
+  /** Stone base silhouette: 0 dome, 1 stepped block, 2 faceted drum. */
+  baseStyle: 0 | 1 | 2;
+  /** Tier 2 armor silhouette: 0 chest plates, 1 collar, 2 pauldrons+spine. */
+  armor: 0 | 1 | 2;
+}
+
+export const CONSTRUCT_VARIANTS: readonly ConstructVariantSpec[] = [
+  // 0 entry-hall: the classic. Balanced bale, twin rope wraps, dome base.
+  { torsoH: 0.8, torsoTopR: 0.26, torsoBotR: 0.24, headR: 0.18, armLen: 1.1, armTilt: 0, postH: 1.6, bands: 1, straw: 0xc2a468, rope: 0x8a6f4a, baseStyle: 0, armor: 0 },
+  // 1 colonnade: tall and lean, pale sun-dried straw, stepped base.
+  { torsoH: 0.92, torsoTopR: 0.23, torsoBotR: 0.22, headR: 0.16, armLen: 1.22, armTilt: 0.1, postH: 1.72, bands: 2, straw: 0xcfb37c, rope: 0x84683f, baseStyle: 1, armor: 1 },
+  // 2 terrace-vantage: squat heavy bale, dark oiled straw, faceted drum.
+  { torsoH: 0.7, torsoTopR: 0.3, torsoBotR: 0.28, headR: 0.2, armLen: 1.02, armTilt: -0.08, postH: 1.5, bands: 1, straw: 0xa98d55, rope: 0x7c6242, baseStyle: 2, armor: 2 },
+  // 3 bridge-deck: barrel torso in three iron bands (re-hooped cask fiction).
+  { torsoH: 0.84, torsoTopR: 0.27, torsoBotR: 0.26, headR: 0.17, armLen: 1.14, armTilt: 0.05, postH: 1.62, bands: 3, straw: 0xc9a05f, rope: 0x8a6f4a, baseStyle: 1, armor: 0 },
+  // 4 great-gate: broad shoulders (long crossbar), ashy straw.
+  { torsoH: 0.78, torsoTopR: 0.28, torsoBotR: 0.24, headR: 0.19, armLen: 1.3, armTilt: -0.12, postH: 1.58, bands: 2, straw: 0xb5a172, rope: 0x806747, baseStyle: 2, armor: 1 },
+  // 5 channel-edge: lean russet bale, cocked arms, dome base.
+  { torsoH: 0.86, torsoTopR: 0.24, torsoBotR: 0.25, headR: 0.17, armLen: 1.08, armTilt: 0.14, postH: 1.66, bands: 1, straw: 0xbb9457, rope: 0x8a6f4a, baseStyle: 0, armor: 2 },
+];
 
 // ---------------------------------------------------------------------------
 // PhysicsWorld: rapier wrapper with a fixed-timestep accumulator
@@ -163,6 +554,12 @@ export interface ConstructOptions {
    * rest on raised decks; without them it settles on the y = 0 ground.
    */
   floorY?: number;
+  /**
+   * Visual variant index into CONSTRUCT_VARIANTS (wrapped). The director
+   * passes the station index so each courtyard station fields its own dummy
+   * build; defaults to 0.
+   */
+  variant?: number;
 }
 
 export interface CoalProjectile {
@@ -216,13 +613,22 @@ export class Construct {
   private settled = false;
 
   // Visuals
+  readonly variantIndex: number;
   private readonly torsoGroup: THREE.Group;
   private readonly strawMat: THREE.MeshStandardMaterial;
+  private readonly frayMat: THREE.MeshStandardMaterial;
   private readonly woodMat: THREE.MeshStandardMaterial;
+  private readonly ropeMat: THREE.MeshStandardMaterial;
   private readonly ironMat: THREE.MeshStandardMaterial;
+  private readonly stoneMat: THREE.MeshStandardMaterial;
   private readonly coalMat: THREE.MeshStandardMaterial;
-  private readonly strawBase = new THREE.Color(STRAW_TAN);
+  private readonly strawBase: THREE.Color;
+  private readonly ropeBase: THREE.Color;
   private readonly woodBase = new THREE.Color(POST_WOOD);
+  /** Shared by the straw + fray burn shaders; damagePercent drives it. */
+  private readonly burnUniform = { value: 0 };
+  /** Wound point offset from the torso center (smoke emission anchor). */
+  private readonly woundOffset = new THREE.Vector3();
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly headMesh: THREE.Mesh;
   private readonly debrisCandidates: THREE.Object3D[] = [];
@@ -255,23 +661,65 @@ export class Construct {
     this.group.position.set(anchorPos.x, floorY, anchorPos.z);
     parent.add(this.group);
 
-    // --- Materials (cloned per construct so charring stays local) ----------
+    // --- Variant -----------------------------------------------------------
+    const variantCount = CONSTRUCT_VARIANTS.length;
+    this.variantIndex =
+      ((Math.floor(options.variant ?? 0) % variantCount) + variantCount) % variantCount;
+    const v = CONSTRUCT_VARIANTS[this.variantIndex] ?? CONSTRUCT_VARIANTS[0];
+    if (!v) throw new Error('CONSTRUCT_VARIANTS is empty');
+
+    // --- Materials (cloned per construct so charring stays local; the
+    // canvas textures are the shared module cache, null when headless) ------
+    const tex = constructTextures();
+    this.strawBase = new THREE.Color(v.straw);
+    this.ropeBase = new THREE.Color(v.rope);
     this.strawMat = new THREE.MeshStandardMaterial({
-      color: STRAW_TAN,
+      color: v.straw,
+      map: tex?.straw ?? null,
       roughness: 1.0,
       metalness: 0.0,
       flatShading: true,
+      side: THREE.DoubleSide, // burn holes reveal the bale interior
     });
+    this.frayMat = new THREE.MeshStandardMaterial({
+      color: v.straw,
+      map: tex?.fray ?? null,
+      alphaTest: 0.35,
+      side: THREE.DoubleSide,
+      roughness: 1.0,
+      metalness: 0.0,
+    });
+    if (tex) {
+      // Straw map repeats 3x2; divide the burn sample back to ~one noise
+      // tile around the bale. Fray planes are 1x1 already.
+      installBurnShader(this.strawMat, this.burnUniform, tex.burn, [1 / 3, 1 / 2]);
+      installBurnShader(this.frayMat, this.burnUniform, tex.burn, [1, 1]);
+    }
     this.woodMat = new THREE.MeshStandardMaterial({
       color: POST_WOOD,
+      map: tex?.timber ?? null,
       roughness: 0.9,
       metalness: 0.0,
       flatShading: true,
     });
+    this.ropeMat = new THREE.MeshStandardMaterial({
+      color: v.rope,
+      map: tex?.rope ?? null,
+      roughness: 1.0,
+      metalness: 0.0,
+    });
     this.ironMat = new THREE.MeshStandardMaterial({
       color: DARK_IRON,
+      map: tex?.iron ?? null,
       roughness: 0.6,
       metalness: 0.7,
+      flatShading: true,
+    });
+    this.stoneMat = new THREE.MeshStandardMaterial({
+      color: BASE_STONE,
+      map: tex?.stone ?? null,
+      roughness: 0.95,
+      metalness: 0.0,
       flatShading: true,
     });
     this.coalMat = new THREE.MeshStandardMaterial({
@@ -286,14 +734,50 @@ export class Construct {
       this.geometries.push(g);
       return g;
     };
+    const merge = (parts: THREE.BufferGeometry[]): THREE.BufferGeometry => {
+      const merged =
+        mergeGeometries(parts, false) ?? parts[0] ?? new THREE.BoxGeometry(0.05, 0.05, 0.05);
+      for (const p of parts) {
+        if (p !== merged) p.dispose();
+      }
+      return geo(merged);
+    };
+    const r = this.rng;
 
-    // --- Base: weighted dark-iron hemisphere on the floor ------------------
-    const baseMesh = new THREE.Mesh(
-      geo(new THREE.SphereGeometry(0.45, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2)),
-      this.ironMat,
-    );
+    // Wound anchor: a fixed spot on the torso where smoke rises once damage
+    // passes SMOKE_THRESHOLD (integration layer reads smokeSource()).
+    this.woundOffset.set((r() - 0.5) * 0.3, 0.1 + r() * 0.25, (r() - 0.5) * 0.3);
+
+    // --- Base: weighted stone footing (variant silhouette), merged mesh ----
+    const baseParts: THREE.BufferGeometry[] = [];
+    if (v.baseStyle === 0) {
+      const slab = new THREE.BoxGeometry(0.98, 0.12, 0.98);
+      slab.translate(0, 0.06, 0);
+      const dome = new THREE.SphereGeometry(0.45, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+      dome.scale(1, 0.8, 1);
+      dome.translate(0, 0.12, 0);
+      baseParts.push(slab, dome);
+    } else if (v.baseStyle === 1) {
+      const s1 = new THREE.BoxGeometry(1.0, 0.16, 1.0);
+      s1.translate(0, 0.08, 0);
+      const s2 = new THREE.BoxGeometry(0.76, 0.16, 0.76);
+      s2.translate(0, 0.24, 0);
+      const drum = new THREE.CylinderGeometry(0.3, 0.36, 0.2, 8);
+      drum.translate(0, 0.42, 0);
+      baseParts.push(s1, s2, drum);
+    } else {
+      const ring = new THREE.CylinderGeometry(0.56, 0.6, 0.1, 8);
+      ring.translate(0, 0.05, 0);
+      const drum = new THREE.CylinderGeometry(0.44, 0.52, 0.28, 8);
+      drum.translate(0, 0.24, 0);
+      const cap = new THREE.CylinderGeometry(0.3, 0.42, 0.14, 8);
+      cap.translate(0, 0.45, 0);
+      baseParts.push(ring, drum, cap);
+    }
+    const baseMesh = new THREE.Mesh(merge(baseParts), this.stoneMat);
     baseMesh.name = 'construct-base';
     baseMesh.castShadow = true;
+    baseMesh.receiveShadow = true;
     this.group.add(baseMesh);
 
     // --- Torso assembly: everything above the pivot syncs from one body ----
@@ -303,64 +787,181 @@ export class Construct {
     this.torsoGroup.position.set(0, TORSO_CENTER_Y, 0);
     this.group.add(this.torsoGroup);
 
+    // Weathered timber post carrying the bale.
     const post = new THREE.Mesh(
-      geo(new THREE.CylinderGeometry(0.055, 0.07, 1.6, 8)),
+      geo(new THREE.CylinderGeometry(0.055, 0.075, v.postH, 8)),
       this.woodMat,
     );
     post.name = 'construct-post';
     post.position.set(0, -0.15, 0);
+    post.castShadow = true;
 
+    // Straw bale torso (variant proportions; the physics capsule is fixed).
     const torsoMesh = new THREE.Mesh(
-      geo(new THREE.CylinderGeometry(0.26, 0.24, 0.8, 9)),
+      geo(new THREE.CylinderGeometry(v.torsoTopR, v.torsoBotR, v.torsoH, 10)),
       this.strawMat,
     );
     torsoMesh.name = 'construct-straw-torso';
     torsoMesh.position.set(0, 0.05, 0);
     torsoMesh.castShadow = true;
 
-    const head = new THREE.Mesh(geo(new THREE.SphereGeometry(0.18, 8, 6)), this.strawMat);
+    const headGeo = geo(new THREE.SphereGeometry(v.headR, 9, 7));
+    headGeo.scale(1, 1.12, 1); // slightly oblong bound-straw head
+    const head = new THREE.Mesh(headGeo, this.strawMat);
     head.name = 'construct-straw-head';
-    head.position.set(0, 0.63, 0);
+    head.position.set(0, 0.05 + v.torsoH / 2 + v.headR * 0.95, 0);
     head.castShadow = true;
     this.headMesh = head;
 
-    const arms = new THREE.Mesh(geo(new THREE.BoxGeometry(1.1, 0.085, 0.085)), this.woodMat);
+    const arms = new THREE.Mesh(geo(new THREE.BoxGeometry(v.armLen, 0.085, 0.085)), this.woodMat);
     arms.name = 'construct-arms';
-    arms.position.set(0, 0.3, 0);
+    arms.position.set(0, 0.05 + v.torsoH * 0.3, 0);
+    arms.rotation.z = v.armTilt;
     arms.castShadow = true;
 
-    // Dark iron bands around the straw torso. Band 1 is a loose debris piece;
-    // the rest ride the torso mesh so they fly off with it on death.
-    const bandGeo = geo(new THREE.CylinderGeometry(0.275, 0.275, 0.06, 9));
-    const band1 = new THREE.Mesh(bandGeo, this.ironMat);
+    // Dark iron banding. Band 1 is the loose debris piece near the bale foot;
+    // the variant's remaining bands merge into one mesh riding the torso.
+    const band1 = new THREE.Mesh(
+      geo(new THREE.CylinderGeometry(v.torsoBotR + 0.02, v.torsoBotR + 0.02, 0.06, 10)),
+      this.ironMat,
+    );
     band1.name = 'construct-band-1';
-    band1.position.set(0, -0.25, 0);
-    const band2 = new THREE.Mesh(bandGeo, this.ironMat);
-    band2.name = 'construct-band-2';
-    band2.position.set(0, 0.25, 0); // local to torsoMesh
-    torsoMesh.add(band2);
+    band1.position.set(0, 0.05 - v.torsoH / 2 + 0.08, 0);
+
+    const bandR = Math.max(v.torsoTopR, v.torsoBotR);
+    const bandParts: THREE.BufferGeometry[] = [];
+    for (let i = 0; i < v.bands; i++) {
+      const t = (i + 1) / (v.bands + 1);
+      const b = new THREE.CylinderGeometry(bandR + 0.012, bandR + 0.012, 0.055, 10);
+      b.translate(0, -v.torsoH * 0.5 + 0.16 + t * (v.torsoH - 0.3), 0);
+      bandParts.push(b);
+    }
+    const bandsMesh = new THREE.Mesh(merge(bandParts), this.ironMat);
+    bandsMesh.name = 'construct-bands';
+    torsoMesh.add(bandsMesh);
+
+    // Rope bindings: two horizontal cinch wraps, a crossed diagonal lashing
+    // and a knot bump, merged into one mesh riding the torso.
+    const wrapR = bandR + 0.015;
+    const ropeParts: THREE.BufferGeometry[] = [];
+    for (const t of [0.3, 0.72]) {
+      const tor = new THREE.TorusGeometry(wrapR, 0.022, 5, 14);
+      tor.rotateX(Math.PI / 2);
+      tor.translate(0, -v.torsoH / 2 + t * v.torsoH, 0);
+      ropeParts.push(tor);
+    }
+    for (const s of [-1, 1]) {
+      const tor = new THREE.TorusGeometry(wrapR + 0.015, 0.02, 5, 14);
+      tor.rotateX(Math.PI / 2);
+      tor.rotateZ(s * 0.5);
+      ropeParts.push(tor);
+    }
+    const knot = new THREE.SphereGeometry(0.045, 6, 5);
+    knot.translate(wrapR + 0.02, 0.04, 0);
+    ropeParts.push(knot);
+    const ropeMesh = new THREE.Mesh(merge(ropeParts), this.ropeMat);
+    ropeMesh.name = 'construct-rope';
+    torsoMesh.add(ropeMesh);
+
+    // Frayed straw silhouette: alpha-tested fin planes. A loose skirt around
+    // the bale foot, tufts poking from the shoulders, and a head topknot.
+    const frayParts: THREE.BufferGeometry[] = [];
+    const skirtN = 5;
+    for (let i = 0; i < skirtN; i++) {
+      const a = (i / skirtN) * Math.PI * 2 + r() * 0.5;
+      const w = 0.26 + r() * 0.1;
+      const h = 0.28 + r() * 0.12;
+      const p = new THREE.PlaneGeometry(w, h);
+      p.translate(0, -h / 2, 0); // hang from the top edge
+      p.rotateX(-0.35 - r() * 0.25); // flare the tips outward
+      p.rotateY(a);
+      p.translate(
+        Math.sin(a) * (v.torsoBotR - 0.02),
+        -v.torsoH / 2 + 0.05,
+        Math.cos(a) * (v.torsoBotR - 0.02),
+      );
+      frayParts.push(p);
+    }
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2 + 0.7 + r() * 0.5;
+      const w = 0.16 + r() * 0.06;
+      const h = 0.2 + r() * 0.08;
+      const p = new THREE.PlaneGeometry(w, h);
+      p.translate(0, -h / 2, 0);
+      p.rotateX(Math.PI - 0.7 - r() * 0.3); // flipped: strands point up and out
+      p.rotateY(a);
+      p.translate(
+        Math.sin(a) * (v.torsoTopR - 0.04),
+        v.torsoH / 2 - 0.02,
+        Math.cos(a) * (v.torsoTopR - 0.04),
+      );
+      frayParts.push(p);
+    }
+    const frayTorso = new THREE.Mesh(merge(frayParts), this.frayMat);
+    frayTorso.name = 'construct-fray-torso';
+    torsoMesh.add(frayTorso);
+
+    const tuftParts: THREE.BufferGeometry[] = [];
+    for (let i = 0; i < 2; i++) {
+      const p = new THREE.PlaneGeometry(0.16, 0.2);
+      p.translate(0, -0.1, 0);
+      p.rotateX(Math.PI + (r() - 0.5) * 0.5);
+      p.rotateY((i * Math.PI) / 2 + r() * 0.4);
+      p.translate(0, v.headR, 0);
+      tuftParts.push(p);
+    }
+    const frayHead = new THREE.Mesh(merge(tuftParts), this.frayMat);
+    frayHead.name = 'construct-fray-head';
+    head.add(frayHead);
 
     this.torsoGroup.add(post, torsoMesh, head, arms, band1);
     this.debrisCandidates.push(torsoMesh, head, arms, post, band1);
 
     if (this.tier === 2) {
-      const band3 = new THREE.Mesh(bandGeo, this.ironMat);
-      band3.name = 'construct-band-3';
-      band3.position.set(0, -0.05, 0);
-      torsoMesh.add(band3);
-
-      // Skeletal-armor silhouette: two flat dark plates on the chest.
-      // Original abstract shapes, nothing figurative.
-      const plateGeo = geo(new THREE.BoxGeometry(0.34, 0.28, 0.03));
-      const plate1 = new THREE.Mesh(plateGeo, this.ironMat);
+      // Armor silhouette (abstract, nothing figurative). The chest plate is
+      // its own debris piece; the rest merges into one mesh riding the torso
+      // so it flies with the bale on death.
+      const frontZ = v.torsoTopR + 0.05;
+      const plate1 = new THREE.Mesh(geo(new THREE.BoxGeometry(0.34, 0.28, 0.03)), this.ironMat);
       plate1.name = 'construct-plate-1';
-      plate1.position.set(0, 0.17, 0.28);
+      plate1.position.set(0, 0.05 + v.torsoH * 0.18, frontZ);
       this.torsoGroup.add(plate1);
-      const plate2 = new THREE.Mesh(geo(new THREE.BoxGeometry(0.26, 0.2, 0.03)), this.ironMat);
-      plate2.name = 'construct-plate-2';
-      plate2.position.set(0, -0.09, 0.28);
-      this.torsoGroup.add(plate2);
       this.debrisCandidates.push(plate1);
+
+      const armorParts: THREE.BufferGeometry[] = [];
+      if (v.armor === 0) {
+        // Chest plates: a second lower plate + shoulder caps.
+        const p2 = new THREE.BoxGeometry(0.26, 0.2, 0.03);
+        p2.translate(0, -v.torsoH * 0.14, frontZ);
+        armorParts.push(p2);
+        for (const s of [-1, 1]) {
+          const cap = new THREE.BoxGeometry(0.14, 0.06, 0.14);
+          cap.translate(s * (v.torsoTopR + 0.02), v.torsoH / 2 + 0.02, 0);
+          armorParts.push(cap);
+        }
+      } else if (v.armor === 1) {
+        // Iron collar around the neck + a back plate.
+        const collar = new THREE.CylinderGeometry(v.headR + 0.07, v.headR + 0.11, 0.08, 9);
+        collar.translate(0, v.torsoH / 2 + 0.04, 0);
+        armorParts.push(collar);
+        const back = new THREE.BoxGeometry(0.3, 0.24, 0.03);
+        back.translate(0, v.torsoH * 0.16, -(v.torsoTopR + 0.04));
+        armorParts.push(back);
+      } else {
+        // Pauldron slabs over the shoulders + a spine strip down the back.
+        for (const s of [-1, 1]) {
+          const pd = new THREE.BoxGeometry(0.2, 0.07, 0.24);
+          pd.translate(s * (v.torsoTopR + 0.05), v.torsoH / 2 - 0.02, 0);
+          armorParts.push(pd);
+        }
+        const spine = new THREE.BoxGeometry(0.07, v.torsoH * 0.75, 0.03);
+        spine.translate(0, 0, -(v.torsoTopR + 0.03));
+        armorParts.push(spine);
+      }
+      const armorMesh = new THREE.Mesh(merge(armorParts), this.ironMat);
+      armorMesh.name = 'construct-armor';
+      armorMesh.castShadow = true;
+      torsoMesh.add(armorMesh);
     }
 
     this.coalGeometry = geo(new THREE.DodecahedronGeometry(COAL_RADIUS, 0));
@@ -463,9 +1064,44 @@ export class Construct {
   }
 
   private applyCharring(): void {
-    const mix = this.damagePercent * CHAR_MAX_MIX;
+    const d = this.damagePercent;
+    const mix = d * CHAR_MAX_MIX;
     this.strawMat.color.lerpColors(this.strawBase, CHAR_TARGET, mix);
+    this.frayMat.color.lerpColors(this.strawBase, CHAR_TARGET, mix);
     this.woodMat.color.lerpColors(this.woodBase, CHAR_TARGET, mix);
+    this.ropeMat.color.lerpColors(this.ropeBase, CHAR_TARGET, mix * 0.9);
+    // Burn-away: patches of straw erode as damage climbs (eased so early
+    // jabs char before they carve holes), ember rim handled in-shader.
+    this.burnUniform.value = Math.pow(d, 1.25) * BURN_MAX;
+  }
+
+  /** Current burn-dissolve threshold, 0..BURN_MAX. Rises with damage. */
+  get burnLevel(): number {
+    return this.burnUniform.value;
+  }
+
+  /**
+   * 0 below SMOKE_THRESHOLD damage (or when not alive), then ramps 0..1 as
+   * damage approaches 100%. The integration layer scales wound smoke by it.
+   */
+  get smokeIntensity(): number {
+    if (this.state !== 'alive') return 0;
+    return THREE.MathUtils.clamp(
+      (this.damagePercent - SMOKE_THRESHOLD) / (1 - SMOKE_THRESHOLD),
+      0,
+      1,
+    );
+  }
+
+  /**
+   * World-space wound point smoke should rise from, written into `out`.
+   * Null while smokeIntensity is 0 (below 50% damage, or dead).
+   */
+  smokeSource(out: THREE.Vector3): THREE.Vector3 | null {
+    if (this.smokeIntensity <= 0) return null;
+    this.torsoGroup.getWorldPosition(out);
+    out.add(this.woundOffset);
+    return out;
   }
 
   /**
@@ -534,7 +1170,7 @@ export class Construct {
     }
 
     // Prepare the whole construct for the post-settle fade.
-    for (const mat of [this.strawMat, this.woodMat, this.ironMat, this.coalMat]) {
+    for (const mat of this.materials()) {
       mat.transparent = true;
     }
 
@@ -699,14 +1335,24 @@ export class Construct {
     } else if (this.state === 'fading') {
       this.fadeAge += dt;
       const opacity = Math.max(0, 1 - this.fadeAge / FADE_SEC);
-      this.strawMat.opacity = opacity;
-      this.woodMat.opacity = opacity;
-      this.ironMat.opacity = opacity;
-      this.coalMat.opacity = opacity;
+      for (const mat of this.materials()) mat.opacity = opacity;
       if (this.fadeAge >= FADE_SEC) {
         this.dispose();
       }
     }
+  }
+
+  /** Every per-construct material (fade + dispose walk this list). */
+  private materials(): THREE.MeshStandardMaterial[] {
+    return [
+      this.strawMat,
+      this.frayMat,
+      this.woodMat,
+      this.ropeMat,
+      this.ironMat,
+      this.stoneMat,
+      this.coalMat,
+    ];
   }
 
   /**
@@ -742,10 +1388,9 @@ export class Construct {
     this.parent.remove(this.group);
     this.group.clear();
     for (const g of this.geometries) g.dispose();
-    this.strawMat.dispose();
-    this.woodMat.dispose();
-    this.ironMat.dispose();
-    this.coalMat.dispose();
+    // Materials are per construct; the canvas textures they reference are
+    // the shared module cache and are intentionally NOT disposed.
+    for (const mat of this.materials()) mat.dispose();
     this.state = 'gone';
   }
 }
@@ -773,11 +1418,15 @@ export class ConstructManager {
     tier: ConstructTier = 1,
     hp?: number,
     floorY?: number,
+    variant?: number,
   ): Construct {
     const construct: Construct = new Construct(this.physics, this.parent, anchorPos, {
       tier,
       ...(hp !== undefined ? { hp } : {}),
       ...(floorY !== undefined ? { floorY } : {}),
+      // Deterministic variant: the director passes the station index; bare
+      // spawns cycle the table so successive dummies still differ.
+      variant: variant ?? this.spawnCount % CONSTRUCT_VARIANTS.length,
       seed: 0xd0117 + this.spawnCount * 7919,
       onDeath: (position) => {
         this.onDeath?.(construct, position);

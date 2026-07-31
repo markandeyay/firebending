@@ -251,6 +251,113 @@ export const WIPE = {
   GAIN: 0.45,
 } as const;
 
+export const BELL = {
+  /** Fundamental of the struck title bell (low bronze temple bell register). */
+  F0: 98,
+  /**
+   * Inharmonic partial ratios in the style of a struck bronze bell. These are
+   * generic bell-acoustics numbers (hum, prime, tierce-ish cluster, upper
+   * clang), synthesized from scratch; no recording of anything is involved.
+   */
+  PARTIALS: [1, 2.04, 2.76, 3.55, 4.72, 6.31],
+  PARTIAL_GAINS: [1, 0.6, 0.39, 0.23, 0.13, 0.07],
+  /** Decay time constant of the lowest partial (seconds). */
+  DECAY_TC: 1.9,
+  /** Each higher partial's decay tc is the previous times this. */
+  PARTIAL_TC_FALLOFF: 0.6,
+  /** Slow beating: every partial is a pair detuned by this many Hz. */
+  BEAT_HZ: 0.6,
+  GAIN: 0.4,
+  ATTACK: 0.004,
+  /** Strike transient: a brief highpassed noise clang at the moment of impact. */
+  STRIKE_HP: 2400,
+  STRIKE_GAIN: 0.1,
+  STRIKE_DUR: 0.04,
+  /** Total scheduled ring length (seconds). */
+  DUR: 8,
+} as const;
+
+export const DRONE = {
+  /** Root of the arena drone bed. */
+  F0: 55,
+  /** Second voice a fifth up, quiet. */
+  FIFTH_RATIO: 1.5,
+  FIFTH_GAIN: 0.35,
+  /** Beating pair detune on the root (Hz). */
+  DETUNE_HZ: 0.7,
+  /** Brown-noise air under the oscillators. */
+  NOISE_LP: 140,
+  NOISE_GAIN: 0.5,
+  /** setIntensity(0..1) maps linearly between these master-bus gains. */
+  GAIN_MIN: 0.04,
+  GAIN_MAX: 0.26,
+  /** ...and between these bus lowpass cutoffs (combat brightens the bed). */
+  LP_MIN: 240,
+  LP_MAX: 1300,
+  /** Slow, musical intensity smoothing (seconds). */
+  INTENSITY_TC: 0.6,
+  LFO_HZ: 0.13,
+  LFO_DEPTH: 0.012,
+  STOP_TC: 0.8,
+} as const;
+
+export const TAIKO = {
+  /** Membrane thump: fast pitch drop, lighter than the ceremonial killHit. */
+  F0: 150,
+  F1: 52,
+  SWEEP: 0.08,
+  GAIN: 0.8,
+  TAIL: 0.5,
+  BODY_F0: 200,
+  BODY_F1: 70,
+  BODY_GAIN: 0.16,
+  BODY_TAIL: 0.16,
+  /** Stick/rim transient. */
+  RIM_HP: 2800,
+  RIM_GAIN: 0.18,
+  RIM_DUR: 0.025,
+  ATTACK: 0.003,
+  /** strength below this is clamped up so a hit never vanishes. */
+  MIN_STRENGTH: 0.2,
+} as const;
+
+export const SHAKU = {
+  /**
+   * Note pool for travel phrases: D minor pentatonic (D4 F4 G4 A4 C5).
+   * A deterministic cursor walks this list; no randomness.
+   */
+  SCALE: [293.66, 349.23, 392.0, 440.0, 523.25],
+  DUR: 1.6,
+  /** Gain peaks at this fraction into the note (slow breath swell). */
+  SWELL_AT: 0.45,
+  TONE_GAIN: 0.14,
+  /** Breath layer: white noise bandpassed an octave above the tone. */
+  BREATH_RATIO: 2,
+  BREATH_Q: 9,
+  BREATH_GAIN: 0.1,
+  /** Grace bend: start flat and rise into the note (cents, seconds). */
+  BEND_CENTS: -60,
+  BEND_SEC: 0.18,
+  /** Delayed vibrato on the tone (cents depth). */
+  VIBRATO_HZ: 4.6,
+  VIBRATO_CENTS: 12,
+  VIBRATO_DELAY: 0.55,
+} as const;
+
+export const THUD = {
+  /** Generic construct-impact body thud, scaled by damage dealt. */
+  F0: 120,
+  F1: 58,
+  GAIN_BASE: 0.16,
+  GAIN_PER_DAMAGE: 0.03,
+  GAIN_MAX: 0.5,
+  DUR: 0.16,
+  NOISE_LP: 800,
+  NOISE_GAIN_RATIO: 0.6,
+  NOISE_DUR: 0.07,
+  ATTACK: 0.004,
+} as const;
+
 export const AMBIENT = {
   CRACKLE_HP: 900,
   CRACKLE_GAIN: 0.08,
@@ -361,6 +468,8 @@ export class AudioEngine {
   private rig: Rig | null = null;
   private masterVolume: number = MASTER.VOLUME;
   private crackleCursor = 0;
+  /** Deterministic walk through SHAKU.SCALE (no randomness in note choice). */
+  private shakuCursor = 0;
 
   /**
    * Create the AudioContext and master chain. Must be called from a user
@@ -597,6 +706,138 @@ export class AudioEngine {
     this.swell(r, r.white, WIPE.BP_START, WIPE.BP_END, WIPE.Q, WIPE.GAIN, WIPE.SWELL_AT, WIPE.DUR);
   }
 
+  /**
+   * Title screen: one struck bell, synthesized as a bank of inharmonic
+   * partial pairs (each pair beats slowly against itself) over a brief
+   * strike transient. The title's entire score is silence plus this.
+   */
+  titleBell(): void {
+    const r = this.rig;
+    if (!r) return;
+    const t = r.ctx.currentTime;
+    const bus = r.ctx.createGain();
+    bus.gain.value = BELL.GAIN;
+    bus.connect(r.master);
+    const nodes: AudioNode[] = [bus];
+    const oscs: OscillatorNode[] = [];
+    let tc = BELL.DECAY_TC;
+    for (let i = 0; i < BELL.PARTIALS.length; i++) {
+      const f = BELL.F0 * (BELL.PARTIALS[i] ?? 1);
+      const peak = BELL.PARTIAL_GAINS[i] ?? 0;
+      for (const detune of [0, BELL.BEAT_HZ]) {
+        const osc = r.ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = f + detune;
+        const g = r.ctx.createGain();
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(peak * 0.5, t + BELL.ATTACK);
+        g.gain.setTargetAtTime(0, t + BELL.ATTACK, tc);
+        osc.connect(g).connect(bus);
+        osc.start(t);
+        osc.stop(t + BELL.DUR);
+        nodes.push(g);
+        oscs.push(osc);
+      }
+      tc *= BELL.PARTIAL_TC_FALLOFF;
+    }
+    this.noiseHit(r, r.white, 'highpass', BELL.STRIKE_HP, null, 0.7, BELL.STRIKE_GAIN, 0.001, BELL.STRIKE_DUR);
+    const last = oscs[oscs.length - 1];
+    if (last) {
+      last.onended = () => {
+        disconnectAll(...oscs, ...nodes);
+      };
+    }
+  }
+
+  /**
+   * Adaptive-score taiko hit, lighter and parameterized where killHit is the
+   * fixed ceremonial version: strength (0..1) scales weight and ring.
+   */
+  taiko(strength = 1): void {
+    const r = this.rig;
+    if (!r) return;
+    const s = Math.max(TAIKO.MIN_STRENGTH, clamp01(strength));
+    const tail = TAIKO.TAIL * (0.6 + 0.4 * s);
+    this.tone(r, 'sine', TAIKO.F0, TAIKO.F1, TAIKO.GAIN * s, TAIKO.ATTACK, tail, TAIKO.SWEEP);
+    this.tone(r, 'triangle', TAIKO.BODY_F0, TAIKO.BODY_F1, TAIKO.BODY_GAIN * s, TAIKO.ATTACK, TAIKO.BODY_TAIL, TAIKO.SWEEP);
+    this.noiseHit(r, r.white, 'highpass', TAIKO.RIM_HP, null, 0.7, TAIKO.RIM_GAIN * s, 0.001, TAIKO.RIM_DUR);
+  }
+
+  /**
+   * Breathy shakuhachi-like phrase note for camera travels: a sine tone with
+   * a grace bend and delayed vibrato, blended with bandpassed breath noise.
+   * Notes walk a pentatonic pool on a deterministic cursor.
+   */
+  shakuhachi(): void {
+    const r = this.rig;
+    if (!r) return;
+    const f = SHAKU.SCALE[this.shakuCursor % SHAKU.SCALE.length] ?? SHAKU.SCALE[0];
+    this.shakuCursor++;
+    const t = r.ctx.currentTime;
+
+    const osc = r.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = f;
+    osc.detune.setValueAtTime(SHAKU.BEND_CENTS, t);
+    osc.detune.linearRampToValueAtTime(0, t + SHAKU.BEND_SEC);
+    const vib = r.ctx.createOscillator();
+    vib.type = 'sine';
+    vib.frequency.value = SHAKU.VIBRATO_HZ;
+    const vibGain = r.ctx.createGain();
+    vibGain.gain.value = SHAKU.VIBRATO_CENTS;
+    vib.connect(vibGain).connect(osc.detune);
+    const toneGain = r.ctx.createGain();
+    toneGain.gain.setValueAtTime(0, t);
+    toneGain.gain.linearRampToValueAtTime(SHAKU.TONE_GAIN, t + SHAKU.DUR * SHAKU.SWELL_AT);
+    toneGain.gain.exponentialRampToValueAtTime(GAIN_FLOOR, t + SHAKU.DUR);
+    osc.connect(toneGain).connect(r.master);
+    osc.start(t);
+    vib.start(t + SHAKU.VIBRATO_DELAY);
+    const end = t + SHAKU.DUR + 0.05;
+    osc.stop(end);
+    vib.stop(end);
+    osc.onended = () => {
+      disconnectAll(osc, vib, vibGain, toneGain);
+    };
+
+    // Breath layer: noise bandpassed above the tone, same envelope shape.
+    const src = r.ctx.createBufferSource();
+    src.buffer = r.white;
+    const bp = r.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = f * SHAKU.BREATH_RATIO;
+    bp.Q.value = SHAKU.BREATH_Q;
+    const breathGain = r.ctx.createGain();
+    breathGain.gain.setValueAtTime(0, t);
+    breathGain.gain.linearRampToValueAtTime(SHAKU.BREATH_GAIN, t + SHAKU.DUR * SHAKU.SWELL_AT);
+    breathGain.gain.exponentialRampToValueAtTime(GAIN_FLOOR, t + SHAKU.DUR);
+    src.connect(bp).connect(breathGain).connect(r.master);
+    src.start(t);
+    src.stop(end);
+    src.onended = () => {
+      disconnectAll(src, bp, breathGain);
+    };
+  }
+
+  /** Construct-impact body thud, gain scaled by damage dealt. */
+  impactThud(damage: number): void {
+    const r = this.rig;
+    if (!r) return;
+    const gain = Math.min(THUD.GAIN_BASE + Math.max(0, damage) * THUD.GAIN_PER_DAMAGE, THUD.GAIN_MAX);
+    this.tone(r, 'sine', THUD.F0, THUD.F1, gain, THUD.ATTACK, THUD.DUR);
+    this.noiseHit(
+      r,
+      r.white,
+      'lowpass',
+      THUD.NOISE_LP,
+      null,
+      0.7,
+      gain * THUD.NOISE_GAIN_RATIO,
+      THUD.ATTACK,
+      THUD.NOISE_DUR
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Sustained sounds
   // -------------------------------------------------------------------------
@@ -637,6 +878,83 @@ export class AudioEngine {
         lfoDepth: FAN.SHIMMER_LFO_DEPTH,
       },
     });
+  }
+
+  /**
+   * Adaptive-score drone bed: a beating pair of low sines, a quiet fifth,
+   * and brown-noise air, all behind one bus lowpass. setIntensity(0..1)
+   * swells both the level and the cutoff, so combat literally brightens
+   * the bed. Slow and musical by design (DRONE.INTENSITY_TC).
+   */
+  droneStart(): SustainHandle {
+    const r = this.rig;
+    if (!r) return NOOP_SUSTAIN;
+    const t = r.ctx.currentTime;
+
+    const bus = r.ctx.createBiquadFilter();
+    bus.type = 'lowpass';
+    bus.frequency.value = DRONE.LP_MIN;
+    const amp = r.ctx.createGain();
+    amp.gain.setValueAtTime(0, t);
+    amp.gain.setTargetAtTime(DRONE.GAIN_MIN, t, DRONE.INTENSITY_TC);
+    const { osc: lfo, gain: lfoGain } = makeLfo(r.ctx, DRONE.LFO_HZ, DRONE.LFO_DEPTH, t);
+    lfoGain.connect(amp.gain);
+    bus.connect(amp).connect(r.master);
+
+    const mkOsc = (freq: number, gain: number): [OscillatorNode, GainNode] => {
+      const osc = r.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const g = r.ctx.createGain();
+      g.gain.value = gain;
+      osc.connect(g).connect(bus);
+      osc.start(t);
+      return [osc, g];
+    };
+    const [oscA, gA] = mkOsc(DRONE.F0, 0.5);
+    const [oscB, gB] = mkOsc(DRONE.F0 + DRONE.DETUNE_HZ, 0.5);
+    const [oscC, gC] = mkOsc(DRONE.F0 * DRONE.FIFTH_RATIO, DRONE.FIFTH_GAIN);
+
+    const noiseSrc = loopSource(r.ctx, r.brown);
+    const noiseLp = r.ctx.createBiquadFilter();
+    noiseLp.type = 'lowpass';
+    noiseLp.frequency.value = DRONE.NOISE_LP;
+    const noiseGain = r.ctx.createGain();
+    noiseGain.gain.value = DRONE.NOISE_GAIN;
+    noiseSrc.connect(noiseLp).connect(noiseGain).connect(bus);
+    noiseSrc.start(t);
+
+    let stopped = false;
+    return {
+      setIntensity: (v: number) => {
+        if (stopped) return;
+        const x = clamp01(v);
+        const now = r.ctx.currentTime;
+        amp.gain.setTargetAtTime(
+          DRONE.GAIN_MIN + (DRONE.GAIN_MAX - DRONE.GAIN_MIN) * x,
+          now,
+          DRONE.INTENSITY_TC
+        );
+        bus.frequency.setTargetAtTime(
+          DRONE.LP_MIN + (DRONE.LP_MAX - DRONE.LP_MIN) * x,
+          now,
+          DRONE.INTENSITY_TC
+        );
+      },
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        const now = r.ctx.currentTime;
+        amp.gain.cancelScheduledValues(now);
+        amp.gain.setTargetAtTime(0, now, DRONE.STOP_TC);
+        const end = now + DRONE.STOP_TC * 6;
+        for (const osc of [oscA, oscB, oscC, lfo]) osc.stop(end);
+        noiseSrc.stop(end);
+        noiseSrc.onended = () => {
+          disconnectAll(oscA, gA, oscB, gB, oscC, gC, noiseSrc, noiseLp, noiseGain, bus, amp, lfo, lfoGain);
+        };
+      },
+    };
   }
 
   /** Breath-charge rumble: low filtered noise swelling under a slow LFO. */

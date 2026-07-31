@@ -278,37 +278,55 @@ describe('FireSystem', () => {
 });
 
 describe('shader source sanity (compile needs a browser, HUMAN item)', () => {
-  it('flame shader has the clock uniform, spawn attributes and noise ramp', () => {
+  it('flame shader: clock, spawn attributes, blackbody ramp, curl advection', () => {
     const e = new FlameEmitter(4);
     const vs = e.material.vertexShader;
     const fs = e.material.fragmentShader;
-    for (const name of ['uTime', 'uBuoyancy', 'aSpawn', 'aLifetime', 'aStart', 'aVelocity', 'aSize', 'aSeed']) {
+    for (const name of ['uTime', 'uBuoyancy', 'aSpawn', 'aLifetime', 'aStart', 'aVelocity', 'aSize', 'aSeed', 'aTemp']) {
       expect(vs).toContain(name);
     }
     expect(fs).toContain('uTime');
     expect(fs).toContain('fireValueNoise'); // 2-octave value noise
-    // Color ramp stops present (deep red, orange, yellow-white core).
-    expect(fs).toContain('0.420, 0.122, 0.082');
-    expect(fs).toContain('0.910, 0.333, 0.110');
-    expect(fs).toContain('1.0, 0.851, 0.627');
-    expect(e.material.blending).toBe(THREE.AdditiveBlending);
+    // Physically-based color: blackbody ramp in the fragment, temperature
+    // decay + temperature-proportional buoyancy + curl advection in the vertex.
+    expect(fs).toContain('fbBlackbody');
+    expect(vs).toContain('fbCurlOffset');
+    expect(vs).toContain('uBuoyancy * aTemp');
+    expect(vs).toContain('uCool');
+    // Additive accumulation via custom premultiplied blending (ONE, ONE) so
+    // the half-res fire target's alpha channel stays smoke-only.
+    expect(e.material.blending).toBe(THREE.CustomBlending);
+    expect(e.material.blendSrc).toBe(THREE.OneFactor);
+    expect(e.material.blendDst).toBe(THREE.OneFactor);
     expect(e.material.depthWrite).toBe(false);
     expect(e.material.transparent).toBe(true);
     e.dispose();
   });
 
-  it('ember shader has curl turbulence and additive blending', () => {
+  it('ember shader: curl turbulence, temperature buoyancy, floor landing', () => {
     const e = new EmberEmitter(4);
-    expect(e.material.vertexShader).toContain('uCurl');
-    expect(e.material.vertexShader).toContain('uBuoyancy');
-    expect(e.material.blending).toBe(THREE.AdditiveBlending);
+    const vs = e.material.vertexShader;
+    expect(vs).toContain('uCurl');
+    expect(vs).toContain('uBuoyancy');
+    expect(vs).toContain('fbCurlOffset');
+    // Closed-form floor landing: quadratic root for the touch-down time.
+    expect(vs).toContain('uFloorY');
+    expect(vs).toContain('sqrt(disc)');
+    expect(e.material.fragmentShader).toContain('fbBlackbody');
+    expect(e.material.blending).toBe(THREE.CustomBlending);
+    expect(e.material.blendSrc).toBe(THREE.OneFactor);
+    expect(e.material.blendDst).toBe(THREE.OneFactor);
     expect(e.material.depthWrite).toBe(false);
     e.dispose();
   });
 
-  it('smoke shader is normal-blended, low opacity, headless-safe (no texture)', () => {
+  it('smoke shader: premultiplied alpha, low opacity, headless-safe, fire tint', () => {
     const e = new SmokeEmitter(4);
-    expect(e.material.blending).toBe(THREE.NormalBlending);
+    // Premultiplied normal blending (ONE, ONE_MINUS_SRC_ALPHA): required by
+    // the off-screen fire target composite, identical on-screen result.
+    expect(e.material.blending).toBe(THREE.CustomBlending);
+    expect(e.material.blendSrc).toBe(THREE.OneFactor);
+    expect(e.material.blendDst).toBe(THREE.OneMinusSrcAlphaFactor);
     expect(e.material.depthWrite).toBe(false);
     const uOpacity = e.material.uniforms['uOpacity'];
     expect(uOpacity?.value).toBeCloseTo(0.12);
@@ -316,6 +334,189 @@ describe('shader source sanity (compile needs a browser, HUMAN item)', () => {
     const uUseMap = e.material.uniforms['uUseMap'];
     expect(uUseMap?.value).toBe(0);
     expect(e.material.fragmentShader).toContain('uUseMap');
+    // Fire-light tint (aTemp reused as tint) and turbulent dissipation.
+    expect(e.material.fragmentShader).toContain('vTemp');
+    expect(e.material.fragmentShader).toContain('erode');
     e.dispose();
+  });
+
+  it('all emitters carry soft-particle uniforms, disabled by default', () => {
+    const parent = new THREE.Group();
+    const fire = new FireSystem(parent);
+    for (const emitter of [fire.flames, fire.embers, fire.smoke]) {
+      const u = emitter.material.uniforms;
+      expect(u['uSoftEnabled']?.value).toBe(0);
+      expect(u['uSceneDepth']?.value).toBeNull();
+      expect(emitter.material.fragmentShader).toContain('fbSoftFade');
+    }
+    fire.dispose();
+  });
+});
+
+describe('temperature attribute (blackbody physics)', () => {
+  it('spawn writes clamped normalized temperatures into aTemp', () => {
+    const e = new FlameEmitter(32);
+    e.spawn({ position: ORIGIN, count: 16, temperature: 0.9 });
+    const arr = e.geometry.getAttribute('aTemp').array as Float32Array;
+    for (let i = 0; i < 16; i++) {
+      const t = arr[i]!;
+      expect(t).toBeGreaterThan(0);
+      expect(t).toBeLessThanOrEqual(1);
+      // Emitter jitter is 0.22 wide around the requested 0.9.
+      expect(t).toBeGreaterThanOrEqual(0.9 - 0.12);
+    }
+    // Out-of-range requests clamp instead of leaking bad values to the ramp.
+    e.spawn({ position: ORIGIN, count: 4, temperature: 99 });
+    e.spawn({ position: ORIGIN, count: 4, temperature: -5 });
+    for (let i = 16; i < 24; i++) {
+      expect(arr[i]).toBeGreaterThan(0);
+      expect(arr[i]).toBeLessThanOrEqual(1);
+    }
+    e.dispose();
+  });
+
+  it('ember temperatures vary widely (population: risers and sinkers)', () => {
+    const e = new EmberEmitter(256);
+    e.spawn({ position: ORIGIN, count: 256 });
+    const arr = e.geometry.getAttribute('aTemp').array as Float32Array;
+    let below = 0;
+    let above = 0;
+    for (let i = 0; i < 256; i++) {
+      // 0.5 is the buoyancy-neutral point in the ember vertex shader.
+      if (arr[i]! < 0.5) below++;
+      else above++;
+    }
+    expect(below).toBeGreaterThan(20); // some embers sink and can land
+    expect(above).toBeGreaterThan(20); // most still rise
+    e.dispose();
+  });
+});
+
+describe('sub-frame segment emission', () => {
+  it('positionEnd distributes spawn positions along the segment', () => {
+    const e = new FlameEmitter(64);
+    const a = new THREE.Vector3(0, 1, 0);
+    const b = new THREE.Vector3(10, 1, 0);
+    e.spawn({ position: a, positionEnd: b, count: 20, spread: 0 });
+    const arr = e.geometry.getAttribute('aStart').array as Float32Array;
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < 20; i++) {
+      const x = arr[i * 3]!;
+      min = Math.min(min, x);
+      max = Math.max(max, x);
+      expect(x).toBeGreaterThanOrEqual(0);
+      expect(x).toBeLessThanOrEqual(10);
+    }
+    // The ribbon spans the segment, not a bead at either end.
+    expect(min).toBeLessThan(1);
+    expect(max).toBeGreaterThan(9);
+    e.dispose();
+  });
+
+  it('timeSpread back-dates spawns across the segment (never future)', () => {
+    const e = new FlameEmitter(64);
+    e.update(2); // clock = 2
+    e.spawn({
+      position: new THREE.Vector3(0, 1, 0),
+      positionEnd: new THREE.Vector3(1, 1, 0),
+      timeSpread: 0.05,
+      count: 10,
+    });
+    const spawn = e.geometry.getAttribute('aSpawn').array as Float32Array;
+    for (let i = 0; i < 10; i++) {
+      expect(spawn[i]).toBeLessThanOrEqual(2);
+      expect(spawn[i]).toBeGreaterThanOrEqual(2 - 0.05 - 1e-6);
+    }
+    e.dispose();
+  });
+});
+
+describe('spawn activity EMA (smoke tint + light coupling source)', () => {
+  it('rises on spawn frames, decays over quiet frames, O(1) to read', () => {
+    const e = new FlameEmitter(128);
+    expect(e.activity).toBe(0);
+    e.spawn({ position: ORIGIN, count: 30 });
+    e.update(1 / 60);
+    const active = e.activity;
+    expect(active).toBeGreaterThan(20);
+    for (let i = 0; i < 240; i++) e.update(1 / 60); // 4 s quiet
+    expect(e.activity).toBeLessThan(active * 0.01);
+    e.dispose();
+  });
+});
+
+describe('light flicker from live particle count (not sine)', () => {
+  it('pool.update(dt, flameLive) drives intensity from density, stays positive', () => {
+    const parent = new THREE.Group();
+    const pool = new FireLightPool(parent, 1);
+    const h = pool.acquire(ORIGIN, 4, 6);
+    let light: THREE.PointLight | null = null;
+    parent.traverse((o) => {
+      if (o instanceof THREE.PointLight) light = o;
+    });
+    expect(light).not.toBeNull();
+    const l = light as unknown as THREE.PointLight;
+    // Dense fire: intensity settles near base with count-hash jitter.
+    for (let i = 0; i < 120; i++) pool.update(1 / 60, 600 + (i % 7));
+    const dense = l.intensity;
+    expect(dense).toBeGreaterThan(4 * 0.5);
+    expect(dense).toBeLessThan(4 * 1.3);
+    // Starved fire: the light dims toward the floor, never negative.
+    for (let i = 0; i < 120; i++) pool.update(1 / 60, 0);
+    const starved = l.intensity;
+    expect(starved).toBeGreaterThan(0);
+    expect(starved).toBeLessThan(dense);
+    expect(h.alive).toBe(true);
+    pool.dispose();
+  });
+
+  it('FireSystem.update feeds the live count through (integration)', () => {
+    const parent = new THREE.Group();
+    const fire = new FireSystem(parent, { lightPoolSize: 2 });
+    const handle = fire.lights.acquire(ORIGIN, 4, 6);
+    fire.flames.spawn({ position: ORIGIN, count: 400, lifetime: 5 });
+    for (let i = 0; i < 60; i++) fire.update(1 / 60);
+    let intensity = 0;
+    fire.group.traverse((o) => {
+      if (o instanceof THREE.PointLight && o.visible) intensity = o.intensity;
+    });
+    expect(intensity).toBeGreaterThan(0);
+    handle.release();
+    fire.dispose();
+  });
+});
+
+describe('post-pipeline hooks (soft particles + half-res fire pass)', () => {
+  it('configureFirePass binds and unbinds depth uniforms on all emitters', () => {
+    const parent = new THREE.Group();
+    const fire = new FireSystem(parent);
+    const depth = new THREE.DepthTexture(64, 64);
+    fire.configureFirePass(depth, 0.1, 100, 640, 360);
+    for (const emitter of [fire.flames, fire.embers, fire.smoke]) {
+      const u = emitter.material.uniforms;
+      expect(u['uSoftEnabled']?.value).toBe(1);
+      expect(u['uSceneDepth']?.value).toBe(depth);
+      expect((u['uFireRes']?.value as THREE.Vector2).x).toBe(640);
+    }
+    fire.configureFirePass(null, 0.1, 100, 1, 1);
+    for (const emitter of [fire.flames, fire.embers, fire.smoke]) {
+      expect(emitter.material.uniforms['uSoftEnabled']?.value).toBe(0);
+    }
+    depth.dispose();
+    fire.dispose();
+  });
+
+  it('setFireLayer moves particle meshes onto the pass layer and back', () => {
+    const parent = new THREE.Group();
+    const fire = new FireSystem(parent);
+    const defaultMask = fire.flames.mesh.layers.mask;
+    fire.setFireLayer(1);
+    for (const emitter of [fire.flames, fire.embers, fire.smoke]) {
+      expect(emitter.mesh.layers.mask).toBe(1 << 1);
+    }
+    fire.setFireLayer(null);
+    expect(fire.flames.mesh.layers.mask).toBe(defaultMask);
+    fire.dispose();
   });
 });

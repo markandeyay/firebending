@@ -34,6 +34,7 @@ export interface EngineLike {
   breathCharge(): StopHandle;
   streamStart(): SustainHandle;
   killHit(): void;
+  impactThud(damage: number): void;
   coalWhistle(flightTimeSec: number): CoalHandle;
   duck(amount: number, ms: number): void;
 }
@@ -106,6 +107,11 @@ export class MoveAudio {
   /** Construct killed: the ceremonial taiko hit. */
   onKill(): void {
     this.engine.killHit();
+  }
+
+  /** A player projectile struck the construct: body thud scaled by damage. */
+  onConstructImpact(damage: number): void {
+    this.engine.impactThud(damage);
   }
 
   /** Hit-stop began: duck the master for its duration. */

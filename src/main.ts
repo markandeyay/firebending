@@ -37,6 +37,7 @@ import {
 } from './screens/calibration';
 import { AudioEngine } from './audio/engine';
 import { MoveAudio } from './audio/moveAudio';
+import { AdaptiveScore } from './audio/score';
 import { buildAudioHooks } from './boot/audioWiring';
 import { faultKindFor, isMobileLike, replayFixtureUrl, routeFor } from './boot/route';
 import {
@@ -124,7 +125,10 @@ async function bootGameFlow(
 ): Promise<void> {
   const engine = new AudioEngine();
   const moveAudio = new MoveAudio(engine);
-  const audioHooks = buildAudioHooks(engine, moveAudio);
+  // Adaptive score (FINAL P5): drone bed + taiko + shakuhachi ride the same
+  // AudioHooks the SFX use; the drone starts when the arena settles.
+  const score = new AdaptiveScore(engine);
+  const audioHooks = buildAudioHooks(engine, moveAudio, score);
 
   const manager = new ScreenManager({
     host: root,
@@ -167,8 +171,9 @@ async function bootGameFlow(
       ...(replayFixture === null ? { framingGate: true } : {}),
     };
     void manager.show('arena', ctx).then(() => {
-      // Brazier crackle bed once the hall is on screen.
+      // Brazier crackle bed and the adaptive drone once the hall is on screen.
       engine.ambientStart();
+      score.start();
     });
   };
 
@@ -225,6 +230,11 @@ async function bootGameFlow(
   manager.register('arena', new ArenaScreen());
 
   await manager.show('title');
+  // Title score: silence plus a single struck bell. Before the first Play
+  // click no AudioContext may exist (autoplay policy), so this is a silent
+  // no-op on a cold load and rings only when the title mounts with audio
+  // already unlocked.
+  engine.titleBell();
 }
 
 /**

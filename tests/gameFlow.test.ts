@@ -348,6 +348,7 @@ interface EngineSpy {
   streamStart(): SustainHandle;
   fanStart(): SustainHandle;
   killHit(): void;
+  impactThud(damage: number): void;
   coalWhistle(flightTimeSec: number): CoalHandle;
   duck(amount: number, ms: number): void;
   wipe(): void;
@@ -389,6 +390,7 @@ function makeEngineSpy(): EngineSpy {
       };
     },
     killHit: () => spy.calls.push('kill-hit'),
+    impactThud: (damage: number) => spy.calls.push(`impact-thud:${damage}`),
     coalWhistle: (flightTimeSec: number) => {
       spy.calls.push(`coal-whistle:${flightTimeSec}`);
       return { land: (blocked: boolean) => spy.coalLands.push(blocked) };

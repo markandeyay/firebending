@@ -452,12 +452,13 @@ export function mountPerfGate(container: HTMLElement): () => void {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100);
 
-  // The REAL render pipeline (Phase 6): the gate must measure the same
-  // post chain (bloom + grain + vignette) the arena screen renders through.
-  const post = createPostPipeline(renderer, scene, camera);
+  // The REAL render pipeline (Phase 6 + fire rebuild): the gate must measure
+  // the same post chain (half-res fire pass + bloom + grain + vignette) the
+  // arena screen renders through, so fire is constructed first and passed in.
+  const fire = new FireSystem(scene);
+  const post = createPostPipeline(renderer, scene, camera, { fire });
 
   const arena: Arena = buildArena(scene);
-  const fire = new FireSystem(scene);
   for (const anchor of arena.brazierAnchors) {
     fire.attachAmbient(anchor, BRAZIER_FLAME_SCALE);
   }

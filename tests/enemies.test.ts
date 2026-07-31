@@ -4,11 +4,13 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
+  CONSTRUCT_VARIANTS,
   ConstructManager,
   createPhysicsWorld,
   DEBRIS_KEEP_CAP,
   DEFAULT_HP,
   FIXED_TIMESTEP,
+  SMOKE_THRESHOLD,
   type CoalProjectile,
   type PhysicsWorld,
 } from '../src/game/enemies';
@@ -373,15 +375,120 @@ describe('tier 2 lobbing', () => {
   });
 });
 
-describe('budgets', () => {
-  it('keeps the mesh node count small (<= 15 per construct, both tiers)', async () => {
+describe('damage staging', () => {
+  it('burn level starts at 0, rises monotonically with damage, caps below 1', async () => {
     const physics = await makeWorld();
     const { manager } = makeManager(physics);
-    const t1 = manager.spawn(ANCHOR, 1);
-    const t2 = manager.spawn(new THREE.Vector3(2, 1.1, -6), 2);
-    expect(countMeshes(t1.group)).toBeLessThanOrEqual(15);
-    expect(countMeshes(t2.group)).toBeLessThanOrEqual(15);
-    expect(countMeshes(t1.group)).toBeGreaterThanOrEqual(5);
+    const c = manager.spawn(ANCHOR, 1);
+    expect(c.burnLevel).toBe(0);
+    const hitPoint = new THREE.Vector3(ANCHOR.x, 1.4, ANCHOR.z + 0.26);
+    const impulse = new THREE.Vector3(0, 0, -1);
+    let previous = 0;
+    for (let i = 0; i < 4; i++) {
+      c.takeHit(20, impulse, hitPoint);
+      expect(c.burnLevel).toBeGreaterThan(previous);
+      previous = c.burnLevel;
+    }
+    // 80% damage: patches burned away but the silhouette survives (< 1).
+    expect(c.burnLevel).toBeLessThan(0.7);
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('smoke stage engages only above the 50% damage threshold, off when dead', async () => {
+    const physics = await makeWorld();
+    const { manager } = makeManager(physics);
+    const c = manager.spawn(ANCHOR, 1);
+    const hitPoint = new THREE.Vector3(ANCHOR.x, 1.4, ANCHOR.z + 0.26);
+    const impulse = new THREE.Vector3(0, 0, -1);
+    const out = new THREE.Vector3();
+
+    expect(SMOKE_THRESHOLD).toBeCloseTo(0.5, 5);
+    expect(c.smokeIntensity).toBe(0);
+    expect(c.smokeSource(out)).toBeNull();
+
+    c.takeHit(40, impulse, hitPoint); // 40% < threshold
+    expect(c.smokeIntensity).toBe(0);
+    expect(c.smokeSource(out)).toBeNull();
+
+    c.takeHit(30, impulse, hitPoint); // 70% > threshold
+    expect(c.smokeIntensity).toBeGreaterThan(0);
+    const src = c.smokeSource(out);
+    expect(src).not.toBeNull();
+    // Wound point sits on the torso, near the anchor.
+    if (src) {
+      expect(Math.hypot(src.x - ANCHOR.x, src.z - ANCHOR.z)).toBeLessThan(1);
+      expect(src.y).toBeGreaterThan(0.5);
+    }
+
+    c.takeHit(30, impulse, hitPoint); // dead
+    expect(c.isAlive).toBe(false);
+    expect(c.smokeIntensity).toBe(0);
+    expect(c.smokeSource(out)).toBeNull();
+    manager.dispose();
+    physics.dispose();
+  });
+});
+
+describe('visual variants', () => {
+  it('exposes six variants and plumbs the requested index through spawn', async () => {
+    expect(CONSTRUCT_VARIANTS.length).toBe(6);
+    const physics = await makeWorld();
+    const { manager } = makeManager(physics);
+    for (let i = 0; i < 6; i++) {
+      const c = manager.spawn(new THREE.Vector3(i * 2 - 6, 1.1, -6), 1, undefined, undefined, i);
+      expect(c.variantIndex).toBe(i);
+    }
+    // Wrapping: variant 7 -> 1.
+    const wrapped = manager.spawn(new THREE.Vector3(8, 1.1, -6), 1, undefined, undefined, 7);
+    expect(wrapped.variantIndex).toBe(1);
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('defaults cycle the variant table by spawn order', async () => {
+    const physics = await makeWorld();
+    const { manager } = makeManager(physics);
+    const a = manager.spawn(ANCHOR, 1);
+    const b = manager.spawn(new THREE.Vector3(2, 1.1, -6), 1);
+    expect(a.variantIndex).toBe(0);
+    expect(b.variantIndex).toBe(1);
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('variants differ visibly: distinct straw tones per station', () => {
+    const tones = new Set(CONSTRUCT_VARIANTS.map((v) => v.straw));
+    expect(tones.size).toBe(6);
+    // At least two band-count tiers so silhouettes vary.
+    const bandCounts = new Set(CONSTRUCT_VARIANTS.map((v) => v.bands));
+    expect(bandCounts.size).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('budgets', () => {
+  it('keeps the mesh node count small (<= 15 per construct, both tiers, all variants)', async () => {
+    const physics = await makeWorld();
+    const { manager } = makeManager(physics);
+    for (let variant = 0; variant < CONSTRUCT_VARIANTS.length; variant++) {
+      const t1 = manager.spawn(
+        new THREE.Vector3(variant * 2 - 6, 1.1, -6),
+        1,
+        undefined,
+        undefined,
+        variant,
+      );
+      const t2 = manager.spawn(
+        new THREE.Vector3(variant * 2 - 6, 1.1, -10),
+        2,
+        undefined,
+        undefined,
+        variant,
+      );
+      expect(countMeshes(t1.group)).toBeLessThanOrEqual(15);
+      expect(countMeshes(t2.group)).toBeLessThanOrEqual(15);
+      expect(countMeshes(t1.group)).toBeGreaterThanOrEqual(5);
+    }
     manager.dispose();
     physics.dispose();
   });
