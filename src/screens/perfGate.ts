@@ -16,18 +16,22 @@
  * Automation: the result is exposed as window.__perfGateResult and logged as
  * a single line 'PERFGATE {json}' to the console.
  *
- * ML mode (&ml=1, Phase 7 support): the gate additionally runs all three
- * MediaPipe landmarkers (Hand, Face, Pose LITE) against a SYNTHETIC camera --
+ * ML mode (&ml=1, Phase 7 support): the gate additionally runs the two
+ * MediaPipe landmarkers (Hand, Pose; FaceLandmarker was deleted in R3
+ * Phase 2 -- head pose derives from pose) against a SYNTHETIC camera --
  * a hidden 640x480 canvas redrawn every frame with deterministic animated
  * content (mulberry32-seeded drifting shapes and gradient bands so the
  * encoders have real work), captureStream(30)'d into a muted hidden video.
  * Detection runs inside the same rAF tick as the render on the liveSource
- * schedule (hands every frame, pose every 2nd, face every 4th, monotonic
+ * fallback schedule (hands every frame, pose every 2nd, monotonic
  * timestamps), so the frame-time median already includes the detect calls.
- * The result gains an `ml` block with the AMORTIZED per-rendered-frame cost
- * of each model plus a separate PASS/FAIL against the 7 ms combined ML
- * budget (Section 14). If the models cannot be created (offline), the gate
- * degrades gracefully: it measures without ML and reports available: false.
+ * &pose=full swaps the pose model to the FULL variant so its cost can be
+ * measured against the LITE default (see POSE_MODEL_URLS); the chosen
+ * variant is reported in the ml block. The result gains an `ml` block with
+ * the AMORTIZED per-rendered-frame cost of each model plus a separate
+ * PASS/FAIL against the 7 ms combined ML budget (Section 14). If the models
+ * cannot be created (offline), the gate degrades gracefully: it measures
+ * without ML and reports available: false.
  *
  * The measurement math (quantiles, summary, pass rule, ML amortization) is
  * pure and exported for headless tests; mountPerfGate itself needs a real
@@ -35,11 +39,8 @@
  */
 
 import * as THREE from 'three';
-import type {
-  FaceLandmarker,
-  HandLandmarker,
-  PoseLandmarker,
-} from '@mediapipe/tasks-vision';
+import type { HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
+import type { PoseModelVariant } from '../tracking/poseSource';
 import { configureRenderer } from '../game/renderer';
 import { buildArena, type Arena } from '../game/arena';
 import { FireSystem, type FireLightHandle } from '../vfx/fire';
@@ -86,13 +87,14 @@ export interface PerfSummary {
  * Per-model ML cost breakdown (&ml=1 runs only). The Ms values are AMORTIZED
  * average cost per RENDERED frame over the measurement window (total model ms
  * divided by rendered frames), so the scheduling discount shows: a pose model
- * that costs 4 ms but runs every 2nd frame reports ~2 ms here.
+ * that costs 4 ms but runs every 2nd frame reports ~2 ms here. poseVariant
+ * records which pose model asset ran (&pose=full selects 'full').
  */
 export interface PerfMlSummary {
   available: boolean;
   handMs: number;
   poseMs: number;
-  faceMs: number;
+  poseVariant: PoseModelVariant;
   totalMsPerFrame: number;
 }
 
@@ -144,21 +146,21 @@ export function perfPass(medianMs: number, p95Ms?: number): boolean {
  */
 export function summarizeMl(
   available: boolean,
-  totals: { handMs: number; poseMs: number; faceMs: number },
+  totals: { handMs: number; poseMs: number },
   renderedFrames: number,
+  poseVariant: PoseModelVariant = 'lite',
 ): PerfMlSummary {
   if (!available || renderedFrames <= 0) {
-    return { available, handMs: 0, poseMs: 0, faceMs: 0, totalMsPerFrame: 0 };
+    return { available, handMs: 0, poseMs: 0, poseVariant, totalMsPerFrame: 0 };
   }
   const handMs = totals.handMs / renderedFrames;
   const poseMs = totals.poseMs / renderedFrames;
-  const faceMs = totals.faceMs / renderedFrames;
   return {
     available: true,
     handMs,
     poseMs,
-    faceMs,
-    totalMsPerFrame: handMs + poseMs + faceMs,
+    poseVariant,
+    totalMsPerFrame: handMs + poseMs,
   };
 }
 
@@ -273,11 +275,10 @@ const HIDDEN_MEDIA_CSS =
 
 interface MlRuntime {
   hand: HandLandmarker;
-  face: FaceLandmarker;
   pose: PoseLandmarker;
+  poseVariant: PoseModelVariant;
   detectHands: typeof import('../tracking/handSource').detectHands;
-  detectFace: typeof import('../tracking/faceSource').detectFace;
-  detectPose: typeof import('../tracking/poseSource').detectPose;
+  detectPoseAndHead: typeof import('../tracking/poseSource').detectPoseAndHead;
   canvas: HTMLCanvasElement;
   video: HTMLVideoElement;
   stream: MediaStream;
@@ -328,7 +329,6 @@ function makeSyntheticSceneDrawer(
 
 function disposeMlRuntime(rt: MlRuntime): void {
   rt.hand.close();
-  rt.face.close();
   rt.pose.close();
   for (const track of rt.stream.getTracks()) track.stop();
   rt.video.srcObject = null;
@@ -337,14 +337,18 @@ function disposeMlRuntime(rt: MlRuntime): void {
 }
 
 /**
- * Build the synthetic camera and create all three landmarkers (GPU delegate
+ * Build the synthetic camera and create both landmarkers (GPU delegate
  * with CPU fallback, via the exact factories the live sources use; the
  * tracking modules are dynamically imported so a non-ML gate run never loads
- * them). Throws -- after cleaning up whatever it built -- if any landmarker
- * cannot be created (e.g. model/WASM download failing offline); the caller
- * degrades to a no-ML measurement.
+ * them). `poseVariant` selects the pose model asset (&pose=full). Throws --
+ * after cleaning up whatever it built -- if any landmarker cannot be
+ * created (e.g. model/WASM download failing offline); the caller degrades
+ * to a no-ML measurement.
  */
-async function setupSyntheticMl(container: HTMLElement): Promise<MlRuntime> {
+async function setupSyntheticMl(
+  container: HTMLElement,
+  poseVariant: PoseModelVariant,
+): Promise<MlRuntime> {
   const canvas = document.createElement('canvas');
   canvas.width = ML_VIDEO_WIDTH;
   canvas.height = ML_VIDEO_HEIGHT;
@@ -373,37 +377,29 @@ async function setupSyntheticMl(container: HTMLElement): Promise<MlRuntime> {
 
   try {
     await video.play();
-    const [handMod, faceMod, poseMod] = await Promise.all([
+    const [handMod, poseMod] = await Promise.all([
       import('../tracking/handSource'),
-      import('../tracking/faceSource'),
       import('../tracking/poseSource'),
     ]);
-    const [handRes, faceRes, poseRes] = await Promise.allSettled([
+    const [handRes, poseRes] = await Promise.allSettled([
       handMod.createHandLandmarker(),
-      faceMod.createFaceLandmarker(),
-      poseMod.createPoseLandmarker(),
+      poseMod.createPoseLandmarker(poseVariant),
     ]);
-    if (
-      handRes.status === 'rejected' ||
-      faceRes.status === 'rejected' ||
-      poseRes.status === 'rejected'
-    ) {
+    if (handRes.status === 'rejected' || poseRes.status === 'rejected') {
       // Close whichever landmarkers DID come up before failing the setup.
       if (handRes.status === 'fulfilled') handRes.value.close();
-      if (faceRes.status === 'fulfilled') faceRes.value.close();
       if (poseRes.status === 'fulfilled') poseRes.value.close();
-      const rejected = [handRes, faceRes, poseRes].find(
+      const rejected = [handRes, poseRes].find(
         (r): r is PromiseRejectedResult => r.status === 'rejected',
       );
       throw rejected?.reason ?? new Error('landmarker creation failed');
     }
     return {
       hand: handRes.value,
-      face: faceRes.value,
       pose: poseRes.value,
+      poseVariant,
       detectHands: handMod.detectHands,
-      detectFace: faceMod.detectFace,
-      detectPose: poseMod.detectPose,
+      detectPoseAndHead: poseMod.detectPoseAndHead,
       canvas,
       video,
       stream,
@@ -433,8 +429,10 @@ const STREAM_FLAME_CAP = 6;
 const STREAM_EMBER_RATE = 60;
 
 export function mountPerfGate(container: HTMLElement): () => void {
-  const mlRequested =
-    new URLSearchParams(window.location.search).get('ml') === '1';
+  const params = new URLSearchParams(window.location.search);
+  const mlRequested = params.get('ml') === '1';
+  /** Pose model variant under measurement: LITE default, &pose=full opts in. */
+  const poseVariant: PoseModelVariant = params.get('pose') === 'full' ? 'full' : 'lite';
   const width = container.clientWidth || window.innerWidth;
   const height = container.clientHeight || window.innerHeight;
 
@@ -512,7 +510,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
   let mlPending = mlRequested;
   let mlFrameIndex = 0;
   let mlLastTimestamp = -1;
-  const mlTotals = { handMs: 0, poseMs: 0, faceMs: 0 };
+  const mlTotals = { handMs: 0, poseMs: 0 };
   if (mlRequested) {
     let mlSettled = false;
     const settleWithoutMl = (why: string, err?: unknown): void => {
@@ -525,7 +523,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
       () => settleWithoutMl('ML setup timed out'),
       ML_SETUP_TIMEOUT_MS,
     );
-    void setupSyntheticMl(container).then(
+    void setupSyntheticMl(container, poseVariant).then(
       (runtime) => {
         window.clearTimeout(timeoutHandle);
         if (disposed || mlSettled) {
@@ -559,7 +557,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
     const summary = summarizeFrames(frameMs);
     const stats = fire.stats();
     const mlSummary = mlRequested
-      ? summarizeMl(mlRuntime !== null, mlTotals, summary.frames)
+      ? summarizeMl(mlRuntime !== null, mlTotals, summary.frames, poseVariant)
       : null;
     const result: PerfGateResult = {
       ...summary,
@@ -617,7 +615,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
     if (result.ml) {
       if (result.ml.available) {
         lineRows.push(
-          `ml/frame      ${result.ml.totalMsPerFrame.toFixed(2)} ms (hand ${result.ml.handMs.toFixed(2)} / pose ${result.ml.poseMs.toFixed(2)} / face ${result.ml.faceMs.toFixed(2)})`,
+          `ml/frame      ${result.ml.totalMsPerFrame.toFixed(2)} ms (hand ${result.ml.handMs.toFixed(2)} / pose[${result.ml.poseVariant}] ${result.ml.poseMs.toFixed(2)})`,
           `ml budget     ${ML_BUDGET_MS} ms -> ${mlPass(result.ml.totalMsPerFrame) ? 'PASS' : 'FAIL'}`,
         );
       } else {
@@ -726,8 +724,9 @@ export function mountPerfGate(container: HTMLElement): () => void {
 
     // --- Synthetic-camera ML load (&ml=1) ----------------------------------
     // Runs INSIDE this rAF tick, so the frame-time median already includes
-    // the detect calls. liveSource schedule: hands every frame, pose every
-    // 2nd (odd frames), face every 4th; monotonic timestamps.
+    // the detect calls. liveSource fallback schedule: hands every frame,
+    // pose every 2nd (odd frames; the head pose derives from the same
+    // detection); monotonic timestamps.
     if (
       mlRuntime &&
       mlRuntime.video.readyState >= 2 &&
@@ -747,19 +746,12 @@ export function mountPerfGate(container: HTMLElement): () => void {
         let poseMs = 0;
         if (mlFrameIndex % 2 === 1) {
           const poseStart = performance.now();
-          rt.detectPose(rt.pose, rt.video, timestamp);
+          rt.detectPoseAndHead(rt.pose, rt.video, timestamp);
           poseMs = performance.now() - poseStart;
-        }
-        let faceMs = 0;
-        if (mlFrameIndex % 4 === 0) {
-          const faceStart = performance.now();
-          rt.detectFace(rt.face, rt.video, timestamp);
-          faceMs = performance.now() - faceStart;
         }
         if (measuring) {
           mlTotals.handMs += handMs;
           mlTotals.poseMs += poseMs;
-          mlTotals.faceMs += faceMs;
         }
       } catch (err) {
         console.warn('perf gate: ML detection failed mid-run, disabling ML', err);

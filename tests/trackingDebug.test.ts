@@ -71,15 +71,39 @@ describe('formatHud', () => {
   });
 
   it('includes live stats only when the live block is present', () => {
-    expect(formatHud(base)).not.toContain('faceDegraded');
+    expect(formatHud(base)).not.toContain('poseDegraded');
     const hud = formatHud({
       ...base,
       source: 'live camera',
-      live: { handMs: 4.2, faceMs: 2.1, faceDegraded: true },
+      live: {
+        handMs: 4.2,
+        poseMs: 2.1,
+        poseHz: 24.6,
+        poseWorker: true,
+        poseDegraded: true,
+      },
     });
     expect(hud).toContain('hand 4.2ms');
-    expect(hud).toContain('face 2.1ms');
-    expect(hud).toContain('faceDegraded: yes');
+    expect(hud).toContain('pose 2.1ms');
+    expect(hud).toContain('@ 24.6Hz');
+    expect(hud).toContain('(worker)');
+    expect(hud).toContain('poseDegraded: yes');
+  });
+
+  it('labels the main-thread pose fallback', () => {
+    const hud = formatHud({
+      ...base,
+      source: 'live camera',
+      live: {
+        handMs: 4.2,
+        poseMs: 3.0,
+        poseHz: 0,
+        poseWorker: false,
+        poseDegraded: false,
+      },
+    });
+    expect(hud).toContain('(main)');
+    expect(hud).toContain('poseDegraded: no');
   });
 
   it('never contains em dashes', () => {
@@ -89,7 +113,13 @@ describe('formatHud', () => {
         ...base,
         left: { confidence: null, tracked: false },
         right: { confidence: 0.5, tracked: false },
-        live: { handMs: 0, faceMs: 0, faceDegraded: false },
+        live: {
+          handMs: 0,
+          poseMs: 0,
+          poseHz: 0,
+          poseWorker: false,
+          poseDegraded: false,
+        },
       }),
     ];
     for (const hud of variants) {

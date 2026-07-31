@@ -156,16 +156,17 @@ describe('perf gate math', () => {
     expect(perfPass(16.7, 18)).toBe(true);
   });
 
-  it('summarizeMl amortizes per-model cost over rendered frames', () => {
+  it('summarizeMl amortizes per-model cost over rendered frames (hand + pose only)', () => {
     // Totals accumulated over 150 rendered frames; scheduling discount is
     // already baked into the totals (pose ran on half the frames, etc.).
-    const ml = summarizeMl(true, { handMs: 300, poseMs: 150, faceMs: 75 }, 150);
+    // No face entry: FaceLandmarker was deleted in R3 Phase 2.
+    const ml = summarizeMl(true, { handMs: 300, poseMs: 150 }, 150);
     expect(ml).toEqual({
       available: true,
       handMs: 2,
       poseMs: 1,
-      faceMs: 0.5,
-      totalMsPerFrame: 3.5,
+      poseVariant: 'lite',
+      totalMsPerFrame: 3,
     });
     expect(ML_BUDGET_MS).toBe(7);
     expect(mlPass(ml.totalMsPerFrame)).toBe(true);
@@ -173,15 +174,22 @@ describe('perf gate math', () => {
     expect(mlPass(ML_BUDGET_MS + 0.01)).toBe(false);
   });
 
+  it('summarizeMl reports the measured pose variant (&pose=full)', () => {
+    const ml = summarizeMl(true, { handMs: 100, poseMs: 80 }, 100, 'full');
+    expect(ml.poseVariant).toBe('full');
+    expect(ml.poseMs).toBeCloseTo(0.8, 10);
+    expect(ml.totalMsPerFrame).toBeCloseTo(1.8, 10);
+  });
+
   it('summarizeMl degrades to zeros when unavailable or windowless', () => {
-    expect(summarizeMl(false, { handMs: 99, poseMs: 9, faceMs: 9 }, 100)).toEqual({
+    expect(summarizeMl(false, { handMs: 99, poseMs: 9 }, 100)).toEqual({
       available: false,
       handMs: 0,
       poseMs: 0,
-      faceMs: 0,
+      poseVariant: 'lite',
       totalMsPerFrame: 0,
     });
-    const empty = summarizeMl(true, { handMs: 5, poseMs: 5, faceMs: 5 }, 0);
+    const empty = summarizeMl(true, { handMs: 5, poseMs: 5 }, 0);
     expect(empty.available).toBe(true);
     expect(empty.totalMsPerFrame).toBe(0);
   });
@@ -278,15 +286,15 @@ describe('perf gate math', () => {
       lightsActive: 0,
     };
     // Merge exactly the way finish() does: conditional spread.
-    const ml = summarizeMl(true, { handMs: 40, poseMs: 20, faceMs: 10 }, 10);
+    const ml = summarizeMl(true, { handMs: 40, poseMs: 20 }, 10);
     const withMl: PerfGateResult = { ...base, ...(ml ? { ml } : {}) };
     const parsed = JSON.parse(JSON.stringify(withMl)) as PerfGateResult;
     expect(parsed.ml).toEqual({
       available: true,
       handMs: 4,
       poseMs: 2,
-      faceMs: 1,
-      totalMsPerFrame: 7,
+      poseVariant: 'lite',
+      totalMsPerFrame: 6,
     });
     expect(parsed.pass).toBe(true);
     // Without &ml=1 the field is absent entirely, not null.

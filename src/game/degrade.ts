@@ -7,14 +7,15 @@
  *    never built, so the ladder starts at particles; deviation recorded in
  *    the tracker)
  *   rung 1  particle count halved        setParticleScale(0.5)
- *   rung 2  pose tracking at 7.5 Hz      setPoseIntervalMultiplier(2)
- *   rung 3  face tracking at 7.5 Hz      setFaceIntervalMultiplier(2)
- *   rung 4  shadow resolution halved     setShadowHalved(true)
+ *   rung 2  pose tracking rate halved    setPoseIntervalMultiplier(2)
+ *   rung 3  shadow resolution halved     setShadowHalved(true)
  *
- * ML degrade order matches LiveLandmarkSource's internal ML-budget ladder:
- * pose FIRST, face second, hands never. Pose at 7.5 Hz still feeds the
- * punch-fusion freshness window (250 ms); face parallax tolerates 7.5 Hz
- * because the camera rig smooths it anyway.
+ * The old face rung is GONE (Round 3 Phase 2): FaceLandmarker was deleted
+ * and head pose now rides the pose samples for free, so there is nothing
+ * left to degrade. ML degrade matches LiveLandmarkSource's internal
+ * ML-budget ladder: pose only, hands never. Pose at half rate still feeds
+ * the punch-fusion freshness window (250 ms), and head parallax follows the
+ * pose rate since the camera rig smooths it anyway.
  *
  * Measurement: frame times accumulate into non-overlapping 120-frame windows
  * and each full window contributes one median. A window is SLOW when its
@@ -34,9 +35,7 @@ export interface DegradeHooks {
   setParticleScale(scale: number): void;
   /** Rung 2: multiplier on the pose detection interval (2 = half rate). */
   setPoseIntervalMultiplier(multiplier: number): void;
-  /** Rung 3: multiplier on the face detection interval (2 = half rate). */
-  setFaceIntervalMultiplier(multiplier: number): void;
-  /** Rung 4: shadow maps at half resolution while true. */
+  /** Rung 3: shadow maps at half resolution while true. */
   setShadowHalved(halved: boolean): void;
 }
 
@@ -51,13 +50,12 @@ export const DEGRADE_SLOW_WINDOWS = 2;
 /** Consecutive fast windows required to step back up one rung. */
 export const DEGRADE_FAST_WINDOWS = 4;
 /** Deepest rung (see the module header for the rung table). */
-export const DEGRADE_MAX_RUNG = 4;
+export const DEGRADE_MAX_RUNG = 3;
 
 const RUNG_LABELS: readonly string[] = [
   'full fidelity',
   'particles halved',
-  'pose tracking 7.5 Hz',
-  'face tracking 7.5 Hz',
+  'pose rate halved',
   'shadows halved',
 ];
 
@@ -128,9 +126,6 @@ export class DegradeLadder {
         this.hooks.setPoseIntervalMultiplier(down ? 2 : 1);
         break;
       case 3:
-        this.hooks.setFaceIntervalMultiplier(down ? 2 : 1);
-        break;
-      case 4:
         this.hooks.setShadowHalved(down);
         break;
     }

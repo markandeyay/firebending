@@ -5,8 +5,10 @@
  * so the numbers are representative when `gpu: true` appears in the output.
  *
  * Usage:
- *   npx tsx tools/perfrun.ts          plain gate
- *   npx tsx tools/perfrun.ts ml       gate with all three MediaPipe models
+ *   npx tsx tools/perfrun.ts            plain gate
+ *   npx tsx tools/perfrun.ts ml         gate with the MediaPipe models
+ *                                       (hand + pose LITE)
+ *   npx tsx tools/perfrun.ts ml full    same, pose FULL variant (&pose=full)
  *
  * Prints the PERFGATE json result and exits 0 on PASS, 1 on FAIL/timeout.
  */
@@ -14,6 +16,7 @@
 import { chromium } from 'playwright';
 
 const ML = process.argv[2] === 'ml';
+const POSE_FULL = process.argv[3] === 'full';
 const BASE = 'http://localhost:5173';
 
 async function main(): Promise<void> {
@@ -25,7 +28,9 @@ async function main(): Promise<void> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   page.on('pageerror', (e) => console.error('[pageerror]', String(e).slice(0, 300)));
 
-  await page.goto(`${BASE}/?debug=perf${ML ? '&ml=1' : ''}`);
+  await page.goto(
+    `${BASE}/?debug=perf${ML ? '&ml=1' : ''}${ML && POSE_FULL ? '&pose=full' : ''}`,
+  );
 
   const renderer = await page.evaluate(() => {
     const c = document.createElement('canvas');

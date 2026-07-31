@@ -347,10 +347,12 @@ export interface FilteredSourceOptions {
 
 /**
  * One Euro filters for the eight pose joints (screen space) plus the eight
- * world joints when present. Filters run once per pose SAMPLE (PoseFrame.t
- * changes), never per held frame, so the smoothing timestep matches the pose
- * detection rate and the sample-and-hold repetition cannot bias the filter.
- * Resets after a gap longer than HAND_FILTER_RESET_GAP_SEC, like hands.
+ * world joints when present. Filters run once per distinct PoseFrame.t
+ * (real samples AND worker-path interpolated frames, which advance t per
+ * frame), never per held frame, so sample-and-hold repetition cannot bias
+ * the filter; interpolated frames are already smooth, so filtering them at
+ * frame rate is benign. Resets after a gap longer than
+ * HAND_FILTER_RESET_GAP_SEC, like hands.
  */
 class PoseFilterBank {
   private readonly screen: OneEuroVec3[];
@@ -390,8 +392,11 @@ class PoseFilterBank {
       this.reset();
     }
     this.lastTSec = tSec;
+    // Spread first so optional metadata (wristVisibility, head points, the
+    // `interpolated` marker the elbow tracker keys on) passes through; the
+    // filtered joints then overwrite the geometric fields.
     return {
-      t: pose.t,
+      ...pose,
       left: this.filterArm(this.screen, 0, pose.left, tSec),
       right: this.filterArm(this.screen, 4, pose.right, tSec),
       world: pose.world
@@ -400,7 +405,6 @@ class PoseFilterBank {
             right: this.filterArm(this.world, 4, pose.world.right, tSec),
           }
         : null,
-      confidence: pose.confidence,
     };
   }
 

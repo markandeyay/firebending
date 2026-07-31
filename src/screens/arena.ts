@@ -520,10 +520,10 @@ export class ArenaScreen implements Screen {
 
     // --- Hardening (T070) --------------------------------------------------
     // Degrade ladder: particle scale -> MoveEffects + ambient braziers, pose
-    // then face rate -> live source (replay sources lack the setters:
-    // no-op), shadows -> renderer + key light shadow map.
+    // rate -> live source (replay sources lack the setter: no-op), shadows
+    // -> renderer + key light shadow map. (No face rung: head pose rides
+    // the pose samples since R3 Phase 2.)
     const maybeLive = context.source as Partial<{
-      setFaceIntervalMultiplier(multiplier: number): void;
       setPoseIntervalMultiplier(multiplier: number): void;
     }>;
     this.degrade = new DegradeLadder({
@@ -535,9 +535,6 @@ export class ArenaScreen implements Screen {
       },
       setPoseIntervalMultiplier: (multiplier) => {
         maybeLive.setPoseIntervalMultiplier?.(multiplier);
-      },
-      setFaceIntervalMultiplier: (multiplier) => {
-        maybeLive.setFaceIntervalMultiplier?.(multiplier);
       },
       setShadowHalved: (halved) => this.setShadowHalved(halved),
     });

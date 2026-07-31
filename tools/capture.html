@@ -211,24 +211,26 @@
  * it lands in the `left` slot and draws on the left side of the mirrored
  * preview. The on-screen L/R tags let the human verify; the Swap hands
  * checkbox flips the mapping if a browser/build behaves differently.
+ *
+ * HEAD POSE (R3 Phase 2): FaceLandmarker is gone. frame.face derives from
+ * the POSE model's nose/ear landmarks, mirroring
+ * src/tracking/poseSource.ts headPoseFromPose (keep the copy below in
+ * lockstep). It updates at pose rate and is sample-and-held like pose.
  */
 
 import {
   FilesetResolver,
   HandLandmarker,
-  FaceLandmarker,
   PoseLandmarker,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
-const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-const POSE_MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker.task";
+const POSE_MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 
-const FACE_EVERY_N_FRAMES = 4;   // per spec Section 5: face at ~15 Hz
-const FACE_HOLD_MS = 500;        // sample-and-hold window before face goes null
 const POSE_EVERY_N_FRAMES = 2;   // pose at ~15 Hz, matching LiveLandmarkSource
 const POSE_HOLD_MS = 500;        // sample-and-hold window before pose goes null
+const FACE_HOLD_MS = 500;        // head pose holds on the same schedule
 // Flip these if the human's head-pose sign check fails; log the change.
 const YAW_SIGN = 1;              // +1 => positive yaw when player looks to their right
 const PITCH_SIGN = 1;            // +1 => positive pitch when player looks up
@@ -289,45 +291,35 @@ function assembleHands(handResult, swap) {
 }
 
 /**
- * Build a FaceFrame from a FaceLandmarker result.
- * Yaw and pitch come from the facial transformation matrix, which maps the
- * canonical face model into camera space (camera at origin looking down -Z,
- * +X image right, +Y up; an identity rotation means the face looks straight
- * at the camera along +Z). The face-forward direction is the third column
- * of the rotation. The matrix data has been observed both row-major and
- * column-major across builds, so we self-detect using the translation:
- * the z translation is tens of centimeters, rotation entries are <= 1.
- * Sign logic: turning the head to the player's right tips forward toward
- * camera -X (image right is the player's left on the raw frame), so
- * yaw = atan2(-fx, fz) is positive to the player's right. Looking up tips
- * forward toward +Y, so pitch = asin(fy) is positive up. This matches the
- * contract and is consistent in mirrored player space, where the player's
- * right is +x. Position is the landmark centroid, mirrored like the hands.
+ * Build a FaceFrame from RAW pose landmarks (nose 0, ears 7/8).
+ * MINIMAL DUPLICATE of headPoseFromPose in src/tracking/poseSource.ts (the
+ * canonical, unit-tested implementation; this page cannot import TS
+ * sources, so keep them in lockstep).
+ * Signs: the raw frame is an unmirrored photo, so the player's own right
+ * is at SMALL raw x; mirroring (x -> 1 - x) puts the player's right at +x
+ * in player space, where nose right of the ear midpoint = positive yaw.
+ * y grows down, so nose above the ear line = positive pitch (looking up).
+ * The offsets are normalized by the ear distance and mapped through an
+ * asin-style clamp (nose radius ~ half the ear-to-ear distance).
  */
-function assembleFace(faceResult) {
-  if (!faceResult) return null;
-  const lms = faceResult.faceLandmarks && faceResult.faceLandmarks[0];
-  if (!lms || lms.length === 0) return null;
-
-  let cx = 0, cy = 0, cz = 0;
-  for (const p of lms) { cx += p.x; cy += p.y; cz += p.z; }
-  const n = lms.length;
-  const position = { x: 1 - cx / n, y: cy / n, z: cz / n };
-
-  let yaw = 0, pitch = 0;
-  const mats = faceResult.facialTransformationMatrixes;
-  if (mats && mats[0] && mats[0].data && mats[0].data.length === 16) {
-    const d = mats[0].data;
-    // Row-major stores translation at d[3], d[7], d[11]; column-major at
-    // d[12], d[13], d[14]. |tz| is large (~20 to 60), so compare.
-    const rowMajor = Math.abs(d[11]) > Math.abs(d[14]);
-    const fx = rowMajor ? d[2] : d[8];
-    const fy = rowMajor ? d[6] : d[9];
-    const fz = d[10]; // same index in both layouts
-    yaw = YAW_SIGN * Math.atan2(-fx, fz);
-    pitch = PITCH_SIGN * Math.asin(Math.max(-1, Math.min(1, fy)));
+const NOSE_RADIUS_RATIO = 0.5;
+const HEAD_EAR_MIN_DIST = 0.02;
+function headPoseFromPose(lms) {
+  const nose = lms[0], leftEar = lms[7], rightEar = lms[8];
+  if (!nose || !leftEar || !rightEar) return null;
+  const earDist = Math.hypot(leftEar.x - rightEar.x, leftEar.y - rightEar.y);
+  if (!(earDist >= HEAD_EAR_MIN_DIST)) return null;
+  const radius = NOSE_RADIUS_RATIO * earDist;
+  const clamp1 = (v) => Math.min(1, Math.max(-1, v));
+  const noseM = { x: 1 - nose.x, y: nose.y, z: nose.z };
+  const earMidM = { x: 1 - (leftEar.x + rightEar.x) / 2, y: (leftEar.y + rightEar.y) / 2 };
+  const yaw = YAW_SIGN * Math.asin(clamp1((noseM.x - earMidM.x) / radius));
+  const pitch = PITCH_SIGN * Math.asin(clamp1((earMidM.y - noseM.y) / radius));
+  let vis = 0, visN = 0;
+  for (const lm of [nose, leftEar, rightEar]) {
+    if (typeof lm.visibility === "number" && isFinite(lm.visibility)) { vis += lm.visibility; visN++; }
   }
-  return { yaw, pitch, position, confidence: 1 };
+  return { yaw, pitch, position: noseM, confidence: visN > 0 ? vis / visN : 1 };
 }
 
 /**
@@ -360,6 +352,17 @@ function assemblePose(poseResult, tMs) {
   }
   const lwv = lms[S.LW] && lms[S.LW].visibility;
   const rwv = lms[S.RW] && lms[S.RW].visibility;
+  // Head points (nose 0, eyes 2/5, ears 7/8), mirrored; optional in the
+  // contract, used by the framing gate for head-top estimates.
+  const head = lms[0] && lms[2] && lms[5] && lms[7] && lms[8]
+    ? {
+        nose: screen(lms[0]),
+        leftEye: screen(lms[2]),
+        rightEye: screen(lms[5]),
+        leftEar: screen(lms[7]),
+        rightEar: screen(lms[8]),
+      }
+    : undefined;
   return {
     t: tMs,
     left: arm(lms, "left", screen),
@@ -373,6 +376,7 @@ function assemblePose(poseResult, tMs) {
       left: typeof lwv === "number" && isFinite(lwv) ? lwv : 1,
       right: typeof rwv === "number" && isFinite(rwv) ? rwv : 1,
     },
+    ...(head ? { head } : {}),
   };
 }
 
@@ -490,7 +494,6 @@ const overlay = $("overlay");
 const ctx = overlay.getContext("2d");
 
 let handLandmarker = null;
-let faceLandmarker = null;
 let poseLandmarker = null;
 let running = false;
 let frameCounter = 0;
@@ -560,12 +563,6 @@ async function createLandmarkers(delegate) {
     runningMode: "VIDEO",
     numHands: 2,
   });
-  const face = await FaceLandmarker.createFromOptions(fileset, {
-    baseOptions: { modelAssetPath: FACE_MODEL, delegate },
-    runningMode: "VIDEO",
-    numFaces: 1,
-    outputFacialTransformationMatrixes: true,
-  });
   let pose = null;
   let handCropL = null;
   let handCropR = null;
@@ -587,10 +584,11 @@ async function createLandmarkers(delegate) {
     handCropL = await oneHand();
     handCropR = await oneHand();
   } catch (e) {
-    // Pose (and with it the crop path) is optional; keep capturing without.
+    // Pose (and with it the crop path AND head pose) is optional; keep
+    // capturing hands without it.
     console.warn("Pose/crop landmarkers unavailable, using full-frame hands", e);
   }
-  return { hand, face, pose, handCropL, handCropR };
+  return { hand, pose, handCropL, handCropR };
 }
 
 async function startCamera() {
@@ -607,7 +605,6 @@ async function startCamera() {
       pair = await createLandmarkers("CPU");
     }
     handLandmarker = pair.hand;
-    faceLandmarker = pair.face;
     poseLandmarker = pair.pose;
     cropState.left.landmarker = pair.handCropL;
     cropState.right.landmarker = pair.handCropR;
@@ -726,17 +723,15 @@ function loop(now) {
     lastTick = now;
 
     frameCounter++;
-    // Pose runs FIRST so the crop path uses the freshest wrist, on odd
-    // frames so it never stacks on a face frame, like the game.
+    // Pose runs FIRST so the crop path uses the freshest wrist; the same
+    // detection also yields the head pose (no separate face model).
     if (poseLandmarker && frameCounter % POSE_EVERY_N_FRAMES === 1) {
       const poseResult = poseLandmarker.detectForVideo(video, now);
       const tMs = state === "recording" ? Math.round(now - recordStart) : 0;
       const pose = assemblePose(poseResult, tMs);
       if (pose) { lastPose = pose; lastPoseAt = now; }
-    }
-    if (frameCounter % FACE_EVERY_N_FRAMES === 0) {
-      const faceResult = faceLandmarker.detectForVideo(video, now);
-      const face = assembleFace(faceResult);
+      const rawLms = poseResult.landmarks && poseResult.landmarks[0];
+      const face = rawLms ? headPoseFromPose(rawLms) : null;
       if (face) { lastFace = face; lastFaceAt = now; }
     }
     const face = (now - lastFaceAt) <= FACE_HOLD_MS ? lastFace : null;

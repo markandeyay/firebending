@@ -172,6 +172,79 @@ describe('punch fusion with FRESH pose', () => {
   });
 });
 
+describe('interpolated pose frames (worker path)', () => {
+  /**
+   * Drive the engine with REAL pose samples every 2nd frame and an
+   * INTERPOLATED frame (pose.interpolated = true, t advancing with the
+   * frame clock) on the others, the exact shape the worker path emits.
+   */
+  function runWithInterpolation(opts: {
+    sampleAngleAt: (sampleIndex: number, tMs: number) => number;
+    interpAngleAt: (frame: number, tMs: number) => number;
+    wristXAt: (frame: number) => number;
+    scaleAt: (frame: number) => number;
+    frames: number;
+  }): MoveEvent[] {
+    const engine = new MoveEngine();
+    const events: MoveEvent[] = [];
+    let heldSample: PoseFrame | null = null;
+    for (let i = 0; i < opts.frames; i++) {
+      const t = i * DT_MS;
+      let pose: PoseFrame | null;
+      if (i % 2 === 0) {
+        heldSample = poseSample(t, opts.sampleAngleAt(i / 2, t));
+        pose = heldSample;
+      } else {
+        // Synthetic in-between frame: whatever angle the interpolator would
+        // produce, marked interpolated, timestamp = frame time.
+        pose = {
+          ...poseSample(t, opts.interpAngleAt(i, t)),
+          interpolated: true,
+        };
+      }
+      const frame: LandmarkFrame = {
+        t,
+        left: null,
+        right: fistAt(0.55 + opts.wristXAt(i), 0.58, opts.scaleAt(i)),
+        face: null,
+        pose,
+      };
+      events.push(...engine.update(frame));
+    }
+    return events;
+  }
+
+  it('elbow tracker SKIPS interpolated frames: wild lerped angles with flat real samples never fire', () => {
+    // Real samples stay at the guard angle (no extension: the fusion
+    // primary must refuse). Interpolated frames swing to a straight arm,
+    // which WOULD register a huge angular velocity if the tracker consumed
+    // them. Speed secondary crosses throughout the punch window.
+    const events = runWithInterpolation({
+      sampleAngleAt: () => GUARD_ANGLE,
+      interpAngleAt: () => Math.PI,
+      wristXAt: fastWrist,
+      scaleAt: constScale,
+      frames: 24,
+    });
+    expect(events).toEqual([]);
+  });
+
+  it('real samples still drive the fusion through interleaved interpolated frames', () => {
+    // The same punch as the fresh-pose happy path, but every odd frame is
+    // an interpolated pose (angles lerped between the surrounding real
+    // samples). The jab must fire exactly once off the REAL samples.
+    const events = runWithInterpolation({
+      sampleAngleAt: (_s, tMs) => punchElbow(_s, tMs),
+      interpAngleAt: (_f, tMs) => punchElbow(0, tMs),
+      wristXAt: fastWrist,
+      scaleAt: constScale,
+      frames: 24,
+    });
+    const jabs = events.filter((e) => e.move === 'jab-blast');
+    expect(jabs).toHaveLength(1);
+  });
+});
+
 describe('punch fusion with pose ABSENT (fallback rule)', () => {
   it('both secondaries fire a jab', () => {
     const { events } = run({

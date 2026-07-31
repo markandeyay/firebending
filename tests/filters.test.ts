@@ -328,6 +328,55 @@ describe('FilteredSource', () => {
     }
     expect(variance(outYaw)).toBeLessThan(variance(inYaw));
   });
+
+  it('preserves optional pose metadata (interpolated, head, wristVisibility) through the pose filter', () => {
+    const arm = (x: number) => ({
+      shoulder: { x, y: 0.3, z: 0 },
+      elbow: { x, y: 0.5, z: 0 },
+      wrist: { x, y: 0.6, z: 0 },
+      hip: { x, y: 0.75, z: 0 },
+    });
+    const head = {
+      nose: { x: 0.5, y: 0.25, z: -0.2 },
+      leftEye: { x: 0.45, y: 0.22, z: -0.15 },
+      rightEye: { x: 0.55, y: 0.22, z: -0.15 },
+      leftEar: { x: 0.4, y: 0.25, z: -0.05 },
+      rightEar: { x: 0.6, y: 0.25, z: -0.05 },
+    };
+    const frames: LandmarkFrame[] = [];
+    for (let i = 0; i < 10; i++) {
+      frames.push({
+        t: i * FRAME_MS,
+        left: null,
+        right: null,
+        face: null,
+        pose: {
+          t: i * FRAME_MS,
+          left: arm(0.4),
+          right: arm(0.6),
+          world: null,
+          confidence: 0.9,
+          wristVisibility: { left: 0.7, right: 0.8 },
+          head,
+          ...(i % 2 === 1 ? { interpolated: true } : {}),
+        },
+      });
+    }
+    const replay = new ReplaySource({ version: 1, label: 'pose-meta', fps: FPS, frames });
+    const filtered = new FilteredSource(replay);
+    const out: LandmarkFrame[] = [];
+    filtered.onFrame((f) => out.push(f));
+    replay.drain();
+    filtered.dispose();
+
+    const even = out[2]?.pose;
+    const odd = out[3]?.pose;
+    expect(even?.interpolated).toBeUndefined();
+    expect(odd?.interpolated).toBe(true);
+    expect(odd?.wristVisibility).toEqual({ left: 0.7, right: 0.8 });
+    expect(odd?.head).toEqual(head);
+    expect(odd?.confidence).toBe(0.9);
+  });
 });
 
 describe('HandFilterBank', () => {

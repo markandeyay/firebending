@@ -6,11 +6,6 @@ import {
   type RawHand,
   type RawLandmark,
 } from '../src/tracking/handSource';
-import {
-  faceCenter,
-  matrixToCameraYawPitch,
-  matrixToPlayerYawPitch,
-} from '../src/tracking/faceSource';
 import { HAND_LANDMARK_COUNT } from '../src/tracking/types';
 
 function makeLandmarks(x: number, y = 0.5, z = -0.05): RawLandmark[] {
@@ -25,35 +20,9 @@ function makeHand(label: 'Left' | 'Right', x: number, score = 0.95): RawHand {
   return { landmarks: makeLandmarks(x), label, score };
 }
 
-/** Column-major 4x4 rotation about +y by angle a (radians). */
-function rotY(a: number): number[] {
-  const c = Math.cos(a);
-  const s = Math.sin(a);
-  // prettier-ignore
-  return [
-    c, 0, -s, 0,
-    0, 1, 0, 0,
-    s, 0, c, 0,
-    0, 0, 0, 1,
-  ];
-}
-
-/** Column-major 4x4 rotation about +x by angle b (radians). */
-function rotX(b: number): number[] {
-  const c = Math.cos(b);
-  const s = Math.sin(b);
-  // prettier-ignore
-  return [
-    1, 0, 0, 0,
-    0, c, s, 0,
-    0, -s, c, 0,
-    0, 0, 0, 1,
-  ];
-}
-
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-const DEG15 = (15 * Math.PI) / 180;
-const DEG10 = (10 * Math.PI) / 180;
+// NOTE (R3 Phase 2): the matrixToCameraYawPitch / matrixToPlayerYawPitch /
+// faceCenter suites moved out with the deleted faceSource.ts; the head-pose
+// sign contract is now tested against headPoseFromPose in poseSource.test.ts.
 
 describe('mirrorLandmarks', () => {
   it('maps x to 1 - x and preserves y and z sign conventions', () => {
@@ -125,59 +94,3 @@ describe('handedness normalization', () => {
   });
 });
 
-describe('matrix to yaw/pitch extraction', () => {
-  it('identity matrix yields zero yaw and pitch', () => {
-    const cam = matrixToCameraYawPitch(IDENTITY);
-    expect(cam.yaw).toBeCloseTo(0);
-    expect(cam.pitch).toBeCloseTo(0);
-    const player = matrixToPlayerYawPitch(IDENTITY);
-    expect(player.yaw).toBeCloseTo(0);
-    expect(player.pitch).toBeCloseTo(0);
-  });
-
-  it('recovers a known 15 degree camera-space yaw', () => {
-    const cam = matrixToCameraYawPitch(rotY(DEG15));
-    expect(cam.yaw).toBeCloseTo(DEG15, 5); // ~0.2618 rad
-    expect(cam.pitch).toBeCloseTo(0, 5);
-  });
-
-  it('player turning 15 degrees to their own right gives positive player yaw', () => {
-    // Player-right = nose toward image-left on the unmirrored frame,
-    // i.e. a NEGATIVE camera-space rotation about +y.
-    const player = matrixToPlayerYawPitch(rotY(-DEG15));
-    expect(player.yaw).toBeCloseTo(DEG15, 5); // ~+0.26 rad
-    expect(player.pitch).toBeCloseTo(0, 5);
-  });
-
-  it('camera +y yaw (nose toward image-right, player left) gives negative player yaw', () => {
-    const player = matrixToPlayerYawPitch(rotY(DEG15));
-    expect(player.yaw).toBeCloseTo(-DEG15, 5);
-  });
-
-  it('player looking up gives positive player pitch', () => {
-    // Camera-space +x rotation pitches the nose down, so looking up is a
-    // negative camera pitch.
-    const cam = matrixToCameraYawPitch(rotX(DEG10));
-    expect(cam.pitch).toBeCloseTo(DEG10, 5);
-    const player = matrixToPlayerYawPitch(rotX(-DEG10));
-    expect(player.pitch).toBeCloseTo(DEG10, 5);
-    expect(player.yaw).toBeCloseTo(0, 5);
-  });
-});
-
-describe('faceCenter', () => {
-  it('mirrors the centroid into player space', () => {
-    const landmarks: RawLandmark[] = [
-      { x: 0.6, y: 0.4, z: -0.02 },
-      { x: 0.8, y: 0.6, z: -0.04 },
-    ];
-    const c = faceCenter(landmarks);
-    expect(c.x).toBeCloseTo(1 - 0.7);
-    expect(c.y).toBeCloseTo(0.5);
-    expect(c.z).toBeCloseTo(-0.03);
-  });
-
-  it('returns screen center for empty input', () => {
-    expect(faceCenter([])).toEqual({ x: 0.5, y: 0.5, z: 0 });
-  });
-});

@@ -487,13 +487,15 @@ export class CalibrationScreen implements Screen {
 
   /**
    * Advance the elbow-extension signal from body pose. Differencing runs on
-   * pose SAMPLE timestamps (pose is sample-and-held at ~15 Hz); between
-   * samples the last velocity holds. Without pose everything stays 0 and the
-   * profile's elbow fields fall back to defaults in finishSteps.
+   * RAW pose SAMPLE timestamps only: held frames (same t) and worker-path
+   * INTERPOLATED frames (pose.interpolated) are skipped, mirroring the move
+   * engine's elbow tracker; between samples the last velocity holds. Without
+   * pose everything stays 0 and the profile's elbow fields fall back to
+   * defaults in finishSteps.
    */
   private updateElbowSignal(frame: LandmarkFrame): void {
     const pose = frame.pose ?? null;
-    if (!pose || pose.t === this.lastPoseSampleT) return;
+    if (!pose || pose.interpolated === true || pose.t === this.lastPoseSampleT) return;
     this.sawPose = true;
     const src = pose.world ?? pose;
     const angleL = elbowAngle(src.left.shoulder, src.left.elbow, src.left.wrist);

@@ -54,6 +54,13 @@ export interface HandFrame {
   world?: Vec3[];
 }
 
+/**
+ * Head pose for camera parallax. Since Round 3 Phase 2 this is DERIVED from
+ * PoseLandmarker head landmarks (nose/eyes/ears) via headPoseFromPose in
+ * poseSource.ts; there is no separate face model. The type and the
+ * frame.face field are unchanged, so recordings that carry face data from
+ * the old FaceLandmarker era load and replay exactly as before.
+ */
 export interface FaceFrame {
   /** Head yaw in radians, positive = player looks to their right. */
   yaw: number;
@@ -66,6 +73,11 @@ export interface FaceFrame {
 
 /** MediaPipe pose landmark indices for the joints we extract (33-point model). */
 export const POSE_LM = {
+  NOSE: 0,
+  LEFT_EYE: 2,
+  RIGHT_EYE: 5,
+  LEFT_EAR: 7,
+  RIGHT_EAR: 8,
   LEFT_SHOULDER: 11,
   RIGHT_SHOULDER: 12,
   LEFT_ELBOW: 13,
@@ -75,6 +87,22 @@ export const POSE_LM = {
   LEFT_HIP: 23,
   RIGHT_HIP: 24,
 } as const;
+
+/**
+ * Head landmarks from the pose model, screen space, MIRRORED into player
+ * space like every other screen point (x -> 1 - x). Anatomical LEFT fills the
+ * `left*` fields, matching the arm convention: after mirroring the player's
+ * left eye/ear appears on the left side of the screen. The framing gate uses
+ * these for head-top estimates; headPoseFromPose derives yaw/pitch from the
+ * same raw points.
+ */
+export interface PoseHead {
+  nose: Vec3;
+  leftEye: Vec3;
+  rightEye: Vec3;
+  leftEar: Vec3;
+  rightEar: Vec3;
+}
 
 /** One arm-plus-hip chain of the body pose. */
 export interface PoseArm {
@@ -91,8 +119,11 @@ export interface PoseArm {
  * `world` carries the same joints from worldLandmarks (meters, hip-centered),
  * mirrored consistently (world x negated); preferred for angle math because
  * it is metric and depth-corrected. `t` is the DETECTION timestamp (ms since
- * source start): pose runs at half frame rate and is sample-and-held between
- * detections, so downstream angular-velocity math must difference on `t`,
+ * source start) on real samples: pose runs below frame rate (~25 Hz worker
+ * cadence, or half frame rate on the main-thread fallback) and frames
+ * between detections are sample-and-held or interpolated (`interpolated`
+ * true, `t` = the interpolation target time). Downstream angular-velocity
+ * math must difference on real-sample `t` only (skip interpolated frames),
  * never on frame dt, and can use frame.t - pose.t as a freshness measure.
  */
 export interface PoseFrame {
@@ -111,6 +142,21 @@ export interface PoseFrame {
    * lack it, and downstream code must treat its absence as fully supported.
    */
   wristVisibility?: { left: number; right: number };
+  /**
+   * OPTIONAL head landmarks (nose/eyes/ears) in mirrored screen space, for
+   * the framing gate and head-pose derivation. Fixtures and recordings that
+   * predate the field lack it; absence must be fully supported.
+   */
+  head?: PoseHead;
+  /**
+   * OPTIONAL: true when this frame was produced by interpolating (or
+   * capped-extrapolating) between two real pose SAMPLES rather than by a
+   * detection. Interpolated frames give downstream consumers smooth
+   * per-frame pose, but sample-timestamp math (the elbow angular-velocity
+   * tracker in gestures/moves.ts) must SKIP them and difference only real
+   * samples. Absent on all real samples, fixtures and recordings.
+   */
+  interpolated?: boolean;
 }
 
 export interface LandmarkFrame {

@@ -656,12 +656,15 @@ export class MoveEngine {
 
   /**
    * Advance one hand's elbow-extension tracking from a PoseFrame. Runs only
-   * when the pose SAMPLE timestamp advances (pose is sample-and-held between
-   * detections at ~15 Hz), and differences the elbow angle on the sample
-   * timestamps, never on frame dt. frame.left pairs with the pose LEFT arm.
-   * Allocation-free: reads joints in place, stores scalars.
+   * on RAW pose SAMPLES: held frames (same sample timestamp) and
+   * INTERPOLATED frames (pose.interpolated, from the worker-path per-frame
+   * lerp) are skipped, so the angular velocity is always differenced on real
+   * detection timestamps, never on frame dt or synthetic in-between poses.
+   * frame.left pairs with the pose LEFT arm. Allocation-free: reads joints
+   * in place, stores scalars.
    */
   private updateElbow(s: HandState, pose: PoseFrame, hand: Handedness): void {
+    if (pose.interpolated === true) return; // lerped frame: not a sample
     if (s.lastPoseSampleT === pose.t) return; // held sample: nothing new
     // poseWorld (metric, hip-centered) when available, else screen joints.
     const source = pose.world ?? pose;

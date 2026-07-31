@@ -1,21 +1,38 @@
 /**
  * LiveLandmarkSource: the real-camera implementation of LandmarkSource.
  *
- * WORKER DECISION (Section 5, Phase 1): trackers run on the MAIN THREAD.
- * Rationale: transferring VideoFrames to a worker plus spinning up a
- * WASM/GPU delegate context per worker adds complexity and copy cost;
- * the MediaPipe GPU delegate already runs its inference off the JS thread.
- * Revisit only if profiling shows main-thread stalls attributable to the
- * detectForVideo call sites.
+ * WORKER DECISION (revised, Round 3 Phase 2): HANDS run on the main thread
+ * (the MediaPipe GPU delegate already runs inference off the JS thread and
+ * the ROI crop path needs the video element + 2d canvases); POSE runs in a
+ * dedicated Worker (poseWorker.ts) that owns its own PoseLandmarker. The
+ * main thread grabs frames with createImageBitmap(video) (transferable, no
+ * copy) at a target 25 Hz cadence and posts them over; the worker answers
+ * with the RAW landmark arrays and the main thread runs the pure extraction
+ * (extractPoseFrame + headPoseFromPose) so all coordinate math stays
+ * unit-testable. BACKPRESSURE: never more than ONE frame in flight; while
+ * the worker is busy, capture is skipped, so the achieved pose Hz (reported
+ * in stats) self-regulates to what the machine can do. If Worker or
+ * createImageBitmap is unavailable (or worker init fails), pose falls back
+ * to the main thread on the classic every-2nd-frame schedule.
  *
- * Scheduling: hand detection every video frame, pose detection every 2nd
- * frame (~15 Hz, offset to odd frames so it never stacks on a face frame),
- * face detection every 4th frame (~15 Hz). Degrade rule: if the rolling
- * average (60 frames) of total ML time per frame exceeds the 7 ms budget,
- * the ladder inside this source steps in ORDER: pose drops to every 4th
- * frame FIRST, then (still over budget on the new configuration) face drops
- * to every 8th. Hands are never degraded. Pose and face are sample-and-held
- * between detections.
+ * HEAD POSE: FaceLandmarker is GONE (Phase 2). Every pose sample also
+ * derives frame.face via headPoseFromPose (nose + ears), sample-and-held at
+ * pose rate. FaceFrame and all its consumers are unchanged.
+ *
+ * POSE INTERPOLATION (worker path): between worker results, per-frame
+ * emission linearly interpolates the last two pose samples
+ * (lerpPoseFrames, extrapolation capped at 80 ms) so downstream consumers
+ * see smooth per-frame pose. Interpolated frames carry `interpolated:
+ * true`; the move engine's elbow angular-velocity tracker skips them and
+ * differences only real samples. The frame on which a fresh sample arrives
+ * emits the RAW sample itself.
+ *
+ * Scheduling: hand detection every video frame; pose per the worker cadence
+ * above (fallback: every 2nd frame ~15 Hz, every 4th when degraded).
+ * Degrade rule: if the rolling average (60 frames) of total MAIN-THREAD ML
+ * time per frame exceeds the 7 ms budget, the internal ladder halves the
+ * pose rate (worker cadence and fallback interval both respect it). Hands
+ * are never degraded.
  *
  * ROI CROP HAND PATH (Round 3 Phase 1): per side, when the held pose is
  * FRESH (sample within POSE_FRESH_MS) and that wrist is visible, the hand
@@ -40,11 +57,7 @@
  * instance in memory (a few MB), which profiling has not shown to matter.
  */
 
-import type {
-  FaceLandmarker,
-  HandLandmarker,
-  PoseLandmarker,
-} from '@mediapipe/tasks-vision';
+import type { HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import type {
   FaceFrame,
   FrameListener,
@@ -54,8 +67,14 @@ import type {
 } from './types';
 import type { HandFrame, PoseArm } from './types';
 import { createHandLandmarker, detectHands, detectTopHand } from './handSource';
-import { createFaceLandmarker, detectFace } from './faceSource';
-import { createPoseLandmarker, detectPose } from './poseSource';
+import {
+  createPoseLandmarker,
+  detectPoseAndHead,
+  extractPoseFrame,
+  headPoseFromPose,
+  lerpPoseFrames,
+} from './poseSource';
+import type { PoseWorkerRequest, PoseWorkerResponse } from './poseWorker';
 import {
   CROP_SIZE_PX,
   CropSmoother,
@@ -71,10 +90,12 @@ import {
 /** Combined ML budget per frame in ms (Section 14). */
 const ML_BUDGET_MS = 7;
 const ROLLING_WINDOW = 60;
-const FACE_INTERVAL_NORMAL = 4;
-const FACE_INTERVAL_DEGRADED = 8;
 const POSE_INTERVAL_NORMAL = 2;
 const POSE_INTERVAL_DEGRADED = 4;
+/** Target worker-path pose cadence: one capture every 40 ms (~25 Hz). The
+ * one-in-flight backpressure rule lowers the achieved rate automatically on
+ * slower machines. */
+export const POSE_WORKER_INTERVAL_MS = 40;
 
 /** Fixed-size rolling average, O(1) push. */
 class RollingAverage {
@@ -113,10 +134,15 @@ class RollingAverage {
 export interface LiveSourceStats {
   /** Rolling average TOTAL hand-path time per frame (crop + fallback), ms. */
   handMs: number;
-  /** Rolling average face inference time (frames where it ran), ms. */
-  faceMs: number;
-  /** Rolling average pose inference time (frames where it ran), ms. */
+  /** Rolling average pose inference time per detection, ms (worker path:
+   * measured inside the worker, off the main thread). */
   poseMs: number;
+  /** Rolling average ACHIEVED pose sample rate, Hz (worker path; the
+   * one-in-flight backpressure makes this self-regulating). 0 before the
+   * first two samples and on the main-thread fallback. */
+  poseHz: number;
+  /** True while pose runs in the dedicated worker; false on the fallback. */
+  poseWorkerActive: boolean;
   /** Rolling average frames per second of the emit loop. */
   fps: number;
   /** Rolling average ROI crop draw+detect time (frames where crops ran), ms. */
@@ -144,7 +170,6 @@ export class LiveLandmarkSource implements LandmarkSource {
   }
   private video: HTMLVideoElement | null = null;
   private handLandmarker: HandLandmarker | null = null;
-  private faceLandmarker: FaceLandmarker | null = null;
   private poseLandmarker: PoseLandmarker | null = null;
   private running = false;
   private rvfcHandle: number | null = null;
@@ -153,20 +178,35 @@ export class LiveLandmarkSource implements LandmarkSource {
   private lastTimestamp = -1;
   private lastFrameTime = 0;
   private frameIndex = 0;
-  private faceInterval = FACE_INTERVAL_NORMAL;
   private poseInterval = POSE_INTERVAL_NORMAL;
-  /** Degrade-ladder multiplier on the face interval (T070). 1 = normal. */
-  private faceIntervalMult = 1;
   /** Degrade-ladder multiplier on the pose interval. 1 = normal. */
   private poseIntervalMult = 1;
+  /** Sample-and-held head pose derived from the latest pose sample. */
   private lastFace: FaceFrame | null = null;
+  /** Latest RAW pose sample (never interpolated); crop path + fallback hold. */
   private lastPose: PoseFrame | null = null;
   private handMsAvg = new RollingAverage(ROLLING_WINDOW);
-  private faceMsAvg = new RollingAverage(ROLLING_WINDOW);
   private poseMsAvg = new RollingAverage(ROLLING_WINDOW);
+  private poseHzAvg = new RollingAverage(ROLLING_WINDOW);
   private cropMsAvg = new RollingAverage(ROLLING_WINDOW);
   private totalMsAvg = new RollingAverage(ROLLING_WINDOW);
   private fpsAvg = new RollingAverage(ROLLING_WINDOW);
+
+  // --- Pose worker state (see the header WORKER DECISION note) -------------
+  private poseWorker: Worker | null = null;
+  private poseWorkerReady = false;
+  /** Backpressure: at most ONE frame in flight to the worker. */
+  private poseInFlight = false;
+  private lastPoseSendAt = -Infinity;
+  /** Frame-clock time of the capture currently in flight. */
+  private pendingPoseFrameT = 0;
+  /** Frame-clock time of the previous worker result (for achieved Hz). */
+  private lastPoseResultFrameT: number | null = null;
+  /** Last two RAW pose samples for per-frame interpolation. */
+  private poseSamplePrev: PoseFrame | null = null;
+  private poseSampleLast: PoseFrame | null = null;
+  /** True exactly until the newest raw sample has been emitted once. */
+  private poseSampleFresh = false;
   private readonly cropSides: { left: CropSide; right: CropSide } = {
     left: LiveLandmarkSource.emptyCropSide(),
     right: LiveLandmarkSource.emptyCropSide(),
@@ -190,8 +230,9 @@ export class LiveLandmarkSource implements LandmarkSource {
   get stats(): LiveSourceStats {
     return {
       handMs: this.handMsAvg.average,
-      faceMs: this.faceMsAvg.average,
       poseMs: this.poseMsAvg.average,
+      poseHz: this.poseHzAvg.average,
+      poseWorkerActive: this.poseWorker !== null && this.poseWorkerReady,
       fps: this.fpsAvg.average,
       cropMs: this.cropMsAvg.average,
       cropActive: {
@@ -201,32 +242,19 @@ export class LiveLandmarkSource implements LandmarkSource {
     };
   }
 
-  /** True once the degrade rule has dropped face detection to every 8th frame. */
-  get faceDegraded(): boolean {
-    return this.faceInterval === FACE_INTERVAL_DEGRADED;
-  }
-
-  /** True once the degrade rule has dropped pose detection to every 4th frame. */
+  /** True once the degrade rule has halved the pose detection rate. */
   get poseDegraded(): boolean {
     return this.poseInterval === POSE_INTERVAL_DEGRADED;
   }
 
   /**
-   * Degrade-ladder hook (T070, append-only): multiply the face detection
-   * interval. 1 restores the normal schedule; 2 halves the face rate
-   * (nominal 7.5 Hz). Composes with the internal ML-budget degrade above;
-   * hands are never touched. Replay sources have no such method and the
-   * ladder wiring treats that as a no-op.
-   */
-  setFaceIntervalMultiplier(multiplier: number): void {
-    this.faceIntervalMult = Math.max(1, Math.round(multiplier));
-  }
-
-  /**
-   * Degrade-ladder hook, sibling of setFaceIntervalMultiplier: multiply the
-   * pose detection interval. 1 restores the normal schedule (~15 Hz); 2
-   * halves the pose rate (~7.5 Hz). The external ladder degrades pose
-   * BEFORE face, matching this source's internal ML-budget order.
+   * Degrade-ladder hook (T070): multiply the pose detection interval.
+   * 1 restores the normal schedule; 2 halves the pose rate (worker cadence
+   * and main-thread fallback both respect it). Composes with the internal
+   * ML-budget degrade; hands are never touched. Replay sources have no such
+   * method and the ladder wiring treats that as a no-op. (The old
+   * setFaceIntervalMultiplier hook is gone with FaceLandmarker: head pose
+   * now rides the pose samples for free.)
    */
   setPoseIntervalMultiplier(multiplier: number): void {
     this.poseIntervalMult = Math.max(1, Math.round(multiplier));
@@ -258,16 +286,23 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.video = video;
     await video.play();
 
-    const [hand, face, pose, cropLeft, cropRight] = await Promise.all([
+    // Pose: dedicated worker when the platform supports it (Worker +
+    // createImageBitmap), main-thread landmarker otherwise. The worker
+    // initializes in the background; pose frames are simply absent until it
+    // reports ready, and an init failure swaps in the main-thread fallback.
+    const workerCapable =
+      typeof Worker === 'function' && typeof createImageBitmap === 'function';
+    if (workerCapable) this.startPoseWorker();
+
+    const [hand, cropLeft, cropRight] = await Promise.all([
       createHandLandmarker(),
-      createFaceLandmarker(),
-      createPoseLandmarker(),
       createHandLandmarker(1),
       createHandLandmarker(1),
     ]);
     this.handLandmarker = hand;
-    this.faceLandmarker = face;
-    this.poseLandmarker = pose;
+    if (!workerCapable) {
+      this.poseLandmarker = await createPoseLandmarker();
+    }
     this.initCropSide('left', cropLeft);
     this.initCropSide('right', cropRight);
 
@@ -299,10 +334,19 @@ export class LiveLandmarkSource implements LandmarkSource {
     }
     this.handLandmarker?.close();
     this.handLandmarker = null;
-    this.faceLandmarker?.close();
-    this.faceLandmarker = null;
     this.poseLandmarker?.close();
     this.poseLandmarker = null;
+    if (this.poseWorker) {
+      this.poseWorker.terminate();
+      this.poseWorker = null;
+    }
+    this.poseWorkerReady = false;
+    this.poseInFlight = false;
+    this.lastPoseSendAt = -Infinity;
+    this.lastPoseResultFrameT = null;
+    this.poseSamplePrev = null;
+    this.poseSampleLast = null;
+    this.poseSampleFresh = false;
     for (const side of ['left', 'right'] as const) {
       const crop = this.cropSides[side];
       crop.landmarker?.close();
@@ -327,6 +371,160 @@ export class LiveLandmarkSource implements LandmarkSource {
     crop.ctx = canvas.getContext('2d');
     crop.smoother.reset();
     crop.active = false;
+  }
+
+  /**
+   * Spin up the dedicated pose worker (Vite worker syntax). Failures at any
+   * stage (constructor throw, init-error message, runtime error event) tear
+   * the worker down and lazily create the main-thread fallback landmarker,
+   * so pose keeps working exactly as before workers existed.
+   */
+  private startPoseWorker(): void {
+    try {
+      const worker = new Worker(new URL('./poseWorker.ts', import.meta.url), {
+        type: 'module',
+      });
+      this.poseWorker = worker;
+      worker.onmessage = (e: MessageEvent<PoseWorkerResponse>) =>
+        this.onPoseWorkerMessage(e.data);
+      worker.onerror = (err) => {
+        console.warn('pose worker error, falling back to main-thread pose', err);
+        this.failPoseWorker();
+      };
+      const init: PoseWorkerRequest = { type: 'init', variant: 'lite' };
+      worker.postMessage(init);
+    } catch (err) {
+      console.warn('pose worker unavailable, falling back to main-thread pose', err);
+      this.failPoseWorker();
+    }
+  }
+
+  /** Tear down the worker and adopt the main-thread pose path. */
+  private failPoseWorker(): void {
+    if (this.poseWorker) {
+      this.poseWorker.terminate();
+      this.poseWorker = null;
+    }
+    this.poseWorkerReady = false;
+    this.poseInFlight = false;
+    if (this.poseLandmarker) return;
+    void createPoseLandmarker().then(
+      (lm) => {
+        // video is null only after stop(); during start() it is already set,
+        // so a fast-arriving fallback landmarker is never dropped.
+        if (this.video === null) {
+          lm.close();
+          return;
+        }
+        this.poseLandmarker = lm;
+      },
+      (err: unknown) => console.warn('main-thread pose fallback failed', err),
+    );
+  }
+
+  private onPoseWorkerMessage(msg: PoseWorkerResponse): void {
+    if (msg.type === 'ready') {
+      this.poseWorkerReady = true;
+      return;
+    }
+    if (msg.type === 'init-error') {
+      console.warn('pose worker init failed, falling back', msg.message);
+      this.failPoseWorker();
+      return;
+    }
+    // 'result': release the in-flight slot, then run the pure extraction on
+    // the main side (keeps the math unit-testable) and record achieved Hz.
+    this.poseInFlight = false;
+    if (!this.running) return;
+    const frameT = this.pendingPoseFrameT;
+    this.poseMsAvg.push(msg.detectMs);
+    if (this.lastPoseResultFrameT !== null) {
+      const dt = frameT - this.lastPoseResultFrameT;
+      if (dt > 0) this.poseHzAvg.push(1000 / dt);
+    }
+    this.lastPoseResultFrameT = frameT;
+
+    if (!msg.landmarks) {
+      // No body in frame: drop the samples so interpolation stops and the
+      // held head pose clears, exactly like a null detection did before.
+      this.lastPose = null;
+      this.lastFace = null;
+      this.poseSamplePrev = null;
+      this.poseSampleLast = null;
+      this.poseSampleFresh = false;
+      return;
+    }
+    const pose = extractPoseFrame(msg.landmarks, msg.worldLandmarks, frameT);
+    this.lastFace = headPoseFromPose(msg.landmarks);
+    if (!pose) {
+      this.lastPose = null;
+      this.poseSamplePrev = null;
+      this.poseSampleLast = null;
+      this.poseSampleFresh = false;
+      return;
+    }
+    this.lastPose = pose;
+    this.poseSamplePrev = this.poseSampleLast;
+    this.poseSampleLast = pose;
+    this.poseSampleFresh = true;
+  }
+
+  /**
+   * Worker-path capture: at most one frame in flight, target cadence
+   * POSE_WORKER_INTERVAL_MS scaled by the degrade multipliers. The bitmap
+   * is transferable, so the post is copy-free.
+   */
+  private maybeSendPoseFrame(video: HTMLVideoElement, now: number, timestamp: number): void {
+    if (!this.poseWorkerReady || this.poseInFlight) return;
+    if (video.videoWidth <= 0) return;
+    const interval =
+      POSE_WORKER_INTERVAL_MS *
+      this.poseIntervalMult *
+      (this.poseInterval / POSE_INTERVAL_NORMAL);
+    if (now - this.lastPoseSendAt < interval) return;
+    this.poseInFlight = true;
+    this.lastPoseSendAt = now;
+    this.pendingPoseFrameT = now - this.startTime;
+    void createImageBitmap(video).then(
+      (bitmap) => {
+        const worker = this.poseWorker;
+        if (!this.running || !worker) {
+          bitmap.close();
+          this.poseInFlight = false;
+          return;
+        }
+        const msg: PoseWorkerRequest = {
+          type: 'frame',
+          bitmap,
+          timestampMs: timestamp,
+        };
+        worker.postMessage(msg, [bitmap]);
+      },
+      () => {
+        this.poseInFlight = false;
+      },
+    );
+  }
+
+  /**
+   * The PoseFrame to emit on this video frame:
+   * - the frame right after a worker result emits the RAW sample (the elbow
+   *   tracker differences these);
+   * - between results, the last two samples interpolate to the frame time
+   *   (lerpPoseFrames caps extrapolation at 80 ms) with interpolated: true;
+   * - a single sample (or the main-thread fallback) sample-and-holds.
+   */
+  private poseForEmit(frameT: number): PoseFrame | null {
+    if (this.poseWorker === null) return this.lastPose; // fallback: held sample
+    const last = this.poseSampleLast;
+    if (last === null) return null;
+    if (this.poseSampleFresh) {
+      this.poseSampleFresh = false;
+      return last;
+    }
+    const prev = this.poseSamplePrev;
+    if (prev === null) return last;
+    return lerpPoseFrames(prev, last, frameT);
   }
 
   private scheduleNext(): void {
@@ -357,19 +555,26 @@ export class LiveLandmarkSource implements LandmarkSource {
     let totalMs = 0;
 
     // Pose runs FIRST within the frame so the ROI crop path below always
-    // uses the freshest wrist. It stays on frames ODD relative to its
-    // interval so it never stacks on a face frame (face frames are
-    // multiples of 4). Sample-and-hold between detections; PoseFrame.t is
-    // re-stamped into frame time so downstream freshness and
-    // angular-velocity math share the frame clock.
-    const poseEvery = this.poseInterval * this.poseIntervalMult;
-    if (this.poseLandmarker && this.frameIndex % poseEvery === 1) {
-      const poseStart = performance.now();
-      const pose = detectPose(this.poseLandmarker, video, timestamp);
-      this.lastPose = pose ? { ...pose, t: now - this.startTime } : null;
-      const poseMs = performance.now() - poseStart;
-      this.poseMsAvg.push(poseMs);
-      totalMs += poseMs;
+    // uses the freshest wrist.
+    // Worker path: post a bitmap when the cadence and the one-in-flight
+    // backpressure allow; results land asynchronously in
+    // onPoseWorkerMessage, which also derives the head-pose FaceFrame.
+    // Fallback path: main-thread detection every poseInterval-th frame,
+    // sample-and-held; PoseFrame.t is re-stamped into frame time so
+    // downstream freshness and angular-velocity math share the frame clock.
+    if (this.poseWorker !== null) {
+      this.maybeSendPoseFrame(video, now, timestamp);
+    } else {
+      const poseEvery = this.poseInterval * this.poseIntervalMult;
+      if (this.poseLandmarker && this.frameIndex % poseEvery === 1) {
+        const poseStart = performance.now();
+        const { pose, face } = detectPoseAndHead(this.poseLandmarker, video, timestamp);
+        this.lastPose = pose ? { ...pose, t: now - this.startTime } : null;
+        this.lastFace = face;
+        const poseMs = performance.now() - poseStart;
+        this.poseMsAvg.push(poseMs);
+        totalMs += poseMs;
+      }
     }
 
     // Hand path selection, per side: ROI crop when the held pose is fresh
@@ -419,36 +624,24 @@ export class LiveLandmarkSource implements LandmarkSource {
     if (cropRan) this.cropMsAvg.push(cropMs);
     totalMs += handMs;
 
-    const faceEvery = this.faceInterval * this.faceIntervalMult;
-    if (this.faceLandmarker && this.frameIndex % faceEvery === 0) {
-      const faceStart = performance.now();
-      this.lastFace = detectFace(this.faceLandmarker, video, timestamp);
-      const faceMs = performance.now() - faceStart;
-      this.faceMsAvg.push(faceMs);
-      totalMs += faceMs;
-    }
-
     this.totalMsAvg.push(totalMs);
     if (this.totalMsAvg.full && this.totalMsAvg.average > ML_BUDGET_MS) {
-      // Over budget consistently. Internal ML-budget ladder, in order:
-      // pose first (every 4th frame), then face (every 8th); hands never.
-      // The window resets after each step so the next verdict measures the
-      // new configuration instead of the old one's backlog.
+      // Over budget consistently. Internal ML-budget ladder: halve the pose
+      // rate (hands never degrade; face is free since it rides the pose
+      // samples). The window resets after the step so the next verdict
+      // measures the new configuration instead of the old one's backlog.
       if (this.poseInterval === POSE_INTERVAL_NORMAL) {
         this.poseInterval = POSE_INTERVAL_DEGRADED;
-        this.totalMsAvg.reset();
-      } else if (this.faceInterval === FACE_INTERVAL_NORMAL) {
-        this.faceInterval = FACE_INTERVAL_DEGRADED;
         this.totalMsAvg.reset();
       }
     }
 
     const frame: LandmarkFrame = {
-      t: now - this.startTime,
+      t: frameT,
       left: hands.left,
       right: hands.right,
       face: this.lastFace,
-      pose: this.lastPose,
+      pose: this.poseForEmit(frameT),
     };
     this.frameIndex++;
     for (const l of this.listeners) l(frame);

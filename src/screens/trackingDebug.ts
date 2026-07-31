@@ -102,8 +102,13 @@ export interface HudState {
   /** Present only on the live path. */
   live?: {
     handMs: number;
-    faceMs: number;
-    faceDegraded: boolean;
+    /** Pose detect cost per sample, ms (worker path: off-thread). */
+    poseMs: number;
+    /** Achieved pose sample rate, Hz (0 on the main-thread fallback). */
+    poseHz: number;
+    /** True while pose runs in the dedicated worker. */
+    poseWorker: boolean;
+    poseDegraded: boolean;
     /** ROI crop draw+detect average, ms (Round 3 Phase 1). */
     cropMs?: number;
     /** Which sides used the ROI crop path on the latest frame. */
@@ -126,8 +131,10 @@ export function formatHud(state: HudState): string {
   ];
   if (state.live) {
     lines.push(
-      `hand ${state.live.handMs.toFixed(1)}ms  face ${state.live.faceMs.toFixed(1)}ms` +
-        `  faceDegraded: ${state.live.faceDegraded ? 'yes' : 'no'}`
+      `hand ${state.live.handMs.toFixed(1)}ms  pose ${state.live.poseMs.toFixed(1)}ms` +
+        ` @ ${state.live.poseHz.toFixed(1)}Hz` +
+        ` (${state.live.poseWorker ? 'worker' : 'main'})` +
+        `  poseDegraded: ${state.live.poseDegraded ? 'yes' : 'no'}`
     );
     if (state.live.cropMs !== undefined && state.live.cropActive) {
       const on = state.live.cropActive;
@@ -426,8 +433,10 @@ export async function mountTrackingDebug(
         ? {
             live: {
               handMs: liveSource.stats.handMs,
-              faceMs: liveSource.stats.faceMs,
-              faceDegraded: liveSource.faceDegraded,
+              poseMs: liveSource.stats.poseMs,
+              poseHz: liveSource.stats.poseHz,
+              poseWorker: liveSource.stats.poseWorkerActive,
+              poseDegraded: liveSource.poseDegraded,
               cropMs: liveSource.stats.cropMs,
               cropActive: liveSource.stats.cropActive,
             },
