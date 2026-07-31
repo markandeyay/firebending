@@ -108,7 +108,7 @@ export const STATION_LIGHT_SLOTS: ReadonlyArray<
   [
     [-0.2, 1.9, -11.4],
     [3.4, 1.8, -13.4],
-    [4.9, 2.7, -16.6],
+    [3.9, 2.7, -17.2],
     [1.0, 2.6, -13.8],
   ],
   // 3 bridge-deck
@@ -130,7 +130,10 @@ export const STATION_LIGHT_SLOTS: ReadonlyArray<
     [-6.6, 1.6, -15.4],
     [-8.2, 1.8, -18.6],
     [-4.6, 1.5, -17.0],
-    [-5.8, 2.4, -19.6],
+    // East of the anchor, between camera and construct: lights the
+    // construct's camera-facing side (it silhouetted against the channel
+    // glow with all four lights behind it).
+    [-5.4, 1.7, -16.4],
   ],
 ];
 
@@ -199,6 +202,172 @@ function canvasTexture(ctx: CanvasRenderingContext2D, repeat?: [number, number])
   }
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
+}
+
+/** Non-color data texture (normal / roughness maps): stays LINEAR. */
+function dataTexture(ctx: CanvasRenderingContext2D, repeat?: [number, number]): THREE.Texture {
+  const tex = new THREE.CanvasTexture(ctx.canvas);
+  if (repeat) {
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(repeat[0], repeat[1]);
+  }
+  tex.colorSpace = THREE.NoColorSpace;
+  return tex;
+}
+
+/**
+ * Convert a grayscale height canvas into a tangent-space normal map (central
+ * differences, wrap-around sampling so tiled textures stay seamless).
+ * `strength` scales the slope; the source ctx is consumed read-only.
+ */
+function heightToNormalTexture(
+  heightCtx: CanvasRenderingContext2D,
+  strength: number,
+  repeat?: [number, number],
+): THREE.Texture | null {
+  const w = heightCtx.canvas.width;
+  const h = heightCtx.canvas.height;
+  const out = make2d(w, h);
+  if (!out) return null;
+  const src = heightCtx.getImageData(0, 0, w, h).data;
+  const dst = out.createImageData(w, h);
+  const height = (x: number, y: number): number => {
+    const xi = ((x % w) + w) % w;
+    const yi = ((y % h) + h) % h;
+    return (src[(yi * w + xi) * 4] ?? 0) / 255;
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = (height(x - 1, y) - height(x + 1, y)) * strength;
+      // Canvas y grows downward but texture v grows upward: flip green.
+      const dy = (height(x, y + 1) - height(x, y - 1)) * strength;
+      const inv = 1 / Math.hypot(dx, dy, 1);
+      const i = (y * w + x) * 4;
+      dst.data[i] = Math.round((dx * inv * 0.5 + 0.5) * 255);
+      dst.data[i + 1] = Math.round((dy * inv * 0.5 + 0.5) * 255);
+      dst.data[i + 2] = Math.round((inv * 0.5 + 0.5) * 255);
+      dst.data[i + 3] = 255;
+    }
+  }
+  out.putImageData(dst, 0, 0);
+  return dataTexture(out, repeat);
+}
+
+/**
+ * Wood-grain height field: long wavy vertical ridges with occasional deeper
+ * scores, shared by the lacquer/beam normal maps (grain follows the timber
+ * axis: column shafts and gate posts are lathes whose v runs along length).
+ */
+function makeWoodHeightCtx(seed: number): CanvasRenderingContext2D | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 58; i++) {
+    const x0 = rng() * 128;
+    const drift = (rng() - 0.5) * 12;
+    const deep = rng() < 0.2;
+    const tone = deep ? 40 + rng() * 30 : 105 + rng() * 60;
+    ctx.strokeStyle = `rgba(${tone}, ${tone}, ${tone}, ${deep ? 0.8 : 0.5})`;
+    ctx.lineWidth = deep ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(x0, -4);
+    ctx.bezierCurveTo(x0 + drift, 44, x0 - drift, 88, x0 + drift * 0.5, 132);
+    ctx.stroke();
+  }
+  return ctx;
+}
+
+/** Plaster tooth height: dense soft speckle over a mid base. */
+function makePlasterHeightCtx(seed: number): CanvasRenderingContext2D | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 640; i++) {
+    const up = rng() < 0.5;
+    const tone = up ? 150 + rng() * 70 : 30 + rng() * 60;
+    ctx.fillStyle = `rgba(${tone}, ${tone}, ${tone}, 0.35)`;
+    const s = 1 + rng() * 3;
+    ctx.fillRect(rng() * 128, rng() * 128, s, s);
+  }
+  return ctx;
+}
+
+/** Stone height: coarse blotches + a few crack lines. */
+function makeStoneHeightCtx(seed: number): CanvasRenderingContext2D | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 90; i++) {
+    const up = rng() < 0.45;
+    const tone = up ? 140 + rng() * 70 : 35 + rng() * 55;
+    ctx.fillStyle = `rgba(${tone}, ${tone}, ${tone}, 0.5)`;
+    ctx.beginPath();
+    ctx.ellipse(rng() * 128, rng() * 128, 3 + rng() * 9, 2 + rng() * 6, rng() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (let i = 0; i < 7; i++) {
+    ctx.strokeStyle = 'rgba(40, 40, 40, 0.6)';
+    ctx.lineWidth = 1;
+    const x = rng() * 128;
+    const y = rng() * 128;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + (rng() - 0.5) * 44, y + (rng() - 0.5) * 44);
+    ctx.stroke();
+  }
+  return ctx;
+}
+
+/**
+ * Lacquer sheen roughness map: broad vertical bands of alternating polish so
+ * column highlights break into strips instead of one plastic streak. Values
+ * multiply material.roughness (linear texture, green channel).
+ */
+function makeLacquerRoughnessTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#9c9c9c';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 26; i++) {
+    const x = rng() * 128;
+    const wBand = 4 + rng() * 16;
+    const polished = rng() < 0.55;
+    const tone = polished ? 110 - rng() * 45 : 175 + rng() * 55;
+    ctx.fillStyle = `rgba(${tone}, ${tone}, ${tone}, 0.5)`;
+    ctx.fillRect(x - wBand / 2, 0, wBand, 128);
+  }
+  // Faint handling scuffs cutting across the bands.
+  for (let i = 0; i < 14; i++) {
+    const y = rng() * 128;
+    ctx.fillStyle = `rgba(210, 210, 210, ${0.12 + rng() * 0.12})`;
+    ctx.fillRect(0, y, 128, 1 + rng() * 2);
+  }
+  return dataTexture(ctx, [1, 2]);
+}
+
+/** Stone roughness: fully matte with slightly polished wear spots. */
+function makeStoneRoughnessTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.fillStyle = '#f2f2f2';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 40; i++) {
+    const tone = 190 + rng() * 40;
+    ctx.fillStyle = `rgba(${tone}, ${tone}, ${tone}, 0.6)`;
+    ctx.beginPath();
+    ctx.ellipse(rng() * 128, rng() * 128, 3 + rng() * 8, 2 + rng() * 5, rng() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return dataTexture(ctx, [2, 2]);
 }
 
 /** Vertical wavy wood grain, near-white multiplier so material color leads. */
@@ -307,6 +476,31 @@ function makeGlowTexture(): THREE.Texture | null {
   return canvasTexture(ctx);
 }
 
+/**
+ * Light-shaft streaks: skewed warm beams fading DOWNWARD from the top edge
+ * (light scattering through the smoke above the coals), for the volumetric
+ * shaft planes aligned to the key light.
+ */
+function makeShaftTexture(seed: number): THREE.Texture | null {
+  const ctx = make2d(128);
+  if (!ctx) return null;
+  const rng = mulberry32(seed);
+  ctx.clearRect(0, 0, 128, 128);
+  // Slight shared skew so the beams lean with the key light's azimuth.
+  ctx.setTransform(1, 0, 0.16, 1, -12, 0);
+  for (let i = 0; i < 6; i++) {
+    const x = 6 + rng() * 116;
+    const w = 5 + rng() * 15;
+    const g = ctx.createLinearGradient(0, 0, 0, 100 + rng() * 28);
+    g.addColorStop(0, `rgba(255, 185, 110, ${0.2 + rng() * 0.16})`);
+    g.addColorStop(1, 'rgba(255, 185, 110, 0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - w / 2, 0, w, 128);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return canvasTexture(ctx);
+}
+
 /** Vertical streaks fading upward: cheap heat shimmer above the coal bed. */
 function makeShimmerTexture(seed: number): THREE.Texture | null {
   const ctx = make2d(64, 128);
@@ -358,10 +552,29 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
   const lanternTex = makeLanternTexture();
   const glow = makeGlowTexture();
 
+  // Micro-detail maps (Phase 6): normal maps from procedural height fields,
+  // roughness variation for the lacquer sheen and stone wear. All canvas,
+  // headless-guarded, <= 256 px, LINEAR color space.
+  const woodHeight = makeWoodHeightCtx(texSeed());
+  const woodNormal = woodHeight ? heightToNormalTexture(woodHeight, 1.6, [1, 2]) : null;
+  const plasterHeight = makePlasterHeightCtx(texSeed());
+  const plasterNormal = plasterHeight
+    ? heightToNormalTexture(plasterHeight, 1.1, [6, 2])
+    : null;
+  const stoneHeight = makeStoneHeightCtx(texSeed());
+  const stoneNormal = stoneHeight ? heightToNormalTexture(stoneHeight, 1.8, [2, 2]) : null;
+  const lacquerRough = makeLacquerRoughnessTexture(texSeed());
+  const stoneRough = makeStoneRoughnessTexture(texSeed());
+
   const lacquer = new THREE.MeshStandardMaterial({
     color: OXBLOOD,
     map: wood ?? null,
-    roughness: 0.34,
+    normalMap: woodNormal ?? null,
+    normalScale: new THREE.Vector2(0.45, 0.45),
+    roughnessMap: lacquerRough ?? null,
+    // roughnessMap texels (~0.4-0.9) multiply this: effective ~0.22-0.5,
+    // centered on the old flat 0.34 but broken into sheen bands.
+    roughness: lacquerRough ? 0.55 : 0.34,
     metalness: 0.06,
     flatShading: true,
   });
@@ -370,6 +583,8 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
     // saturated red slabs (fire is the only saturation).
     color: VERMILION_TIMBER,
     map: wood ?? null,
+    normalMap: woodNormal ?? null,
+    normalScale: new THREE.Vector2(0.55, 0.55),
     roughness: 0.82,
     metalness: 0.04,
     flatShading: true,
@@ -383,6 +598,9 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
   const stone = new THREE.MeshStandardMaterial({
     color: STONE,
     map: stoneTex ?? null,
+    normalMap: stoneNormal ?? null,
+    normalScale: new THREE.Vector2(0.7, 0.7),
+    roughnessMap: stoneRough ?? null,
     roughness: 0.95,
     metalness: 0.0,
     flatShading: true,
@@ -390,6 +608,8 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
   const plaster = new THREE.MeshStandardMaterial({
     color: PLASTER,
     map: plasterTex ?? null,
+    normalMap: plasterNormal ?? null,
+    normalScale: new THREE.Vector2(0.5, 0.5),
     roughness: 1.0,
     metalness: 0.0,
   });
@@ -416,7 +636,18 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
         roughness: 0.9,
       });
 
-  const textures = [wood, plasterTex, stoneTex, lanternTex, glow];
+  const textures = [
+    wood,
+    plasterTex,
+    stoneTex,
+    lanternTex,
+    glow,
+    woodNormal,
+    plasterNormal,
+    stoneNormal,
+    lacquerRough,
+    stoneRough,
+  ];
   const materials = [lacquer, beam, trim, stone, plaster, darkWood, paper];
   return {
     lacquer,
@@ -1059,8 +1290,21 @@ export function buildBannerRun(opts: BannerRunOptions): BannerRunBuild {
         // Top edge (uv.y = 1) is pinned, the free hem sways the most.
         float weight = 1.0 - uv.y;
         float phase = modelMatrix[3][0] * 1.7 + modelMatrix[3][2] * 0.9;
-        p.x += sin(uTime * 1.4 + phase + uv.y * 2.4) * 0.085 * weight;
-        p.z += cos(uTime * 1.1 + phase * 1.3 + uv.y * 1.9) * 0.05 * weight;
+        // WIND GUSTS (Phase 6): a slow global envelope from layered
+        // low-frequency sines at incommensurate rates -- long calms broken
+        // by occasional stronger gusts, never a uniform loop. Banners share
+        // the field (small per-banner lag) so a gust rolls across the run.
+        float g = 0.5
+          + 0.30 * sin(uTime * 0.19 + phase * 0.23)
+          + 0.24 * sin(uTime * 0.083 + 1.7 + phase * 0.11)
+          + 0.20 * sin(uTime * 0.047 + 4.1);
+        float gust = 0.45 + 1.5 * smoothstep(0.55, 1.1, g);
+        p.x += sin(uTime * 1.4 + phase + uv.y * 2.4) * 0.085 * weight * gust;
+        p.z += cos(uTime * 1.1 + phase * 1.3 + uv.y * 1.9) * 0.05 * weight * gust;
+        // Gust flutter: a faster ripple that only exists while a gust blows.
+        float flutter = max(gust - 0.9, 0.0);
+        p.x += sin(uTime * 5.3 + phase * 2.1 + uv.y * 7.0) * 0.03 * weight * flutter;
+        p.z += cos(uTime * 6.1 + phase * 1.6 + uv.y * 5.0) * 0.02 * weight * flutter;
         // Slight sag: the hem center hangs lower than the pinned corners.
         p.y -= sin(uv.x * 3.14159) * 0.07 * weight;
         vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
@@ -1371,10 +1615,33 @@ export function buildCoalChannel(opts: CoalChannelOptions): CoalChannelBuild {
   glow.renderOrder = 9;
   group.add(glow);
 
+  // Heat shimmer standing over the coals (Phase 6): same streak approach as
+  // the coal wall, DoubleSide because stations view the channel from every
+  // direction, pulsing out of phase with the wall's shimmer.
+  const shimmerTex = makeShimmerTexture((opts.seed ?? 0xc4a2) ^ 0x3c3c);
+  const shimmerMat = new THREE.MeshBasicMaterial({
+    color: 0xff9040,
+    map: shimmerTex,
+    transparent: true,
+    opacity: shimmerTex ? 0.13 : 0.05,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    fog: false,
+  });
+  const shimmer = new THREE.Mesh(new THREE.PlaneGeometry(len * 0.85, 1.7), shimmerMat);
+  shimmer.name = 'channel-shimmer';
+  shimmer.position.set(xMid, 1.05, zC);
+  shimmer.renderOrder = 9;
+  group.add(shimmer);
+  const shimmerBase = shimmerMat.opacity;
+
   const update = (_dt: number, elapsed: number): void => {
     // Breathes out of phase with the coal wall so the two beds read alive.
     hotMat.emissiveIntensity = 2.4 + 0.5 * Math.sin(elapsed * 1.7 + 1.9);
     glowMat.opacity = (opts.kit.glow ? 0.32 : 0.12) * (0.8 + 0.2 * Math.sin(elapsed * 1.3));
+    shimmerMat.opacity = shimmerBase * (0.7 + 0.3 * Math.sin(elapsed * 2.1 + 0.8));
+    shimmer.position.y = 1.05 + 0.08 * Math.sin(elapsed * 1.1 + 2.3);
   };
   return { group, update };
 }
@@ -1500,43 +1767,67 @@ export function buildFloor(opts: FloorOptions = {}): THREE.Group {
   const group = new THREE.Group();
   group.name = 'floor';
 
-  // Plank tile: planks run along z (canvas vertical strips).
-  const makePlankTexture = (): THREE.Texture | null => {
+  // Plank tile: planks run along z (canvas vertical strips). The color map
+  // and the height field (-> normal map) are painted in the SAME loop so
+  // seams, joints and knots align exactly.
+  const makePlankTextures = (): {
+    color: THREE.Texture;
+    normal: THREE.Texture | null;
+  } | null => {
     const ctx = make2d(256);
-    if (!ctx) return null;
+    const hctx = make2d(256);
+    if (!ctx || !hctx) return null;
     const rng = mulberry32(seed);
     ctx.fillStyle = '#b09a6a';
     ctx.fillRect(0, 0, 256, 256);
+    hctx.fillStyle = '#808080';
+    hctx.fillRect(0, 0, 256, 256);
     const planks = 5;
     const pw = 256 / planks;
     for (let p = 0; p < planks; p++) {
       const x0 = p * pw;
-      // Per-plank tone variation.
+      // Per-plank tone variation (and a whisper of height difference so
+      // boards do not sit perfectly flush).
       const tone = (rng() - 0.5) * 0.16;
       ctx.fillStyle =
         tone > 0
           ? `rgba(232, 210, 160, ${tone})`
           : `rgba(52, 38, 20, ${-tone})`;
       ctx.fillRect(x0, 0, pw, 256);
+      hctx.fillStyle = `rgba(${tone > 0 ? 150 : 110}, ${tone > 0 ? 150 : 110}, ${tone > 0 ? 150 : 110}, 0.5)`;
+      hctx.fillRect(x0, 0, pw, 256);
       // Long grain streaks.
       for (let gI = 0; gI < 7; gI++) {
         const gx = x0 + 4 + rng() * (pw - 8);
         const drift = (rng() - 0.5) * 6;
-        ctx.strokeStyle = `rgba(74, 56, 30, ${0.10 + rng() * 0.1})`;
+        const alpha = 0.10 + rng() * 0.1;
+        ctx.strokeStyle = `rgba(74, 56, 30, ${alpha})`;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(gx, 0);
         ctx.bezierCurveTo(gx + drift, 80, gx - drift, 170, gx + drift, 256);
         ctx.stroke();
+        hctx.strokeStyle = `rgba(70, 70, 70, ${alpha * 3})`;
+        hctx.lineWidth = 1;
+        hctx.beginPath();
+        hctx.moveTo(gx, 0);
+        hctx.bezierCurveTo(gx + drift, 80, gx - drift, 170, gx + drift, 256);
+        hctx.stroke();
       }
       // A knot now and then.
       if (rng() < 0.6) {
         const kx = x0 + pw * (0.25 + rng() * 0.5);
         const ky = rng() * 256;
+        const krx = 2.5 + rng() * 2;
+        const kry = 1.5 + rng();
         ctx.fillStyle = 'rgba(58, 42, 22, 0.5)';
         ctx.beginPath();
-        ctx.ellipse(kx, ky, 2.5 + rng() * 2, 1.5 + rng(), 0, 0, Math.PI * 2);
+        ctx.ellipse(kx, ky, krx, kry, 0, 0, Math.PI * 2);
         ctx.fill();
+        hctx.fillStyle = 'rgba(52, 52, 52, 0.7)';
+        hctx.beginPath();
+        hctx.ellipse(kx, ky, krx, kry, 0, 0, Math.PI * 2);
+        hctx.fill();
       }
       // Butt joint at a staggered height.
       const jy = 256 * ((p * 0.37 + rng() * 0.3) % 1);
@@ -1546,6 +1837,12 @@ export function buildFloor(opts: FloorOptions = {}): THREE.Group {
       ctx.moveTo(x0 + 1, jy);
       ctx.lineTo(x0 + pw - 1, jy);
       ctx.stroke();
+      hctx.strokeStyle = 'rgba(30, 30, 30, 0.85)';
+      hctx.lineWidth = 2;
+      hctx.beginPath();
+      hctx.moveTo(x0 + 1, jy);
+      hctx.lineTo(x0 + pw - 1, jy);
+      hctx.stroke();
       // Plank seam.
       ctx.strokeStyle = 'rgba(40, 29, 15, 0.6)';
       ctx.lineWidth = 2;
@@ -1553,14 +1850,26 @@ export function buildFloor(opts: FloorOptions = {}): THREE.Group {
       ctx.moveTo(x0, 0);
       ctx.lineTo(x0, 256);
       ctx.stroke();
+      hctx.strokeStyle = 'rgba(22, 22, 22, 0.9)';
+      hctx.lineWidth = 2;
+      hctx.beginPath();
+      hctx.moveTo(x0, 0);
+      hctx.lineTo(x0, 256);
+      hctx.stroke();
     }
-    return canvasTexture(ctx, [4, 5]);
+    return {
+      color: canvasTexture(ctx, [4, 5]),
+      normal: heightToNormalTexture(hctx, 1.4, [4, 5]),
+    };
   };
 
-  const plankTex = makePlankTexture();
+  const plankMaps = makePlankTextures();
+  const plankTex = plankMaps?.color ?? null;
   const floorMat = new THREE.MeshStandardMaterial({
     color: plankTex ? 0xc4b28a : TATAMI,
-    map: plankTex ?? null,
+    map: plankTex,
+    normalMap: plankMaps?.normal ?? null,
+    normalScale: new THREE.Vector2(0.6, 0.6),
     roughness: 0.92,
     metalness: 0.0,
   });
@@ -1689,6 +1998,72 @@ export function buildArena(scene: THREE.Scene): Arena {
   // --- Floor ---------------------------------------------------------------
   group.add(buildFloor({ kit, seed: 0xf100, width: 30, length: 34, centerZ: -9.5 }));
 
+  // --- Soot gradients (Phase 6): the floor darkens toward the coal bed and
+  // along the channel, warm near-black overlays with feathered falloff so
+  // years of ember rain read into the boards. Roughness visually rises with
+  // the darkening (soot kills the plank sheen by occluding it).
+  const makeSootTexture = (mirrored: boolean): THREE.Texture | null => {
+    const ctx = make2d(64);
+    if (!ctx) return null;
+    ctx.clearRect(0, 0, 64, 64);
+    const g = ctx.createLinearGradient(0, 0, 0, 64);
+    if (mirrored) {
+      g.addColorStop(0, 'rgba(12, 8, 5, 0)');
+      g.addColorStop(0.5, 'rgba(12, 8, 5, 0.55)');
+      g.addColorStop(1, 'rgba(12, 8, 5, 0)');
+    } else {
+      g.addColorStop(0, 'rgba(12, 8, 5, 0.6)');
+      g.addColorStop(1, 'rgba(12, 8, 5, 0)');
+    }
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 64);
+    // Blotchy edge so the falloff never reads as a clean airbrush band.
+    const rng = mulberry32(0x5007);
+    ctx.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 26; i++) {
+      const bx = rng() * 64;
+      const by = rng() * 64;
+      const br = 2 + rng() * 6;
+      const b = ctx.createRadialGradient(bx, by, 0, bx, by, br);
+      b.addColorStop(0, `rgba(0, 0, 0, ${0.12 + rng() * 0.2})`);
+      b.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = b;
+      ctx.fillRect(0, 0, 64, 64);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    return canvasTexture(ctx);
+  };
+  const sootWallTex = makeSootTexture(false);
+  const sootChannelTex = makeSootTexture(true);
+  if (sootWallTex) {
+    // Canvas v=0 (opaque end) maps to the plane's TOP edge; rotated -90deg
+    // about x, the plane's top edge points toward -z (the coal wall).
+    const mat = new THREE.MeshBasicMaterial({
+      map: sootWallTex,
+      transparent: true,
+      depthWrite: false,
+    });
+    const soot = new THREE.Mesh(new THREE.PlaneGeometry(24, 5.6), mat);
+    soot.name = 'soot-coal-wall';
+    soot.rotation.x = -Math.PI / 2;
+    soot.position.set(0, 0.016, -19.0);
+    soot.renderOrder = 2;
+    group.add(soot);
+  }
+  if (sootChannelTex) {
+    const mat = new THREE.MeshBasicMaterial({
+      map: sootChannelTex,
+      transparent: true,
+      depthWrite: false,
+    });
+    const soot = new THREE.Mesh(new THREE.PlaneGeometry(13.4, 5.2), mat);
+    soot.name = 'soot-channel';
+    soot.rotation.x = -Math.PI / 2;
+    soot.position.set(-3.5, 0.015, -15.0);
+    soot.renderOrder = 2;
+    group.add(soot);
+  }
+
   // --- Entry porch (station 0 framing): two column pairs + timber frame ----
   const entryZs = [0.4, -3.2];
   const entryPositions: Array<[number, number]> = [];
@@ -1766,7 +2141,13 @@ export function buildArena(scene: THREE.Scene): Arena {
     [6.8, 0, -2.6], // gate flank south
     [6.8, 0, -9.4], // gate flank north
     [-1.6, 0, -12.3], // bridge south landing
-    [4.9, 0.9, -16.6], // terrace
+    // Terrace: west of the vantage sightline so the terrace-station camera
+    // keeps a clear focal lane to its construct (it half-occluded at
+    // (4.9, -16.6)).
+    [3.9, 0.9, -17.2],
+    // Mid-court (Phase 6 composition): left-foreground flame for the
+    // great-gate station shot, receding right-side rhythm for entry-hall.
+    [2.1, 0, -4.6],
   ];
   const brazierAnchors: THREE.Group[] = [];
   brazierSpots.forEach(([x, y, z], i) => {
@@ -1794,18 +2175,27 @@ export function buildArena(scene: THREE.Scene): Arena {
   const lanternSpots: Array<[number, number, number, number, number]> = [
     // Canopy rod A (z -8.6)
     [-5.2, 4.55, -8.6, 1.35, 0.21],
-    [-1.8, 4.55, -8.6, 0.9, 0.15],
+    // Hangs low into the colonnade station's upper-left foreground (Phase 6).
+    [-1.8, 4.55, -8.6, 1.85, 0.15],
     [1.6, 4.55, -8.6, 1.5, 0.19],
     [5.0, 4.55, -8.6, 1.05, 0.165],
-    // Canopy rod B (z -11.6)
+    // Canopy rod B (z -11.6): the -2.7 lantern hangs into the bridge-deck
+    // station's top frame; kept smaller/higher so it frames, not photobombs.
     [-6.0, 4.4, -11.6, 1.1, 0.14],
-    [-2.7, 4.4, -11.6, 1.6, 0.22],
+    [-2.7, 4.4, -11.6, 1.15, 0.17],
     [0.6, 4.4, -11.6, 1.25, 0.18],
     // Under the gate's lower lintel
     [7.35, 3.35, -6.0, 0.45, 0.2],
-    // Bridge rail end posts
-    [-2.71, 1.62, -13.08, 0.26, 0.115],
+    // Bridge rail end posts: BOTH on the west rail. The east-rail south post
+    // sat 0.35 m from the channel-edge station camera and filled its frame
+    // with an out-of-focus paper wall; on the west rail it reads as the
+    // intended midground framing element instead.
+    [-4.29, 1.62, -13.08, 0.26, 0.115],
     [-4.29, 1.62, -16.92, 0.26, 0.115],
+    // Entry header (Phase 6): a small lantern drops into the entry-hall
+    // station's upper-right foreground so the POV frame has a near layer
+    // (x 0.72 keeps it inside the 55-deg frame from the porch pose).
+    [0.72, 1.97, -0.35, 0.12, 0.1],
   ];
   lanternSpots.forEach(([x, y, z, hang, radius], i) => {
     const lantern = buildLantern({ kit, radius, hangLength: hang, seed: 0x1a2b + i * 977 });
@@ -1841,6 +2231,45 @@ export function buildArena(scene: THREE.Scene): Arena {
     haze.renderOrder = 10;
     group.add(haze);
     hazePlanes.push(haze);
+  }
+
+  // --- Light shafts through the smoke (Phase 6): three cheap additive
+  // planes between the coal wall and mid-court, streaks skewed to the key
+  // light's lean, tops tipped toward the source. Subtle by design.
+  const shaftPlanes: THREE.Mesh[] = [];
+  const shaftMats: THREE.MeshBasicMaterial[] = [];
+  const shaftBaseX: number[] = [];
+  const shaftBaseO: number[] = [];
+  {
+    const shaftSpecs: Array<{ w: number; h: number; x: number; y: number; z: number; o: number }> = [
+      { w: 15, h: 5.4, x: 0, y: 3.1, z: -20.2, o: 0.085 },
+      { w: 11, h: 4.6, x: -2.5, y: 2.9, z: -16.2, o: 0.06 },
+      { w: 8, h: 4.0, x: 1.5, y: 2.7, z: -12.6, o: 0.045 },
+    ];
+    shaftSpecs.forEach((spec, i) => {
+      const tex = makeShaftTexture(0x54af7 + i * 131);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffa050,
+        map: tex,
+        transparent: true,
+        opacity: tex ? spec.o : 0.03,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const shaft = new THREE.Mesh(new THREE.PlaneGeometry(spec.w, spec.h), mat);
+      shaft.name = `light-shaft-${i}`;
+      shaft.position.set(spec.x, spec.y, spec.z);
+      // Top leans toward the coal wall (the light source) like smoke-lit rays.
+      shaft.rotation.x = 0.16;
+      shaft.renderOrder = 8;
+      group.add(shaft);
+      shaftPlanes.push(shaft);
+      shaftMats.push(mat);
+      shaftBaseX.push(spec.x);
+      shaftBaseO.push(mat.opacity);
+    });
   }
 
   // --- Dust motes over the courtyard ---------------------------------------
@@ -1932,6 +2361,19 @@ export function buildArena(scene: THREE.Scene): Arena {
       haze.position.x = Math.sin(elapsed * 0.11 + i * 2.1) * 0.35;
     }
 
+    // Light shafts swell and drift with the smoke they live in.
+    for (let i = 0; i < shaftPlanes.length; i++) {
+      const shaft = shaftPlanes[i];
+      const mat = shaftMats[i];
+      const bx = shaftBaseX[i];
+      const bo = shaftBaseO[i];
+      if (shaft === undefined || mat === undefined || bx === undefined || bo === undefined) {
+        continue;
+      }
+      shaft.position.x = bx + Math.sin(elapsed * 0.07 + i * 1.9) * 0.5;
+      mat.opacity = bo * (0.75 + 0.25 * Math.sin(elapsed * 0.23 + i * 2.6));
+    }
+
     motes.update(dt, elapsed);
   };
 
@@ -1959,9 +2401,13 @@ export function buildArena(scene: THREE.Scene): Arena {
           const texMat = mat as Partial<{
             map: THREE.Texture | null;
             emissiveMap: THREE.Texture | null;
+            normalMap: THREE.Texture | null;
+            roughnessMap: THREE.Texture | null;
           }>;
           if (texMat.map) seen.add(texMat.map);
           if (texMat.emissiveMap) seen.add(texMat.emissiveMap);
+          if (texMat.normalMap) seen.add(texMat.normalMap);
+          if (texMat.roughnessMap) seen.add(texMat.roughnessMap);
         }
       });
       for (const d of seen) d.dispose();

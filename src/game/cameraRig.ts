@@ -54,19 +54,25 @@ const HOME_LOOK = new THREE.Vector3(0, 1.1, -6);
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 /**
- * Fixed screenshot poses for the Phase-0 capture harness (tools/shots.ts,
+ * Fixed screenshot poses for the capture harness (tools/shots.ts,
  * `npm run shots`). Deterministic: a locked rig skips travel, parallax,
  * breathing and shake so before/after screenshots are pixel-comparable.
- * 1 = player POV at the starting station, 2 = elevated three-quarter over
- * the courtyard (spirit gate near, bridge and colonnade beyond), 3 = low
- * hero shot along the coal channel toward the bridge and terrace.
+ *
+ * Round 3 Phase 6: poses 1..6 are EXACTLY the six authored station camera
+ * poses from killTravel.ts (cameraPos looking at the construct anchor), so
+ * every hero shot shows what the player actually sees while fighting there.
+ *   1 entry-hall  2 colonnade  3 terrace-vantage
+ *   4 bridge-deck 5 great-gate 6 channel-edge
  */
 export const SHOT_POSES: Readonly<
   Record<number, { position: [number, number, number]; look: [number, number, number] }>
 > = {
   1: { position: [0, 1.5, 0.6], look: [0, 1.1, -6] },
-  2: { position: [5.5, 8.0, -19.0], look: [-2.5, 0.3, -1.5] },
-  3: { position: [-5.2, 0.9, -10.6], look: [-3.2, 2.0, -19.5] },
+  2: { position: [-0.6, 1.55, -7.4], look: [-5.6, 1.1, -10.5] },
+  3: { position: [6.4, 2.55, -17.9], look: [2.2, 1.1, -12.2] },
+  4: { position: [-1.9, 1.7, -10.1], look: [-3.5, 1.6, -15.0] },
+  5: { position: [-0.8, 1.5, -5.7], look: [5.7, 1.1, -6.0] },
+  6: { position: [-2.6, 1.35, -12.9], look: [-6.9, 1.1, -17.7] },
 };
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);

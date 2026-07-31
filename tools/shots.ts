@@ -1,12 +1,13 @@
 /**
- * Phase-0 screenshot harness: boots the arena on a replay fixture in
- * headless Chromium and captures the three fixed SHOT_POSES camera angles
- * (src/game/cameraRig.ts) into docs/screens/shot-N.png.
+ * Screenshot harness: boots the arena on a replay fixture in headless
+ * Chromium and captures the six fixed SHOT_POSES camera angles -- the six
+ * authored combat-station poses (src/game/cameraRig.ts) -- into
+ * docs/screens/station-N.png.
  *
  * Usage:
- *   npm run shots               idle-rest fixture, shots 1..3
+ *   npm run shots               idle-rest fixture, stations 1..6
  *   npm run shots -- flame-fan  any synthetic fixture name
- *   SHOT_SUFFIX=before npm run shots   writes shot-N-before.png
+ *   SHOT_SUFFIX=before npm run shots   writes station-N-before.png
  *
  * Requires a dev server on :5173 (starts one itself if absent). Waits for
  * the arena's __FB_READY flag (90 rendered frames) before capturing, so
@@ -24,7 +25,7 @@ const OUT_DIR = new URL('../docs/screens/', import.meta.url).pathname.replace(
 );
 const FIXTURE = process.argv[2] ?? 'idle-rest';
 const SUFFIX = process.env.SHOT_SUFFIX ? `-${process.env.SHOT_SUFFIX}` : '';
-const SHOTS = [1, 2, 3];
+const SHOTS = [1, 2, 3, 4, 5, 6];
 /** SHOT_BARE=1 drops gloves/PIP/HUD for clean environment hero shots. */
 const BARE = process.env.SHOT_BARE === '1' ? '&bare=1' : '';
 /** SHOT_DELAY_MS waits after the ready flag before capturing (fire timing). */
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
       page.on('pageerror', (e) => console.error(`[shot-${n}] pageerror:`, String(e)));
       const url = `${BASE}/?screen=arena&replay=${FIXTURE}&shot=${n}${BARE}`;
       await page.goto(url);
-      const path = `${OUT_DIR}shot-${n}${SUFFIX}.png`;
+      const path = `${OUT_DIR}station-${n}${SUFFIX}.png`;
       try {
         await page.waitForFunction(
           () => (window as unknown as { __FB_READY?: boolean }).__FB_READY === true,
@@ -78,8 +79,8 @@ async function main(): Promise<void> {
         );
       } catch {
         // Capture anyway so the failure mode is visible, then flag it.
-        await page.screenshot({ path: `${OUT_DIR}shot-${n}${SUFFIX}-timeout.png` });
-        console.error(`shot-${n}: __FB_READY never set; wrote diagnostic capture`);
+        await page.screenshot({ path: `${OUT_DIR}station-${n}${SUFFIX}-timeout.png` });
+        console.error(`station-${n}: __FB_READY never set; wrote diagnostic capture`);
         await page.close();
         continue;
       }

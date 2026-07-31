@@ -821,6 +821,8 @@ export class FireSystem {
   private readonly timedLights: TimedLight[] = [];
   private readonly tmp = new THREE.Vector3();
   private readonly tmp2 = new THREE.Vector3();
+  /** Deterministic jitter for ambient ember scale/drift variance (Phase 6). */
+  private readonly ambientRng = mulberry32(0xe58a2);
 
   constructor(parent: THREE.Object3D, opts: FireSystemOptions = {}) {
     this.group = new THREE.Group();
@@ -947,12 +949,19 @@ export class FireSystem {
       const ne = Math.floor(entry.emberAcc);
       if (ne > 0) {
         entry.emberAcc -= ne;
+        // Varied scale and drift (Phase 6): each spawn wave rolls its own
+        // size, rise speed, sideways drift and lifetime, so ambient embers
+        // read as a population -- fat slow floaters among quick sparks --
+        // instead of a uniform stream. Deterministic (mulberry32).
+        const r = this.ambientRng;
+        const drift = (r() - 0.5) * 0.5 * s;
         this.embers.spawn({
           position: p,
-          velocity: this.tmp2.set(0, 0.7 * s, 0),
-          lifetime: 2.4,
+          velocity: this.tmp2.set(drift, (0.4 + r() * 0.75) * s, (r() - 0.5) * 0.4 * s),
+          size: 0.028 + r() * 0.05,
+          lifetime: 1.6 + r() * 2.2,
           count: ne,
-          spread: 0.1 * s,
+          spread: (0.07 + r() * 0.09) * s,
         });
       }
 

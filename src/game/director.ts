@@ -130,6 +130,12 @@ export interface DirectorDeps {
    * camera base position. Fallback: the fixed PLAYER_WORLD_POSITION.
    */
   cameraPose?: CameraPoseProvider;
+  /**
+   * First construct index (Phase 6): the screenshot harness starts the
+   * chain at the captured station so every station shot shows its own
+   * construct at its own anchor. Default 0 (normal play).
+   */
+  startIndex?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +198,9 @@ export class Director {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
+    this.index = Math.max(0, Math.floor(this.deps.startIndex ?? 0));
     this.deps.combat.onKill = (construct, position) => this.handleKill(construct, position);
-    this.current = this.spawnConstruct(0);
+    this.current = this.spawnConstruct(this.index);
     this.stateValue = 'fighting';
   }
 

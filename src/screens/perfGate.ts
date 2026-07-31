@@ -42,6 +42,7 @@ import * as THREE from 'three';
 import type { HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import type { PoseModelVariant } from '../tracking/poseSource';
 import { configureRenderer } from '../game/renderer';
+import { createPostPipeline } from '../game/post';
 import { buildArena, type Arena } from '../game/arena';
 import { FireSystem, type FireLightHandle } from '../vfx/fire';
 import {
@@ -451,6 +452,10 @@ export function mountPerfGate(container: HTMLElement): () => void {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100);
 
+  // The REAL render pipeline (Phase 6): the gate must measure the same
+  // post chain (bloom + grain + vignette) the arena screen renders through.
+  const post = createPostPipeline(renderer, scene, camera);
+
   const arena: Arena = buildArena(scene);
   const fire = new FireSystem(scene);
   for (const anchor of arena.brazierAnchors) {
@@ -627,7 +632,14 @@ export function mountPerfGate(container: HTMLElement): () => void {
     container.appendChild(panel);
   };
 
+  // With the post chain, one frame is several internal renderer.render calls
+  // (scene + bloom mips + output + grade). autoReset would leave info showing
+  // only the last quad pass; manual reset per tick makes drawCalls the TRUE
+  // total per frame across the whole pipeline.
+  renderer.info.autoReset = false;
+
   const tick = (): void => {
+    renderer.info.reset();
     const now = performance.now();
     const rawDeltaMs = now - lastNow;
     lastNow = now;
@@ -774,7 +786,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
     );
     camera.lookAt(0, 1.3, -6);
 
-    renderer.render(scene, camera);
+    post.render(dt);
 
     // step.finish fires exactly once (the 'done' phase absorbs all later
     // steps), after this frame's render so renderer.info is fresh.
@@ -787,6 +799,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
+    post.setSize(w, h);
   };
   window.addEventListener('resize', onResize);
 
@@ -806,6 +819,7 @@ export function mountPerfGate(container: HTMLElement): () => void {
     physics?.dispose();
     fire.dispose();
     arena.dispose();
+    post.dispose();
     renderer.dispose();
     container.replaceChildren();
   };

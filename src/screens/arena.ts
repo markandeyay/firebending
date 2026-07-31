@@ -77,6 +77,7 @@ import {
   type EffectsProvider,
 } from '../game/combat';
 import { configureRenderer } from '../game/renderer';
+import { createPostPipeline, type PostPipeline } from '../game/post';
 import { Director } from '../game/director';
 import { FireSystem, type AmbientFlameHandle } from '../vfx/fire';
 import { MoveEffects } from '../vfx/moveEffects';
@@ -293,6 +294,7 @@ export function projectWorldToScreen(
 
 export class ArenaScreen implements Screen {
   private renderer: THREE.WebGLRenderer | null = null;
+  private post: PostPipeline | null = null;
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private arena: Arena | null = null;
@@ -396,8 +398,13 @@ export class ArenaScreen implements Screen {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      this.post?.setSize(window.innerWidth, window.innerHeight);
     };
     window.addEventListener('resize', this.onResize);
+
+    // Post chain (Phase 6): bloom + grain + vignette. The perf gate renders
+    // through the same pipeline, so the budget numbers cover it.
+    this.post = createPostPipeline(renderer, scene, camera);
 
     // --- World systems -----------------------------------------------------
     this.arena = buildArena(scene);
@@ -498,10 +505,15 @@ export class ArenaScreen implements Screen {
     });
 
     // --- Director ----------------------------------------------------------
+    // Shot harness: start the chain at the captured station so the shot
+    // frames its own construct at its own anchor with its station lights.
+    const startIndex =
+      context.shot !== undefined && shotPose ? context.shot - 1 : 0;
     this.director = new Director({
       manager: this.manager,
       combat: this.combat,
       rig: this.rig,
+      startIndex,
       ...(hud ? { hud } : {}),
       cameraPose,
       onKillWindow: (position) => {
@@ -529,6 +541,9 @@ export class ArenaScreen implements Screen {
       },
     });
     this.director.start();
+    // The four relocatable station lights start at the first construct's
+    // station (relevant when the shot harness starts mid-cycle).
+    this.arena.setActiveStation(stationIndexFor(startIndex));
 
     // --- Hardening (T070) --------------------------------------------------
     // Degrade ladder: particle scale -> MoveEffects + ambient braziers, pose
@@ -703,6 +718,8 @@ export class ArenaScreen implements Screen {
     this.physics = null;
     this.arena?.dispose();
     this.arena = null;
+    this.post?.dispose();
+    this.post = null;
     if (this.renderer) {
       this.renderer.dispose();
       this.renderer.domElement.remove();
@@ -849,7 +866,8 @@ export class ArenaScreen implements Screen {
       });
     }
 
-    renderer.render(scene, camera);
+    if (this.post) this.post.render(rawDt);
+    else renderer.render(scene, camera);
   }
 
   private updateHud(
