@@ -104,6 +104,13 @@ export interface PoseFrame {
   world: { left: PoseArm; right: PoseArm } | null;
   /** Presence/visibility confidence 0..1. */
   confidence: number;
+  /**
+   * OPTIONAL per-wrist visibility scores 0..1 straight from the pose model,
+   * used by the ROI hand-crop path to decide whether a wrist is reliable
+   * enough to crop around. Fixtures and recordings that predate the field
+   * lack it, and downstream code must treat its absence as fully supported.
+   */
+  wristVisibility?: { left: number; right: number };
 }
 
 export interface LandmarkFrame {

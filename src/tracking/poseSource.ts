@@ -108,7 +108,17 @@ export function extractPoseFrame(
   }
   const confidence = visCount > 0 ? visSum / visCount : 1;
 
-  return { t: timestampMs, left, right, world, confidence };
+  // Per-wrist visibility for the ROI hand-crop path (roiCrop.ts). A model
+  // that reports no visibility scores counts as fully visible, matching the
+  // aggregate-confidence convention above.
+  const lwVis = landmarks[POSE_LM.LEFT_WRIST]?.visibility;
+  const rwVis = landmarks[POSE_LM.RIGHT_WRIST]?.visibility;
+  const wristVisibility = {
+    left: typeof lwVis === 'number' && Number.isFinite(lwVis) ? lwVis : 1,
+    right: typeof rwVis === 'number' && Number.isFinite(rwVis) ? rwVis : 1,
+  };
+
+  return { t: timestampMs, left, right, world, confidence, wristVisibility };
 }
 
 /**

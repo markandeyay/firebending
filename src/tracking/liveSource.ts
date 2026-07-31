@@ -16,6 +16,28 @@
  * frame FIRST, then (still over budget on the new configuration) face drops
  * to every 8th. Hands are never degraded. Pose and face are sample-and-held
  * between detections.
+ *
+ * ROI CROP HAND PATH (Round 3 Phase 1): per side, when the held pose is
+ * FRESH (sample within POSE_FRESH_MS) and that wrist is visible, the hand
+ * detector runs on a square crop around the pose wrist, drawn upscaled into
+ * a reused 256x256 canvas, instead of on the full frame. Landmarks map back
+ * to full-frame space (roiCrop.ts) and then get the exact same mirroring as
+ * before; the frame slot comes from the POSE side, not the MediaPipe
+ * handedness label, which removes label flips entirely on this path. Sides
+ * whose pose is stale or wrist not visible fall back to the legacy
+ * full-frame 2-hand detection, which stays alive for that purpose; the two
+ * paths never both run for the same side in one frame.
+ *
+ * CROP ARCHITECTURE CHOICE: (a) two dedicated 1-hand HandLandmarker
+ * instances, one per side, VIDEO mode, rather than (b) one 2-hand instance
+ * over a composite side-by-side canvas. Rationale: each instance keeps its
+ * own temporal tracking state locked to one hand's crop stream, so tracking
+ * continuity survives the other hand appearing/disappearing; there is no
+ * composite-canvas bookkeeping, no gap tuning, and no ambiguity when a
+ * detection straddles the split line; timestamps are trivially monotonic
+ * per instance (each is called at most once per frame with the shared
+ * strictly-increasing frame timestamp). The cost is one extra hand-model
+ * instance in memory (a few MB), which profiling has not shown to matter.
  */
 
 import type {
@@ -30,9 +52,21 @@ import type {
   LandmarkSource,
   PoseFrame,
 } from './types';
-import { createHandLandmarker, detectHands } from './handSource';
+import type { HandFrame, PoseArm } from './types';
+import { createHandLandmarker, detectHands, detectTopHand } from './handSource';
 import { createFaceLandmarker, detectFace } from './faceSource';
 import { createPoseLandmarker, detectPose } from './poseSource';
+import {
+  CROP_SIZE_PX,
+  CropSmoother,
+  POSE_FRESH_MS,
+  WRIST_VISIBILITY_MIN,
+  cropBoxForWrist,
+  cropHandToPlayer,
+  frameSlotForPoseSide,
+  playerToRaw,
+  selectHandPath,
+} from './roiCrop';
 
 /** Combined ML budget per frame in ms (Section 14). */
 const ML_BUDGET_MS = 7;
@@ -77,7 +111,7 @@ class RollingAverage {
 }
 
 export interface LiveSourceStats {
-  /** Rolling average hand inference time, ms. */
+  /** Rolling average TOTAL hand-path time per frame (crop + fallback), ms. */
   handMs: number;
   /** Rolling average face inference time (frames where it ran), ms. */
   faceMs: number;
@@ -85,6 +119,19 @@ export interface LiveSourceStats {
   poseMs: number;
   /** Rolling average frames per second of the emit loop. */
   fps: number;
+  /** Rolling average ROI crop draw+detect time (frames where crops ran), ms. */
+  cropMs: number;
+  /** Whether each side used the ROI crop path on the most recent frame. */
+  cropActive: { left: boolean; right: boolean };
+}
+
+/** Per-side state for the ROI crop path. */
+interface CropSide {
+  landmarker: HandLandmarker | null;
+  canvas: HTMLCanvasElement | null;
+  ctx: CanvasRenderingContext2D | null;
+  smoother: CropSmoother;
+  active: boolean;
 }
 
 export class LiveLandmarkSource implements LandmarkSource {
@@ -117,8 +164,23 @@ export class LiveLandmarkSource implements LandmarkSource {
   private handMsAvg = new RollingAverage(ROLLING_WINDOW);
   private faceMsAvg = new RollingAverage(ROLLING_WINDOW);
   private poseMsAvg = new RollingAverage(ROLLING_WINDOW);
+  private cropMsAvg = new RollingAverage(ROLLING_WINDOW);
   private totalMsAvg = new RollingAverage(ROLLING_WINDOW);
   private fpsAvg = new RollingAverage(ROLLING_WINDOW);
+  private readonly cropSides: { left: CropSide; right: CropSide } = {
+    left: LiveLandmarkSource.emptyCropSide(),
+    right: LiveLandmarkSource.emptyCropSide(),
+  };
+
+  private static emptyCropSide(): CropSide {
+    return {
+      landmarker: null,
+      canvas: null,
+      ctx: null,
+      smoother: new CropSmoother(),
+      active: false,
+    };
+  }
 
   onFrame(listener: FrameListener): () => void {
     this.listeners.add(listener);
@@ -131,6 +193,11 @@ export class LiveLandmarkSource implements LandmarkSource {
       faceMs: this.faceMsAvg.average,
       poseMs: this.poseMsAvg.average,
       fps: this.fpsAvg.average,
+      cropMs: this.cropMsAvg.average,
+      cropActive: {
+        left: this.cropSides.left.active,
+        right: this.cropSides.right.active,
+      },
     };
   }
 
@@ -191,14 +258,18 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.video = video;
     await video.play();
 
-    const [hand, face, pose] = await Promise.all([
+    const [hand, face, pose, cropLeft, cropRight] = await Promise.all([
       createHandLandmarker(),
       createFaceLandmarker(),
       createPoseLandmarker(),
+      createHandLandmarker(1),
+      createHandLandmarker(1),
     ]);
     this.handLandmarker = hand;
     this.faceLandmarker = face;
     this.poseLandmarker = pose;
+    this.initCropSide('left', cropLeft);
+    this.initCropSide('right', cropRight);
 
     this.running = true;
     this.startTime = performance.now();
@@ -232,8 +303,30 @@ export class LiveLandmarkSource implements LandmarkSource {
     this.faceLandmarker = null;
     this.poseLandmarker?.close();
     this.poseLandmarker = null;
+    for (const side of ['left', 'right'] as const) {
+      const crop = this.cropSides[side];
+      crop.landmarker?.close();
+      crop.landmarker = null;
+      crop.canvas = null;
+      crop.ctx = null;
+      crop.smoother.reset();
+      crop.active = false;
+    }
     this.lastFace = null;
     this.lastPose = null;
+  }
+
+  /** Wire one side's crop landmarker and its reused upscale canvas. */
+  private initCropSide(side: 'left' | 'right', landmarker: HandLandmarker): void {
+    const crop = this.cropSides[side];
+    crop.landmarker = landmarker;
+    const canvas = document.createElement('canvas');
+    canvas.width = CROP_SIZE_PX;
+    canvas.height = CROP_SIZE_PX;
+    crop.canvas = canvas;
+    crop.ctx = canvas.getContext('2d');
+    crop.smoother.reset();
+    crop.active = false;
   }
 
   private scheduleNext(): void {
@@ -263,16 +356,12 @@ export class LiveLandmarkSource implements LandmarkSource {
 
     let totalMs = 0;
 
-    const handStart = performance.now();
-    const hands = detectHands(this.handLandmarker, video, timestamp);
-    const handMs = performance.now() - handStart;
-    this.handMsAvg.push(handMs);
-    totalMs += handMs;
-
-    // Pose runs on frames ODD relative to its interval so it never stacks on
-    // a face frame (face frames are multiples of 4). Sample-and-hold between
-    // detections; PoseFrame.t is re-stamped into frame time so downstream
-    // freshness and angular-velocity math share the frame clock.
+    // Pose runs FIRST within the frame so the ROI crop path below always
+    // uses the freshest wrist. It stays on frames ODD relative to its
+    // interval so it never stacks on a face frame (face frames are
+    // multiples of 4). Sample-and-hold between detections; PoseFrame.t is
+    // re-stamped into frame time so downstream freshness and
+    // angular-velocity math share the frame clock.
     const poseEvery = this.poseInterval * this.poseIntervalMult;
     if (this.poseLandmarker && this.frameIndex % poseEvery === 1) {
       const poseStart = performance.now();
@@ -282,6 +371,53 @@ export class LiveLandmarkSource implements LandmarkSource {
       this.poseMsAvg.push(poseMs);
       totalMs += poseMs;
     }
+
+    // Hand path selection, per side: ROI crop when the held pose is fresh
+    // and that wrist is visible, legacy full-frame otherwise. The two
+    // paths never both run for the same side in one frame: a full-frame
+    // detection (at most one per frame) only fills the slots of the sides
+    // that did NOT run a crop.
+    const frameT = now - this.startTime;
+    const pose = this.lastPose;
+    const poseFresh = pose !== null && frameT - pose.t <= POSE_FRESH_MS;
+    const hands: { left: HandFrame | null; right: HandFrame | null } = {
+      left: null,
+      right: null,
+    };
+    const handStart = performance.now();
+    let cropMs = 0;
+    let cropRan = false;
+    let needFull = false;
+    for (const side of ['left', 'right'] as const) {
+      const crop = this.cropSides[side];
+      const visibility = pose?.wristVisibility?.[side] ?? 1;
+      const path = selectHandPath(poseFresh, visibility > WRIST_VISIBILITY_MIN);
+      const ready =
+        crop.landmarker !== null && crop.ctx !== null && video.videoWidth > 0;
+      if (path === 'crop' && ready && pose !== null) {
+        const cropStart = performance.now();
+        const arm = side === 'left' ? pose.left : pose.right;
+        hands[frameSlotForPoseSide(side)] = this.detectCropSide(side, arm, timestamp, now);
+        cropMs += performance.now() - cropStart;
+        cropRan = true;
+        crop.active = true;
+      } else {
+        // Reset the smoother so the next crop activation snaps fresh
+        // instead of easing from a stale box.
+        crop.active = false;
+        crop.smoother.reset();
+        needFull = true;
+      }
+    }
+    if (needFull) {
+      const full = detectHands(this.handLandmarker, video, timestamp);
+      if (!this.cropSides.left.active) hands.left = full.left;
+      if (!this.cropSides.right.active) hands.right = full.right;
+    }
+    const handMs = performance.now() - handStart;
+    this.handMsAvg.push(handMs);
+    if (cropRan) this.cropMsAvg.push(cropMs);
+    totalMs += handMs;
 
     const faceEvery = this.faceInterval * this.faceIntervalMult;
     if (this.faceLandmarker && this.frameIndex % faceEvery === 0) {
@@ -318,5 +454,45 @@ export class LiveLandmarkSource implements LandmarkSource {
     for (const l of this.listeners) l(frame);
 
     this.scheduleNext();
+  }
+
+  /**
+   * Run one side's ROI crop detection: smooth the crop box around the pose
+   * wrist (unmirrored back into raw image space), draw that video region
+   * upscaled into the side's reused CROP_SIZE_PX canvas, detect the single
+   * hand, and map it back to player space. Returns null when the crop
+   * contains no hand.
+   */
+  private detectCropSide(
+    side: 'left' | 'right',
+    arm: PoseArm,
+    timestampMs: number,
+    nowMs: number,
+  ): HandFrame | null {
+    const crop = this.cropSides[side];
+    const video = this.video;
+    if (!crop.landmarker || !crop.ctx || !crop.canvas || !video) return null;
+
+    const rawWrist = playerToRaw(arm.wrist);
+    const rawElbow = playerToRaw(arm.elbow);
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const target = cropBoxForWrist(rawWrist, rawElbow, vw / vh);
+    const box = crop.smoother.update(target, rawWrist, nowMs);
+
+    crop.ctx.drawImage(
+      video,
+      box.x * vw,
+      box.y * vh,
+      box.w * vw,
+      box.h * vh,
+      0,
+      0,
+      CROP_SIZE_PX,
+      CROP_SIZE_PX,
+    );
+    const hand = detectTopHand(crop.landmarker, crop.canvas, timestampMs);
+    if (!hand) return null;
+    return cropHandToPlayer(hand.landmarks, hand.world, hand.score, box);
   }
 }

@@ -127,16 +127,18 @@ export function normalizeHands(hands: readonly RawHand[]): {
 }
 
 /**
- * Create a HandLandmarker: 2 hands, VIDEO mode, GPU delegate with CPU
- * fallback. MediaPipe is dynamically imported here so tests never load it.
+ * Create a HandLandmarker: VIDEO mode, GPU delegate with CPU fallback.
+ * numHands defaults to 2 (the full-frame path); the ROI crop path creates
+ * dedicated 1-hand instances (see liveSource.ts). MediaPipe is dynamically
+ * imported here so tests never load it.
  */
-export async function createHandLandmarker(): Promise<HandLandmarker> {
+export async function createHandLandmarker(numHands = 2): Promise<HandLandmarker> {
   const vision = await import('@mediapipe/tasks-vision');
   const fileset = await vision.FilesetResolver.forVisionTasks(VISION_WASM_URL);
   const options = (delegate: 'GPU' | 'CPU') => ({
     baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate },
     runningMode: 'VIDEO' as const,
-    numHands: 2,
+    numHands,
   });
   try {
     return await vision.HandLandmarker.createFromOptions(fileset, options('GPU'));
@@ -166,4 +168,34 @@ export function detectHands(
     raw.push({ landmarks, label, score: category.score, ...(world ? { world } : {}) });
   }
   return normalizeHands(raw);
+}
+
+/**
+ * Run hand detection on an arbitrary image source (the ROI crop canvas)
+ * and return the single highest-score raw hand, or null. The handedness
+ * LABEL is deliberately not returned: on the crop path the pose side is
+ * ground truth (see roiCrop.ts), so the label would only invite the flips
+ * this path exists to eliminate. timestampMs must be monotonically
+ * increasing per landmarker instance (VIDEO mode requirement).
+ */
+export function detectTopHand(
+  landmarker: HandLandmarker,
+  image: HTMLCanvasElement | HTMLVideoElement,
+  timestampMs: number,
+): { landmarks: readonly RawLandmark[]; world?: readonly RawLandmark[]; score: number } | null {
+  const result = landmarker.detectForVideo(image, timestampMs);
+  let best: {
+    landmarks: readonly RawLandmark[];
+    world?: readonly RawLandmark[];
+    score: number;
+  } | null = null;
+  for (let i = 0; i < result.landmarks.length; i++) {
+    const landmarks = result.landmarks[i];
+    if (!landmarks || landmarks.length < HAND_LANDMARK_COUNT) continue;
+    const score = result.handedness[i]?.[0]?.score ?? 1;
+    if (best !== null && score <= best.score) continue;
+    const world = result.worldLandmarks[i];
+    best = { landmarks, score, ...(world ? { world } : {}) };
+  }
+  return best;
 }

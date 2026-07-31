@@ -139,6 +139,7 @@
       <span>Left hand <b id="leftConf">no track</b></span>
       <span>Right hand <b id="rightConf">no track</b></span>
       <span>Face yaw <b id="yawOut">0.00</b> pitch <b id="pitchOut">0.00</b></span>
+      <span>Crop <b id="cropOut">off</b></span>
       <span>Frames <b id="frameOut">0</b></span>
       <span>Duration <b id="durOut">0.0s</b></span>
     </div>
@@ -357,6 +358,8 @@ function assemblePose(poseResult, tMs) {
     const v = lms[i] && lms[i].visibility;
     if (typeof v === "number" && isFinite(v)) { vis += v; visN++; }
   }
+  const lwv = lms[S.LW] && lms[S.LW].visibility;
+  const rwv = lms[S.RW] && lms[S.RW].visibility;
   return {
     t: tMs,
     left: arm(lms, "left", screen),
@@ -365,6 +368,11 @@ function assemblePose(poseResult, tMs) {
       ? { left: arm(world, "left", worldV), right: arm(world, "right", worldV) }
       : null,
     confidence: visN > 0 ? vis / visN : 1,
+    // Per-wrist visibility for the ROI crop path (optional in the contract).
+    wristVisibility: {
+      left: typeof lwv === "number" && isFinite(lwv) ? lwv : 1,
+      right: typeof rwv === "number" && isFinite(rwv) ? rwv : 1,
+    },
   };
 }
 
@@ -375,6 +383,103 @@ function assembleFrame(t, hands, face, pose) {
   const frame = { t, left: hands.left, right: hands.right, face };
   if (pose) frame.pose = pose;
   return frame;
+}
+
+// ---------- ROI crop path ----------
+// MINIMAL DUPLICATE of src/tracking/roiCrop.ts, which is the canonical,
+// unit-tested implementation. This page cannot import TS sources, so keep
+// these constants and formulas in lockstep with roiCrop.ts when either
+// changes. All boxes/points here are normalized RAW (unmirrored) image
+// coordinates; pose joints get unmirrored (x -> 1 - x) before use, and
+// detected crop landmarks get mirrored back to player space afterward.
+const CROP = {
+  SCALE: 2.4,   // crop side = forearm length * SCALE
+  MIN: 0.14,    // min side, normalized width units
+  MAX: 0.5,     // max side
+  SHIFT: 0.15,  // center shift toward the fingers, fraction of side
+  TAU: 120,     // smoothing time constant, ms
+  CDB: 0.04,    // center deadband, fraction of side
+  SDB: 0.08,    // relative size deadband
+  FRESH: 250,   // max pose sample age for the crop path, ms
+  VIS: 0.5,     // min pose wrist visibility
+  PX: 256,      // crop canvas size, pixels
+};
+
+function clampBoxToFrame(b) {
+  let { x, y, w, h } = b;
+  const scale = Math.min(1, 1 / w, 1 / h);
+  if (scale < 1) {
+    const cx = x + w / 2, cy = y + h / 2;
+    w *= scale; h *= scale;
+    x = cx - w / 2; y = cy - h / 2;
+  }
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x + w > 1) x = 1 - w;
+  if (y + h > 1) y = 1 - h;
+  return { x, y, w, h };
+}
+
+/** Square-in-pixels box around the wrist (h = w * aspect), shifted toward
+ *  the fingers, clamped inside the frame. See roiCrop.ts cropBoxForWrist. */
+function cropBoxForWrist(wrist, elbow, aspect) {
+  const fx = wrist.x - elbow.x, fy = wrist.y - elbow.y;
+  const forearm = Math.sqrt(fx * fx + fy * fy);
+  const side = Math.min(CROP.MAX, Math.max(CROP.MIN, forearm * CROP.SCALE));
+  let cx = wrist.x, cy = wrist.y;
+  if (forearm > 1e-9) {
+    const shift = (CROP.SHIFT * side) / forearm;
+    cx += fx * shift;
+    cy += fy * shift;
+  }
+  const w = side, h = side * aspect;
+  return clampBoxToFrame({ x: cx - w / 2, y: cy - h / 2, w, h });
+}
+
+function pointInBox(p, b) {
+  return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
+}
+
+/** Temporal crop smoother: exponential (tau), center/size deadbands, and an
+ *  immediate snap when the wrist exits the current box. See roiCrop.ts. */
+class CropSmoother {
+  constructor() { this.t = null; }
+  reset() { this.t = null; }
+  current() {
+    if (this.t === null) return null;
+    return { x: this.cx - this.w / 2, y: this.cy - this.h / 2, w: this.w, h: this.h };
+  }
+  adopt(b) {
+    this.cx = b.x + b.w / 2; this.cy = b.y + b.h / 2;
+    this.w = b.w; this.h = b.h;
+  }
+  update(target, wrist, tMs) {
+    const cur = this.current();
+    if (cur === null || !pointInBox(wrist, cur)) {
+      const snapped = clampBoxToFrame(target);
+      this.adopt(snapped);
+      this.t = tMs;
+      return snapped;
+    }
+    const dt = Math.max(0, tMs - this.t);
+    this.t = tMs;
+    const alpha = 1 - Math.exp(-dt / CROP.TAU);
+    const tcx = target.x + target.w / 2, tcy = target.y + target.h / 2;
+    const dx = tcx - this.cx, dy = tcy - this.cy;
+    if (Math.sqrt(dx * dx + dy * dy) >= CROP.CDB * this.w) {
+      this.cx += dx * alpha;
+      this.cy += dy * alpha;
+    }
+    if (this.w > 0 && Math.abs(target.w - this.w) / this.w >= CROP.SDB) {
+      this.w += (target.w - this.w) * alpha;
+      this.h += (target.h - this.h) * alpha;
+    }
+    const out = clampBoxToFrame({
+      x: this.cx - this.w / 2, y: this.cy - this.h / 2, w: this.w, h: this.h,
+    });
+    this.adopt(out);
+    return out;
+  }
 }
 
 // ---------- app state ----------
@@ -402,6 +507,13 @@ let lastPose = null;      // last PoseFrame (sample-and-hold)
 let lastPoseAt = -1e9;    // performance.now() of last pose detection
 let fpsEma = 0;
 let lastTick = 0;
+
+// Per-side ROI crop state (mirrors LiveLandmarkSource: two dedicated
+// 1-hand landmarkers, one reused 256x256 canvas each).
+const cropState = {
+  left:  { landmarker: null, canvas: null, ctx: null, smoother: new CropSmoother(), active: false },
+  right: { landmarker: null, canvas: null, ctx: null, smoother: new CropSmoother(), active: false },
+};
 
 function setStatus(msg, cls) {
   const el = $("status");
@@ -455,17 +567,30 @@ async function createLandmarkers(delegate) {
     outputFacialTransformationMatrixes: true,
   });
   let pose = null;
+  let handCropL = null;
+  let handCropR = null;
   try {
     pose = await PoseLandmarker.createFromOptions(fileset, {
       baseOptions: { modelAssetPath: POSE_MODEL, delegate },
       runningMode: "VIDEO",
       numPoses: 1,
     });
+    // ROI crop path: two dedicated 1-hand instances, one per side, so each
+    // keeps its own VIDEO-mode tracking state (same choice as the game's
+    // LiveLandmarkSource; see src/tracking/liveSource.ts). Only useful when
+    // pose is available, so they share its try block.
+    const oneHand = () => HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+      runningMode: "VIDEO",
+      numHands: 1,
+    });
+    handCropL = await oneHand();
+    handCropR = await oneHand();
   } catch (e) {
-    // Pose is optional in recordings; keep capturing without it.
-    console.warn("PoseLandmarker unavailable, recording without pose", e);
+    // Pose (and with it the crop path) is optional; keep capturing without.
+    console.warn("Pose/crop landmarkers unavailable, using full-frame hands", e);
   }
-  return { hand, face, pose };
+  return { hand, face, pose, handCropL, handCropR };
 }
 
 async function startCamera() {
@@ -484,6 +609,16 @@ async function startCamera() {
     handLandmarker = pair.hand;
     faceLandmarker = pair.face;
     poseLandmarker = pair.pose;
+    cropState.left.landmarker = pair.handCropL;
+    cropState.right.landmarker = pair.handCropR;
+    for (const side of ["left", "right"]) {
+      const cs = cropState[side];
+      if (!cs.landmarker) continue;
+      cs.canvas = document.createElement("canvas");
+      cs.canvas.width = CROP.PX;
+      cs.canvas.height = CROP.PX;
+      cs.ctx = cs.canvas.getContext("2d");
+    }
 
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
@@ -512,6 +647,74 @@ async function startCamera() {
 
 // ---------- main loop ----------
 
+/**
+ * One side's crop detection: unmirror the pose wrist/elbow into raw image
+ * space, smooth the crop box, draw the region upscaled into the reused
+ * canvas, detect, then map crop -> full raw frame -> mirrored player space.
+ * HANDEDNESS: the POSE side is ground truth on this path; the MediaPipe
+ * label and the Swap hands checkbox apply only to the full-frame fallback
+ * (the checkbox exists to fix label flips, which crops do not have).
+ */
+function detectCropSide(side, now) {
+  const cs = cropState[side];
+  const arm = side === "left" ? lastPose.left : lastPose.right;
+  const rawWrist = { x: 1 - arm.wrist.x, y: arm.wrist.y };
+  const rawElbow = { x: 1 - arm.elbow.x, y: arm.elbow.y };
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const target = cropBoxForWrist(rawWrist, rawElbow, vw / vh);
+  const box = cs.smoother.update(target, rawWrist, now);
+  cs.ctx.drawImage(
+    video,
+    box.x * vw, box.y * vh, box.w * vw, box.h * vh,
+    0, 0, CROP.PX, CROP.PX,
+  );
+  const r = cs.landmarker.detectForVideo(cs.canvas, now);
+  const lms = r.landmarks && r.landmarks[0];
+  if (!lms || lms.length !== 21) return null;
+  const cat = r.handedness && r.handedness[0] && r.handedness[0][0];
+  const score = cat ? cat.score : 1;
+  const landmarks = new Array(lms.length);
+  for (let i = 0; i < lms.length; i++) {
+    const p = lms[i];
+    // mapCropToFull then mirror (x -> 1 - x); z passes through unscaled.
+    landmarks[i] = { x: 1 - (box.x + p.x * box.w), y: box.y + p.y * box.h, z: p.z };
+  }
+  return { landmarks, confidence: score };
+}
+
+/**
+ * Per-side path selection, mirroring LiveLandmarkSource: crop when the held
+ * pose is fresh (within CROP.FRESH ms) and that wrist is visible, full-frame
+ * fallback otherwise. Never both paths for the same side in one frame; the
+ * full detection (at most one per frame) only fills non-crop sides.
+ */
+function detectHandsRoi(now) {
+  const out = { left: null, right: null };
+  const poseFresh = lastPose !== null && (now - lastPoseAt) <= CROP.FRESH;
+  let needFull = false;
+  for (const side of ["left", "right"]) {
+    const cs = cropState[side];
+    const vis = poseFresh && lastPose.wristVisibility ? lastPose.wristVisibility[side] : 1;
+    if (poseFresh && vis > CROP.VIS && cs.landmarker && cs.ctx && video.videoWidth > 0) {
+      out[side] = detectCropSide(side, now);
+      cs.active = true;
+    } else {
+      cs.active = false;
+      cs.smoother.reset();
+      needFull = true;
+    }
+  }
+  if (needFull) {
+    const full = assembleHands(
+      handLandmarker.detectForVideo(video, now),
+      $("swapHands").checked,
+    );
+    if (!cropState.left.active) out.left = full.left;
+    if (!cropState.right.active) out.right = full.right;
+  }
+  return out;
+}
+
 function loop(now) {
   if (!running) return;
   if (video.readyState >= 2) {
@@ -522,23 +725,23 @@ function loop(now) {
     }
     lastTick = now;
 
-    const handResult = handLandmarker.detectForVideo(video, now);
     frameCounter++;
-    if (frameCounter % FACE_EVERY_N_FRAMES === 0) {
-      const faceResult = faceLandmarker.detectForVideo(video, now);
-      const face = assembleFace(faceResult);
-      if (face) { lastFace = face; lastFaceAt = now; }
-    }
-    // Pose on odd frames so it never stacks on a face frame, like the game.
+    // Pose runs FIRST so the crop path uses the freshest wrist, on odd
+    // frames so it never stacks on a face frame, like the game.
     if (poseLandmarker && frameCounter % POSE_EVERY_N_FRAMES === 1) {
       const poseResult = poseLandmarker.detectForVideo(video, now);
       const tMs = state === "recording" ? Math.round(now - recordStart) : 0;
       const pose = assemblePose(poseResult, tMs);
       if (pose) { lastPose = pose; lastPoseAt = now; }
     }
+    if (frameCounter % FACE_EVERY_N_FRAMES === 0) {
+      const faceResult = faceLandmarker.detectForVideo(video, now);
+      const face = assembleFace(faceResult);
+      if (face) { lastFace = face; lastFaceAt = now; }
+    }
     const face = (now - lastFaceAt) <= FACE_HOLD_MS ? lastFace : null;
     const pose = (now - lastPoseAt) <= POSE_HOLD_MS ? lastPose : null;
-    const hands = assembleHands(handResult, $("swapHands").checked);
+    const hands = detectHandsRoi(now);
 
     if (state === "recording") {
       frames.push(assembleFrame(Math.round(now - recordStart), hands, face, pose));
@@ -558,6 +761,8 @@ function updateStats(hands, face) {
   $("rightConf").textContent = hands.right ? hands.right.confidence.toFixed(2) : "no track";
   $("yawOut").textContent = face ? face.yaw.toFixed(2) : "-";
   $("pitchOut").textContent = face ? face.pitch.toFixed(2) : "-";
+  const cl = cropState.left.active, cr = cropState.right.active;
+  $("cropOut").textContent = cl || cr ? (cl ? "L" : "-") + (cr ? "R" : "-") : "off";
 }
 
 // Overlay drawing. Coordinates are already player space (mirrored), and the

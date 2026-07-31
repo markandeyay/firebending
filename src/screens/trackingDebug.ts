@@ -104,6 +104,10 @@ export interface HudState {
     handMs: number;
     faceMs: number;
     faceDegraded: boolean;
+    /** ROI crop draw+detect average, ms (Round 3 Phase 1). */
+    cropMs?: number;
+    /** Which sides used the ROI crop path on the latest frame. */
+    cropActive?: { left: boolean; right: boolean };
   };
 }
 
@@ -125,6 +129,14 @@ export function formatHud(state: HudState): string {
       `hand ${state.live.handMs.toFixed(1)}ms  face ${state.live.faceMs.toFixed(1)}ms` +
         `  faceDegraded: ${state.live.faceDegraded ? 'yes' : 'no'}`
     );
+    if (state.live.cropMs !== undefined && state.live.cropActive) {
+      const on = state.live.cropActive;
+      const sides =
+        on.left || on.right
+          ? `${on.left ? 'L' : '-'}${on.right ? 'R' : '-'}`
+          : 'off';
+      lines.push(`crop ${state.live.cropMs.toFixed(1)}ms  active: ${sides}`);
+    }
   }
   return lines.join('\n');
 }
@@ -416,6 +428,8 @@ export async function mountTrackingDebug(
               handMs: liveSource.stats.handMs,
               faceMs: liveSource.stats.faceMs,
               faceDegraded: liveSource.faceDegraded,
+              cropMs: liveSource.stats.cropMs,
+              cropActive: liveSource.stats.cropActive,
             },
           }
         : {}),
