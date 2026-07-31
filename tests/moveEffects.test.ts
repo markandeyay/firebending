@@ -26,8 +26,6 @@ const ALL_MOVES: MoveName[] = [
   'jab-blast',
   'fire-stream',
   'cross-combo',
-  'palm-wave',
-  'flame-fan',
   'twin-cannon',
   'rising-flame',
   'fire-whip',
@@ -152,11 +150,11 @@ describe('screenToWorld', () => {
 // ---------------------------------------------------------------------------
 
 describe('MoveEffects dispatch', () => {
-  it('each of the 9 moves produces a non-null handle with a distinct name', () => {
+  it('each of the 7 moves produces a non-null handle with a distinct name', () => {
     const w = makeWorld();
     const names = new Set<string>();
     for (const move of ALL_MOVES) {
-      const sustained = move === 'fire-stream' || move === 'flame-fan';
+      const sustained = move === 'fire-stream';
       const start = w.fx.handleEvent(
         ev(move, { kind: sustained ? 'sustain-start' : 'trigger' }),
       );
@@ -172,7 +170,7 @@ describe('MoveEffects dispatch', () => {
       }
       step(w, 1 / 60);
     }
-    expect(names.size).toBe(9); // every effect name is distinct
+    expect(names.size).toBe(7); // every effect name is distinct
     w.fx.dispose();
     w.fire.dispose();
   });
@@ -185,8 +183,8 @@ describe('MoveEffects dispatch', () => {
     // Sustained move with a bare trigger.
     expect(w.fx.handleEvent(ev('fire-stream', { kind: 'trigger' }))).toBeNull();
     // Orphan tick/end with no active sustain.
-    expect(w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-tick' }))).toBeNull();
-    expect(w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-end' }))).toBeNull();
+    expect(w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-tick' }))).toBeNull();
+    expect(w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-end' }))).toBeNull();
     w.fx.dispose();
     w.fire.dispose();
   });
@@ -195,9 +193,9 @@ describe('MoveEffects dispatch', () => {
     const w = makeWorld();
     w.fx.handleEvent(ev('jab-blast'));
     w.fx.handleEvent(ev('twin-cannon'));
-    w.fx.handleEvent(ev('palm-wave'));
+    w.fx.handleEvent(ev('fire-whip'));
     const intensities = w.rig.calls.map((c) => c.intensity);
-    expect(intensities).toEqual([0.05, 0.35, 0.08]);
+    expect(intensities).toEqual([0.05, 0.35, 0.15]);
     w.fx.dispose();
     w.fire.dispose();
   });
@@ -313,17 +311,17 @@ describe('sustained effects', () => {
     w.fire.dispose();
   });
 
-  it('fan ticks re-map the aim each tick (steerable sweep)', () => {
+  it('stream ticks re-map the aim each tick (steerable jet)', () => {
     const w = makeWorld();
-    w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-start' }));
+    w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-start' }));
     // Sweeping right then left: both ticks accepted on the live cone.
     expect(
-      w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-tick', aim: { x: 1, y: 0, z: -0.4 } })),
+      w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-tick', aim: { x: 1, y: 0, z: -0.4 } })),
     ).not.toBeNull();
     expect(
-      w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-tick', aim: { x: -1, y: 0, z: -0.4 } })),
+      w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-tick', aim: { x: -1, y: 0, z: -0.4 } })),
     ).not.toBeNull();
-    w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-end' }));
+    w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-end' }));
     expect(w.fire.stats().lightsActive).toBe(0);
     w.fx.dispose();
     w.fire.dispose();
@@ -375,23 +373,20 @@ describe('sustained effects', () => {
 // ---------------------------------------------------------------------------
 
 describe('budget under spam', () => {
-  it('300 frames of all-9-move spam stays within particle caps and a bounded registry', () => {
+  it('300 frames of all-7-move spam stays within particle caps and a bounded registry', () => {
     const w = makeWorld();
     const dt = 1 / 60;
     for (let frame = 0; frame < 300; frame++) {
       if (frame % 10 === 0) {
         w.fx.handleEvent(ev('jab-blast'));
         w.fx.handleEvent(ev('cross-combo', { hand: 'left' }));
-        w.fx.handleEvent(ev('palm-wave'));
         w.fx.handleEvent(ev('twin-cannon', { hand: 'both' }));
         w.fx.handleEvent(ev('rising-flame', { hand: 'both' }));
         w.fx.handleEvent(ev('fire-whip'));
         w.fx.handleEvent(ev('breath-charge', { hand: 'both' }));
         w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-start', hand: 'left' }));
-        w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-start', hand: 'right' }));
       }
       w.fx.handleEvent(ev('fire-stream', { kind: 'sustain-tick', hand: 'left' }));
-      w.fx.handleEvent(ev('flame-fan', { kind: 'sustain-tick', hand: 'right' }));
       step(w, dt);
       const stats = w.fire.stats();
       expect(stats.total).toBeLessThanOrEqual(6000);
@@ -409,8 +404,8 @@ describe('budget under spam', () => {
     const full = makeWorld();
     const half = makeWorld();
     half.fx.intensityScale = 0.4;
-    full.fx.handleEvent(ev('palm-wave'));
-    half.fx.handleEvent(ev('palm-wave'));
+    full.fx.handleEvent(ev('jab-blast'));
+    half.fx.handleEvent(ev('jab-blast'));
     expect(half.fire.flames.liveCount()).toBeLessThan(full.fire.flames.liveCount());
     full.fx.dispose();
     full.fire.dispose();

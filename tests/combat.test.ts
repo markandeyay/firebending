@@ -143,16 +143,16 @@ async function setup(): Promise<{
 // ---------------------------------------------------------------------------
 
 describe('DAMAGE_TABLE', () => {
-  it('matches the Section 7 semantics', () => {
+  it('matches the Section 7 semantics folded to the 7-move set', () => {
     expect(DAMAGE_TABLE['jab-blast']).toEqual({ damage: 8, impulse: 0, perSecond: false });
     expect(DAMAGE_TABLE['cross-combo']).toEqual({ damage: 18, impulse: 20, perSecond: false });
-    expect(DAMAGE_TABLE['palm-wave']).toEqual({ damage: 6, impulse: 26, perSecond: false });
     expect(DAMAGE_TABLE['fire-stream']).toEqual({ damage: 14, impulse: 0, perSecond: true });
-    expect(DAMAGE_TABLE['flame-fan']).toEqual({ damage: 20, impulse: 0, perSecond: true });
     expect(DAMAGE_TABLE['twin-cannon']).toEqual({ damage: 42, impulse: 40, perSecond: false });
     expect(DAMAGE_TABLE['rising-flame']).toEqual({ damage: 0, impulse: 0, perSecond: false });
     expect(DAMAGE_TABLE['fire-whip']).toEqual({ damage: 16, impulse: 14, perSecond: false });
     expect(DAMAGE_TABLE['breath-charge']).toEqual({ damage: 0, impulse: 0, perSecond: false });
+    // Hearth Wave and Ember Fan are retired: the table carries exactly 7 moves.
+    expect(Object.keys(DAMAGE_TABLE)).toHaveLength(7);
   });
 });
 
@@ -253,15 +253,14 @@ describe('camera-relative combat frame', () => {
     physics.dispose();
   });
 
-  it('fire-whip and palm-wave work in the rotated frame at close range', async () => {
+  it('fire-whip works in the rotated frame at close range', async () => {
     const { physics, manager } = await setup();
     const near = manager.spawn(new THREE.Vector3(4.5, 0, -8), 1); // 2.5 m ahead
     const effects = makeEffects();
     const combat = new CombatSystem({ manager, effects, cameraPose: provider });
 
-    combat.handleMoveEvent(ev({ move: 'palm-wave', t: 100 }));
     combat.handleMoveEvent(ev({ move: 'fire-whip', t: 200, aim: { x: 1, y: 0, z: 0 } }));
-    expect(near.hp).toBeCloseTo(100 - 6 - 16, 6);
+    expect(near.hp).toBeCloseTo(100 - 16, 6);
 
     manager.dispose();
     physics.dispose();
@@ -452,29 +451,14 @@ describe('sustained beams', () => {
     physics.dispose();
   });
 
-  it('flame-fan cone hits at 20/sec inside the cone angle', async () => {
-    const { physics, manager } = await setup();
-    const construct = manager.spawn(FAR_ANCHOR, 1);
-    const effects = makeEffects();
-    const combat = new CombatSystem({ manager, effects });
-
-    combat.handleMoveEvent(ev({ move: 'flame-fan', kind: 'sustain-start', t: 0 }));
-    for (let i = 1; i <= 5; i++) {
-      combat.handleMoveEvent(ev({ move: 'flame-fan', kind: 'sustain-tick', t: i * 100 }));
-    }
-    expect(construct.hp).toBeCloseTo(100 - 20 * 0.5, 4);
-
-    manager.dispose();
-    physics.dispose();
-  });
 });
 
 // ---------------------------------------------------------------------------
-// Instant melee-range hits (whip, palm)
+// Instant melee-range hits (whip)
 // ---------------------------------------------------------------------------
 
 describe('instant hit range gates', () => {
-  it('palm-wave and fire-whip miss at 6 m and hit at 2.5 m', async () => {
+  it('fire-whip misses at 6 m and hits at 2.5 m', async () => {
     const { physics, manager } = await setup();
     const far = manager.spawn(FAR_ANCHOR, 1);
     const near = manager.spawn(new THREE.Vector3(0, 0, -2.5), 1);
@@ -482,26 +466,27 @@ describe('instant hit range gates', () => {
     const combat = new CombatSystem({ manager, effects });
 
     const whipAim = { x: 1, y: 0, z: 0 }; // rightward lateral swing
-    combat.handleMoveEvent(ev({ move: 'palm-wave', t: 100 }));
     combat.handleMoveEvent(ev({ move: 'fire-whip', t: 200, aim: whipAim }));
 
-    // 6 m: out of both ranges (palm 3 m, whip 4 m).
+    // 6 m: out of whip range (4 m).
     expect(far.hp).toBe(100);
-    // 2.5 m: both connect.
-    expect(near.hp).toBeCloseTo(100 - 6 - 16, 6);
+    // 2.5 m: connects.
+    expect(near.hp).toBeCloseTo(100 - 16, 6);
 
     manager.dispose();
     physics.dispose();
   });
 
-  it('empowered palm-wave deals 1.6x', async () => {
+  it('empowered fire-whip deals 1.6x', async () => {
     const { physics, manager } = await setup();
     const near = manager.spawn(new THREE.Vector3(0, 0, -2.5), 1);
     const effects = makeEffects();
     const combat = new CombatSystem({ manager, effects });
 
-    combat.handleMoveEvent(ev({ move: 'palm-wave', t: 100, empowered: true }));
-    expect(near.hp).toBeCloseTo(100 - 6 * EMPOWER_MULTIPLIER, 6);
+    combat.handleMoveEvent(
+      ev({ move: 'fire-whip', t: 100, aim: { x: 1, y: 0, z: 0 }, empowered: true }),
+    );
+    expect(near.hp).toBeCloseTo(100 - 16 * EMPOWER_MULTIPLIER, 6);
 
     manager.dispose();
     physics.dispose();

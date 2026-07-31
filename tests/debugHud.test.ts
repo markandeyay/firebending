@@ -26,8 +26,8 @@ describe('formatNearMiss', () => {
 
   it('uses two decimals and the short move names', () => {
     expect(
-      formatNearMiss(rec({ move: 'palm-wave', condition: 'growth', value: 1.2345, threshold: 1.35 })),
-    ).toBe('PALM: growth 1.23 vs threshold 1.35 FAIL');
+      formatNearMiss(rec({ move: 'jab-blast', condition: 'growth', value: 1.2345, threshold: 1.35 })),
+    ).toBe('JAB: growth 1.23 vs threshold 1.35 FAIL');
     expect(
       formatNearMiss(rec({ move: 'rising-flame', condition: 'upVel', value: 0.5, threshold: 1 })),
     ).toBe('RISING: upVel 0.50 vs threshold 1.00 FAIL');

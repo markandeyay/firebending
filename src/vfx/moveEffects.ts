@@ -50,8 +50,6 @@ export const PROJECTILE_LIFETIME_SEC = 2.5;
 export const MAX_LIVE_PROJECTILES = 12;
 /** Per-tick flame cap for the sustained narrow stream. */
 export const STREAM_TICK_FLAME_CAP = 6;
-/** Per-tick flame cap for the sustained wide fan. */
-export const FAN_TICK_FLAME_CAP = 10;
 /** Empowered moves scale sizes and spawn counts by this. */
 export const EMPOWERED_SCALE = 1.4;
 /** Empowered moves scale light intensity by this. */
@@ -73,14 +71,13 @@ const SUSTAIN_STALE_SEC = 0.6;
 
 /**
  * Every move's distinct, named effect (visual review checklist key). Names
- * are original to this project.
+ * are original to this project. Hearth Wave and Ember Fan retired with the
+ * 7-move simplification (palm thrusts are Cinder Bolt / Kiln Lance now).
  */
 export const EFFECT_NAMES: Readonly<Record<MoveName, string>> = {
   'jab-blast': 'Cinder Bolt',
   'fire-stream': 'Kiln Lance',
   'cross-combo': 'Third Strike Comet',
-  'palm-wave': 'Hearth Wave',
-  'flame-fan': 'Ember Fan',
   'twin-cannon': 'Furnace Shot',
   'rising-flame': 'Kindled Wall',
   'fire-whip': 'Cinder Lash',
@@ -444,25 +441,7 @@ export class ProjectileEffect extends BaseEffect {
 }
 
 // ---------------------------------------------------------------------------
-// One-shot marker (Hearth Wave lives entirely in one spawnBurst; the handle
-// stays alive for the burst's visual duration so callers can observe it).
-// ---------------------------------------------------------------------------
-
-class OneShotEffect extends BaseEffect {
-  private ttl: number;
-  constructor(move: MoveName, fx: MoveEffects, ttl: number) {
-    super(move, fx);
-    this.ttl = ttl;
-  }
-  update(dt: number): void {
-    if (!this.alive) return;
-    this.ttl -= dt;
-    if (this.ttl <= 0) this.alive = false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Sustained cone (Kiln Lance narrow / Ember Fan wide). Steerable: origin and
+// Sustained cone (Kiln Lance). Steerable: origin and
 // aim are re-mapped on every sustain-tick.
 // ---------------------------------------------------------------------------
 
@@ -493,20 +472,6 @@ const STREAM_PARAMS: SustainParams = {
   lightAlong: 2,
   lightIntensity: 3.2,
   lightRadius: 7,
-};
-
-const FAN_PARAMS: SustainParams = {
-  flamesPerTick: 8,
-  flameCap: FAN_TICK_FLAME_CAP,
-  embersPerTick: 3,
-  speed: 6,
-  size: 0.42,
-  lifetime: 0.45,
-  spread: 1.2,
-  muzzleOffset: 0.2,
-  lightAlong: 0.8, // light hugs the cone base
-  lightIntensity: 3.6,
-  lightRadius: 6,
 };
 
 class SustainedConeEffect extends BaseEffect {
@@ -967,29 +932,8 @@ export class MoveEffects {
         return this.launchProjectile(e, PROJECTILE_PARAMS['twin-cannon']);
       }
 
-      case 'palm-wave': {
-        if (e.kind !== 'trigger') return null;
-        const m = screenToWorld(e.origin, e.aim, this.camera);
-        this.fire.spawnBurst(m.origin, m.direction, {
-          flameCount: this.count(34, e.empowered),
-          emberCount: this.count(18, e.empowered),
-          size: 0.5 * (e.empowered ? EMPOWERED_SCALE : 1),
-          speed: 8,
-          spread: 0.9,
-          lifetime: 0.35,
-          lightIntensity: 3.6 * (e.empowered ? EMPOWERED_LIGHT_SCALE : 1),
-          lightRadius: 6,
-          lightDuration: 0.3,
-        });
-        this.rig?.shake(0.08, 0.15); // the pushback feel
-        return this.add(new OneShotEffect('palm-wave', this, 0.35));
-      }
-
       case 'fire-stream':
         return this.handleSustain(e, STREAM_PARAMS);
-
-      case 'flame-fan':
-        return this.handleSustain(e, FAN_PARAMS);
 
       case 'rising-flame': {
         if (e.kind !== 'trigger') return null;

@@ -1,10 +1,16 @@
 /**
- * T021 + T022: the 9-move state machine against the synthetic fixture suite.
+ * T021 + T022: the 7-move state machine against the synthetic fixture suite.
  *
  * True positives: every positive fixture produces exactly its move.
  * False positives: every negative fixture produces zero events.
  * Plus cross-move confusion, Breath economics, cooldowns, empowerment, and
  * trigger latency (< 120 ms of frame time from trigger-condition completion).
+ *
+ * 7-MOVE SIMPLIFICATION: palm is no longer a classified pose on the
+ * critical path. The palm-wave and flame-fan RECORDINGS stay in the suite
+ * as thrust-family motions: the palm-wave fixture must fire jab-blast and
+ * the flame-fan fixture must run a fire-stream sustain, proving thrust
+ * detection is pose-agnostic (finger curl irrelevant).
  *
  * Cross Combo modeling: the third alternating jab emits move 'cross-combo'
  * INSTEAD of a third 'jab-blast' (the upgrade replaces the hit), so the
@@ -299,17 +305,17 @@ describe('true positives: each fixture fires its move', () => {
     expect(combo.aim.z).toBeLessThan(-0.7);
   });
 
-  it('palm-wave fires exactly one right palm-wave', () => {
+  it('palm-wave (palm thrust) fires exactly one right jab-blast, pose-agnostic', () => {
     const events = runEngine(fixture('palm-wave'));
     const e = only(events, 'event');
-    expect(e.move).toBe('palm-wave');
+    expect(e.move).toBe('jab-blast');
     expect(e.hand).toBe('right');
     expect(e.aim.z).toBeLessThan(-0.7);
   });
 
-  it('flame-fan runs a full sustain lifecycle', () => {
+  it('flame-fan (held palm thrust) runs a fire-stream sustain lifecycle', () => {
     const events = runEngine(fixture('flame-fan'));
-    expectSustainShape(events, 'flame-fan', 8);
+    expectSustainShape(events, 'fire-stream', 8);
   });
 
   it('twin-cannon fires exactly one two-hand event', () => {
@@ -394,14 +400,14 @@ describe('cross-move confusion', () => {
     expect(moves).toEqual(new Set(['fire-stream']));
   });
 
-  it('palm-wave does not emit jab-blast or flame-fan', () => {
+  it('palm-wave (palm thrust) emits only jab-blast, nothing else', () => {
     const moves = new Set(runEngine(fixture('palm-wave')).map((e) => e.move));
-    expect(moves).toEqual(new Set(['palm-wave']));
+    expect(moves).toEqual(new Set(['jab-blast']));
   });
 
-  it('flame-fan does not emit palm-wave', () => {
+  it('flame-fan (held palm thrust) emits only fire-stream', () => {
     const moves = new Set(runEngine(fixture('flame-fan')).map((e) => e.move));
-    expect(moves).toEqual(new Set(['flame-fan']));
+    expect(moves).toEqual(new Set(['fire-stream']));
   });
 
   it('twin-cannon does not decay into two separate jab-blasts', () => {
@@ -410,7 +416,7 @@ describe('cross-move confusion', () => {
     expect(events.filter((e) => e.move === 'twin-cannon')).toHaveLength(1);
   });
 
-  it('rising-flame does not emit palm-wave or flame-fan', () => {
+  it('rising-flame does not emit jabs or streams despite the two-arm motion', () => {
     const moves = new Set(runEngine(fixture('rising-flame')).map((e) => e.move));
     expect(moves).toEqual(new Set(['rising-flame']));
   });

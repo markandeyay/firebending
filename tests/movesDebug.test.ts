@@ -87,10 +87,10 @@ describe('LatencyStats', () => {
     const stats = new LatencyStats();
     stats.add('twin-cannon', 1);
     stats.add('breath-charge', 2);
-    stats.add('palm-wave', 3);
+    stats.add('fire-whip', 3);
     expect(stats.summary().map((s) => s.move)).toEqual([
       'breath-charge',
-      'palm-wave',
+      'fire-whip',
       'twin-cannon',
     ]);
   });

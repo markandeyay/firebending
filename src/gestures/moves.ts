@@ -1,14 +1,34 @@
 /**
- * The 9-move state machine (spec Section 7). Consumes LandmarkFrame objects
- * one per frame via MoveEngine.update() and emits MoveEvent objects.
- * Everything is deterministic and frame-driven: all timing derives from
- * LandmarkFrame.t, never from wall clocks.
+ * The 7-move state machine (spec Section 7, simplified per the 2026-07-31
+ * drill-data review). Consumes LandmarkFrame objects one per frame via
+ * MoveEngine.update() and emits MoveEvent objects. Everything is
+ * deterministic and frame-driven: all timing derives from LandmarkFrame.t,
+ * never from wall clocks.
+ *
+ * MOVESET SIMPLIFICATION (major deviation, Round 3 Phase 1b): palm is NO
+ * LONGER a classified pose on the critical path. The palm-vs-fist hysteresis
+ * split multiplied every thrust into two moves (jab/palm-wave, stream/fan)
+ * whose only difference was finger curl, which the player's own recorded
+ * drills could not reliably separate mid-thrust. Thrust detection is now
+ * POSE-AGNOSTIC: the elbow-extension + wrist-speed/bbox-growth fusion alone
+ * decides, finger curl is irrelevant. palm-wave and flame-fan are gone; a
+ * palm strike reads as jab-blast and a held palm push reads as fire-stream.
+ * The seven moves differ by ARM COUNT, MOTION TYPE (thrust vs upward sweep
+ * vs lateral swing vs static hold), HOLD DURATION, and WRIST POSITION vs the
+ * body's hip/shoulder lines (pose-fresh) or the absolute fallback bands.
+ * gripScore keeps its finger-pose read for fire-whip (HaGRID 0.96
+ * precision); fistScore is still read for the breath-charge chamber (an
+ * idle player's relaxed hands also hang at the hip line, so the deliberate
+ * fist chamber is what separates the move from standing idle: the idle-rest
+ * negative fixture holds exactly that pose) and to assist the whip hold.
+ * palmScore/palmScore2D stay exported for the studio and HaGRID suites; no
+ * move reads them.
  *
  * AIM SEMANTICS (combat layer contract):
  *   MoveEvent.aim is the normalized SCREEN-SPACE hand velocity at the moment
  *   the move triggered (filtered over the last AIM_WINDOW_FRAMES frames).
- *   When body pose is FRESH, thrust-family aims (jab / cross / palm-wave /
- *   stream / fan) blend the forearm direction into the velocity aim (see
+ *   When body pose is FRESH, thrust-family aims (jab / cross / stream)
+ *   blend the forearm direction into the velocity aim (see
  *   thrustAim and AIM_FOREARM_WEIGHT); twin / rising / whip and every
  *   pose-absent path keep the pure velocity aim.
  *   Screen space is player space from tracking/types.ts: x grows to the
@@ -38,7 +58,7 @@
  *   threshold (which can fall between frames), so latency there is bounded
  *   by one frame interval too.
  *
- * PRIORITY (Section 7): two-hand moves > grip moves > palm > fist, evaluated
+ * PRIORITY (Section 7): two-hand moves > grip moves > thrusts, evaluated
  * in that order every frame. A triggered move locks out all others for its
  * animation duration (LOCKOUT_MS); an active sustained move locks out
  * everything until it ends. Cooldowns are tracked separately per move (and
@@ -58,7 +78,6 @@ import {
   handSpeed,
   lm,
   normalize,
-  palmScore2D,
   scale,
   HANDS_TOGETHER_THRESHOLD,
 } from './poses';
@@ -78,8 +97,6 @@ export type MoveName =
   | 'jab-blast'
   | 'fire-stream'
   | 'cross-combo'
-  | 'palm-wave'
-  | 'flame-fan'
   | 'twin-cannon'
   | 'rising-flame'
   | 'fire-whip'
@@ -165,13 +182,15 @@ export interface FusionState {
   growthThreshold: number;
 }
 
-/** Debug view of one hand's pose classifier state. */
+/**
+ * Debug view of one hand's pose classifier state. Palm is gone from the
+ * critical path (7-move simplification); only fist (breath-charge chamber,
+ * whip-hold assist) and grip (fire-whip) are classified here.
+ */
 export interface PoseScores {
   fist: number;
-  palm: number;
   grip: number;
   fistActive: boolean;
-  palmActive: boolean;
   gripActive: boolean;
 }
 
@@ -266,8 +285,6 @@ export const NEAR_MISS_CAPACITY = 8;
 export const JAB_COOLDOWN_MS = 250; // per hand, Section 7 table
 export const COMBO_WINDOW_MS = 1500;
 
-export const PALM_WAVE_COOLDOWN_MS = 600;
-
 export const TWIN_HOLD_MS = 300;
 export const TWIN_GRACE_MS = 500; // thrust may follow this soon after the hold breaks
 export const TWIN_CHEST_Y_MIN = 0.4;
@@ -317,6 +334,27 @@ export const GRIP_ENTER_SCORE = 0.78;
 export const GRIP_EXIT_SCORE = 0.55;
 
 export const BREATH_HIP_Y = 0.7; // wrists below this line count as "at hips"
+
+/**
+ * Breath-charge chamber fist hysteresis, DERIVED FROM THE USER'S RECORDED
+ * DATA (fixtures/recorded/firebending-drill-2026-07-31.json, breath-charge
+ * take, 196 chamber-hold fist scores across the 3 recorded cycles): the
+ * sustained chamber level is p5 0.632 / median 0.711 / min 0.572 with
+ * frame-to-frame jitter p90 0.022. The standard 0.75 enter level sat ABOVE
+ * the user's entire sustained hold distribution, so the chamber never
+ * debounced and 5 of 6 detected rep windows missed. Enter is set to the
+ * recorded p5 (0.63); exit keeps the standard 0.55, which is below the
+ * recorded minimum (0.572), so an entered chamber survives the hold. The
+ * synthetic negative fixtures score fist 0.00..0.04 at rest, so the lowered
+ * enter costs the false-positive suite nothing. NOTE: on real hands a
+ * RELAXED idle hand also saturates fistScore (recorded noise pool: fist
+ * 1.00), so the fist gate does not separate a chamber from real idle; that
+ * separation comes from the hip band + stillness + the 1.0 s hold. The gate
+ * is kept because it still rejects open-handed and synthetic-rest cases.
+ */
+export const BREATH_FIST_ENTER = 0.63;
+export const BREATH_FIST_EXIT = 0.55;
+
 export const BREATH_HOLD_MS = 1000;
 export const BREATH_CHARGE_COST = 15;
 export const EMPOWER_WINDOW_MS = 3000;
@@ -325,7 +363,6 @@ export const EMPOWER_MULTIPLIER = 1.6; // consumed by the combat layer
 export const BREATH_MAX = 100;
 export const BREATH_REGEN_PER_SEC = 12;
 export const STREAM_COST_PER_SEC = 18;
-export const FAN_COST_PER_SEC = 26;
 /** A sustained move needs at least this many seconds of Breath to start. */
 export const SUSTAIN_MIN_SEC = 0.25;
 
@@ -341,8 +378,6 @@ export const LOCKOUT_MS: Readonly<Record<MoveName, number>> = {
   'jab-blast': 250,
   'fire-stream': 0, // sustained moves lock via their active state instead
   'cross-combo': 400,
-  'palm-wave': 400,
-  'flame-fan': 0,
   'twin-cannon': 800,
   'rising-flame': 600,
   'fire-whip': 500,
@@ -353,10 +388,7 @@ export const LOCKOUT_MS: Readonly<Record<MoveName, number>> = {
 // Internal per-hand state
 // ---------------------------------------------------------------------------
 
-type PoseFamily = 'fist' | 'palm';
-
 interface ThrustRecord {
-  family: PoseFamily;
   /** Time the spike condition was first observed. */
   tSpike: number;
   /** Windowed velocity captured at the peak of the spike (the punch vector). */
@@ -373,7 +405,8 @@ const ZERO_SPEED: HandSpeed = {
 class HandState {
   window: HandFrame[] = [];
   readonly fistH = new Hysteresis();
-  readonly palmH = new Hysteresis();
+  /** Breath-chamber fist hysteresis at the data-derived enter level. */
+  readonly chamberH = new Hysteresis(BREATH_FIST_ENTER, 4, BREATH_FIST_EXIT, 6);
   readonly gripH = new Hysteresis(GRIP_ENTER_SCORE, 4, GRIP_EXIT_SCORE, 6);
   gripRecent: number[] = [];
   scores: PoseScores | null = null;
@@ -406,7 +439,7 @@ class HandState {
   resetTracking(): void {
     this.window = [];
     this.fistH.reset();
-    this.palmH.reset();
+    this.chamberH.reset();
     this.gripH.reset();
     this.gripRecent = [];
     this.scores = null;
@@ -426,7 +459,6 @@ class HandState {
 interface SustainState {
   move: MoveName;
   hand: Handedness;
-  family: PoseFamily;
   costPerSec: number;
   aim: Vec3;
   lastOrigin: Vec3;
@@ -499,6 +531,13 @@ export class MoveEngine {
   private twinArmedUntil = -Infinity;
   private risingLowMs = 0;
   private risingArmedUntil = -Infinity;
+  /**
+   * Rising Flame arming is suppressed until this time after a Breath Charge
+   * fires: with the palm gate gone, the charge RELEASE (both fists rising
+   * from the hips) is geometrically a rising sweep, so the fired charge
+   * claims the posture, exactly like consumeThrust claims a hand's motion.
+   */
+  private risingSuppressUntil = -Infinity;
 
   private prevT: number | null = null;
 
@@ -544,7 +583,8 @@ export class MoveEngine {
     present: boolean;
     speed: number;
     growth: number;
-    thrustFamily: 'fist' | 'palm' | null;
+    /** True while a thrust spike is registered and awaiting resolution. */
+    thrustArmed: boolean;
     whipArmed: boolean;
   } {
     const s = this.handState(hand);
@@ -552,7 +592,7 @@ export class MoveEngine {
       present: s.present,
       speed: s.speed.speed,
       growth: s.growth,
-      thrustFamily: s.thrust ? s.thrust.family : null,
+      thrustArmed: s.thrust !== null,
       whipArmed: s.whipArmed,
     };
   }
@@ -651,8 +691,8 @@ export class MoveEngine {
       this.updateElbow(this.right, pose, 'right');
     }
 
-    this.updateHand(this.left, frame.left, 'left', dtSec);
-    this.updateHand(this.right, frame.right, 'right', dtSec);
+    this.updateHand(this.left, frame.left, dtSec);
+    this.updateHand(this.right, frame.right, dtSec);
 
     // Breath regenerates whenever no sustained move is active (Section 7).
     if (!this.sustain) {
@@ -667,14 +707,14 @@ export class MoveEngine {
       return events;
     }
 
-    // Priority order (Section 7): two-hand > grip > palm/fist thrust family.
+    // Priority order (Section 7): two-hand > grip > pose-agnostic thrusts.
     this.evalBreathCharge(events, t);
     this.evalTwinCannon(events, t);
     this.evalRisingFlame(events, t);
     this.evalWhip(events, t, 'left');
     this.evalWhip(events, t, 'right');
-    this.evalThrustFamily(events, t, 'left');
-    this.evalThrustFamily(events, t, 'right');
+    this.evalThrust(events, t, 'left');
+    this.evalThrust(events, t, 'right');
 
     return events;
   }
@@ -714,12 +754,7 @@ export class MoveEngine {
     s.lastPoseSampleT = pose.t;
   }
 
-  private updateHand(
-    s: HandState,
-    raw: HandFrame | null,
-    handedness: Handedness,
-    dtSec: number
-  ): void {
+  private updateHand(s: HandState, raw: HandFrame | null, dtSec: number): void {
     const present =
       raw !== null && raw.confidence >= CONFIDENCE_FLOOR && raw.landmarks.length >= 21;
     if (!present || raw === null) {
@@ -748,15 +783,11 @@ export class MoveEngine {
     // fist (see gestures/motion.ts).
     s.growth = bboxGrowthRate(s.window, dt);
 
-    // Palm runs on the pure-2D scorer (Round 3 Phase 4f): palmScore's
-    // facing factor divides by a z-noise-inflated 3D normal length and
-    // multiplied real palms down live; palmScore2D keeps the same winding
-    // information from landmark x/y only. On HaGRID it matches the 3D
-    // scorer's recall exactly at both hysteresis levels with better
-    // precision (docs/hagrid-report.md appendix). palmScore stays exported
-    // for comparison; tools/analyze.ts computes both on recorded takes.
+    // Palm is NOT classified here anymore (7-move simplification): no move
+    // reads a palm score, so the engine skips palmScore2D entirely. The
+    // studio's SignalTracker still records palm scores for its own review
+    // signals, and the HaGRID suite keeps both palm scorers honest.
     const fist = fistScore(raw);
-    const palm = palmScore2D(raw, handedness);
     const grip = gripScore(raw);
     // Grip runs on a short moving average; see GRIP_SMOOTH_FRAMES above.
     s.gripRecent.push(grip);
@@ -764,12 +795,11 @@ export class MoveEngine {
     let gripSum = 0;
     for (const g of s.gripRecent) gripSum += g;
     const gripSmoothed = gripSum / s.gripRecent.length;
+    s.chamberH.update(fist);
     s.scores = {
       fist,
-      palm,
       grip: gripSmoothed,
       fistActive: s.fistH.update(fist),
-      palmActive: s.palmH.update(palm),
       gripActive: s.gripH.update(gripSmoothed),
     };
   }
@@ -793,18 +823,35 @@ export class MoveEngine {
     return kind === 'breath' ? BREATH_HIP_Y : RISING_LOW_Y;
   }
 
+  /**
+   * The Twin Cannon chest band [minY, maxY]. Pose fresh: between the real
+   * shoulder line and the hip line (plain body geometry, no tuned margins);
+   * pose absent or stale: the absolute TWIN_CHEST_Y_MIN/MAX constants,
+   * exactly what every legacy replay fixture runs on.
+   */
+  private chestBand(): [number, number] {
+    const pose = this.latestPose;
+    if (this.poseFresh && pose !== null) {
+      const shoulderY = (pose.left.shoulder.y + pose.right.shoulder.y) / 2;
+      const hipY = (pose.left.hip.y + pose.right.hip.y) / 2;
+      if (shoulderY < hipY) return [shoulderY, hipY];
+    }
+    return [TWIN_CHEST_Y_MIN, TWIN_CHEST_Y_MAX];
+  }
+
   private updateArmTimers(t: number, dtMs: number): void {
     const L = this.left;
     const R = this.right;
     const both = L.present && R.present && L.wrist !== null && R.wrist !== null;
 
     // Breath Charge: both fists parked at the hips, roughly static. The hip
-    // band is pose-relative when pose is fresh (see lowBandY).
+    // band is pose-relative when pose is fresh (see lowBandY); the fist
+    // read runs at the data-derived chamber level (BREATH_FIST_ENTER).
     const breathY = this.lowBandY('breath');
     const hipCond =
       both &&
-      L.fistH.isActive &&
-      R.fistH.isActive &&
+      L.chamberH.isActive &&
+      R.chamberH.isActive &&
       (L.wrist as Vec3).y > breathY &&
       (R.wrist as Vec3).y > breathY &&
       L.speed.speed < this.th.breathStaticMax &&
@@ -816,26 +863,32 @@ export class MoveEngine {
       this.chargeFired = false;
     }
 
-    // Twin Cannon: both fists together at chest height.
+    // Twin Cannon: both wrists together at chest height (between the
+    // shoulder and hip lines when pose is fresh). Pose-agnostic since the
+    // 7-move simplification: the together-at-chest hold plus the joint
+    // thrust is the differentiator, not finger curl.
+    const [chestMin, chestMax] = this.chestBand();
     const chest =
       both &&
-      inBand((L.wrist as Vec3).y, TWIN_CHEST_Y_MIN, TWIN_CHEST_Y_MAX) &&
-      inBand((R.wrist as Vec3).y, TWIN_CHEST_Y_MIN, TWIN_CHEST_Y_MAX);
+      inBand((L.wrist as Vec3).y, chestMin, chestMax) &&
+      inBand((R.wrist as Vec3).y, chestMin, chestMax);
     const together =
       both && dist(L.wrist as Vec3, R.wrist as Vec3) < this.togetherThreshold;
-    if (chest && together && L.fistH.isActive && R.fistH.isActive) {
+    if (chest && together) {
       this.twinHoldMs += dtMs;
       if (this.twinHoldMs >= TWIN_HOLD_MS) this.twinArmedUntil = t + TWIN_GRACE_MS;
     } else {
       this.twinHoldMs = 0;
     }
 
-    // Rising Flame: both palms low (pose-relative band when pose is fresh).
+    // Rising Flame: both hands low (pose-relative band when pose is fresh).
+    // Pose-agnostic since the 7-move simplification: the low hold plus the
+    // fast two-arm upward sweep is the differentiator. Arming is suppressed
+    // briefly after a Breath Charge fires (see risingSuppressUntil).
     const risingY = this.lowBandY('rising');
     const low =
       both &&
-      L.palmH.isActive &&
-      R.palmH.isActive &&
+      t >= this.risingSuppressUntil &&
       (L.wrist as Vec3).y > risingY &&
       (R.wrist as Vec3).y > risingY;
     if (low) {
@@ -883,7 +936,16 @@ export class MoveEngine {
       cooldownMs: 0,
       lockoutMs: LOCKOUT_MS['breath-charge'],
     });
-    if (emitted) this.empowerUntil = t + EMPOWER_WINDOW_MS;
+    if (emitted) {
+      this.empowerUntil = t + EMPOWER_WINDOW_MS;
+      // The charge claims the at-hips posture: its release (both fists
+      // rising fast off the hips) must not read as a Rising Flame sweep.
+      // Reuses the standard consume window (THRUST_CONSUME_MS); a real
+      // rising needs a fresh low hold, which takes longer than this anyway.
+      this.risingLowMs = 0;
+      this.risingArmedUntil = -Infinity;
+      this.risingSuppressUntil = t + THRUST_CONSUME_MS;
+    }
   }
 
   private evalTwinCannon(events: MoveEvent[], t: number): void {
@@ -924,14 +986,13 @@ export class MoveEngine {
     if (!armed) return;
     const L = this.left;
     const R = this.right;
-    const bothPalms =
-      L.present && R.present && L.palmH.isActive && R.palmH.isActive;
+    const bothHands = L.present && R.present;
     const sweep =
-      bothPalms &&
+      bothHands &&
       L.speed.velocity.y <= -this.th.risingUpVel &&
       R.speed.velocity.y <= -this.th.risingUpVel;
     if (!sweep) {
-      if (this.debugEnabled && bothPalms) {
+      if (this.debugEnabled && bothHands) {
         // The limiting hand's upward velocity (screen y grows down).
         const upVel = Math.min(-L.speed.velocity.y, -R.speed.velocity.y);
         if (upVel >= NEAR_MISS_FRACTION * this.th.risingUpVel) {
@@ -943,6 +1004,10 @@ export class MoveEngine {
 
     this.risingLowMs = 0;
     this.risingArmedUntil = -Infinity;
+    // The sweep belongs to Rising Flame: never let the same two-arm motion
+    // fall through and register per-hand thrust spikes.
+    this.consumeThrust(L, t);
+    this.consumeThrust(R, t);
 
     const aimVel = scale(add(L.speed.velocity, R.speed.velocity), 0.5);
     this.emit(events, t, {
@@ -993,88 +1058,75 @@ export class MoveEngine {
   }
 
   // -------------------------------------------------------------------------
-  // Thrust family (fist: jab / stream / combo; palm: wave / fan)
+  // Thrusts (pose-agnostic: jab / cross-combo / fire-stream)
   // -------------------------------------------------------------------------
 
-  private evalThrustFamily(events: MoveEvent[], t: number, hand: Handedness): void {
+  private evalThrust(events: MoveEvent[], t: number, hand: Handedness): void {
     const s = this.handState(hand);
     if (!s.present || s.scores === null || s.wrist === null) return;
 
-    // Grip priority note: the whip (evaluated earlier) claims lateral swings
-    // and consumes the hand's thrust. The synthetic fist and grip poses are
-    // geometrically close, so an active grip must NOT veto the fist family
-    // here; the two are separated by their motion signatures instead (a
-    // thrust spike is toward the camera, a whip swing is lateral).
+    // Priority note: the whip (evaluated earlier) claims lateral swings and
+    // the two-hand moves consume joint motions, so a thrust reaching this
+    // point is a genuine one-arm event. Since the 7-move simplification
+    // there is NO finger-pose requirement here: the elbow/speed/growth
+    // fusion alone decides, and a palm push resolves exactly like a fist
+    // jab (finger curl is irrelevant to the thrust family).
 
     // Register or refresh a thrust spike.
     if (t >= s.suppressThrustUntil && this.isSpike(s)) {
-      const family = this.thrustFamily(s);
-      if (family !== null) {
-        if (s.thrust === null || s.thrust.family !== family) {
-          s.thrust = {
-            family,
-            tSpike: t,
-            aimVel: s.speed.velocity,
-            peakSpeed: s.speed.speed,
-          };
-        } else if (s.speed.speed > s.thrust.peakSpeed) {
-          // Track the peak of the spike: that is the punch vector.
-          s.thrust.peakSpeed = s.speed.speed;
-          s.thrust.aimVel = s.speed.velocity;
-        }
+      if (s.thrust === null) {
+        s.thrust = {
+          tSpike: t,
+          aimVel: s.speed.velocity,
+          peakSpeed: s.speed.speed,
+        };
+      } else if (s.speed.speed > s.thrust.peakSpeed) {
+        // Track the peak of the spike: that is the punch vector.
+        s.thrust.peakSpeed = s.speed.speed;
+        s.thrust.aimVel = s.speed.velocity;
       }
     } else if (this.debugEnabled && t >= s.suppressThrustUntil && s.thrust === null) {
       // Near-miss tracing: a would-be thrust that failed its final physical
       // condition while at least NEAR_MISS_FRACTION of the way there. The
       // record names the SPECIFIC failing fusion signal.
-      const family = this.thrustFamily(s);
-      if (family !== null) {
-        const move: MoveName = family === 'fist' ? 'jab-blast' : 'palm-wave';
-        const sp = s.speed.speed;
-        if (this.poseFresh) {
-          if (s.elbowVel < this.th.elbowExtendVel) {
-            // The PRIMARY (elbow extension) is what refused the spike.
-            if (s.elbowVel >= NEAR_MISS_FRACTION * this.th.elbowExtendVel) {
-              this.recordNearMiss(t, move, 'elbowVel', s.elbowVel, this.th.elbowExtendVel);
-            }
-          } else {
-            // Primary passed; no secondary crossed. Report both pairs.
-            const frac = Math.max(
-              sp / this.th.spikeSpeed,
-              s.growth / this.th.spikeGrowth,
+      const move: MoveName = 'jab-blast';
+      const sp = s.speed.speed;
+      if (this.poseFresh) {
+        if (s.elbowVel < this.th.elbowExtendVel) {
+          // The PRIMARY (elbow extension) is what refused the spike.
+          if (s.elbowVel >= NEAR_MISS_FRACTION * this.th.elbowExtendVel) {
+            this.recordNearMiss(t, move, 'elbowVel', s.elbowVel, this.th.elbowExtendVel);
+          }
+        } else {
+          // Primary passed; no secondary crossed. Report both pairs.
+          const frac = Math.max(
+            sp / this.th.spikeSpeed,
+            s.growth / this.th.spikeGrowth,
+          );
+          if (frac >= NEAR_MISS_FRACTION) {
+            this.recordNearMiss(
+              t,
+              move,
+              'secondary',
+              sp,
+              this.th.spikeSpeed,
+              s.growth,
+              this.th.spikeGrowth,
             );
-            if (frac >= NEAR_MISS_FRACTION) {
-              this.recordNearMiss(
-                t,
-                move,
-                'secondary',
-                sp,
-                this.th.spikeSpeed,
-                s.growth,
-                this.th.spikeGrowth,
-              );
-            }
           }
-        } else if (sp < this.th.spikeSpeed) {
-          if (sp >= NEAR_MISS_FRACTION * this.th.spikeSpeed) {
-            this.recordNearMiss(t, move, 'speed', sp, this.th.spikeSpeed);
-          }
-        } else if (s.growth >= NEAR_MISS_FRACTION * this.th.spikeGrowth) {
-          // Speed passed; the growth gate is what refused the spike.
-          this.recordNearMiss(t, move, 'growth', s.growth, this.th.spikeGrowth);
         }
+      } else if (sp < this.th.spikeSpeed) {
+        if (sp >= NEAR_MISS_FRACTION * this.th.spikeSpeed) {
+          this.recordNearMiss(t, move, 'speed', sp, this.th.spikeSpeed);
+        }
+      } else if (s.growth >= NEAR_MISS_FRACTION * this.th.spikeGrowth) {
+        // Speed passed; the growth gate is what refused the spike.
+        this.recordNearMiss(t, move, 'growth', s.growth, this.th.spikeGrowth);
       }
     }
 
     const th = s.thrust;
     if (th === null) return;
-
-    // The pose must survive until the thrust resolves.
-    const poseStill = th.family === 'fist' ? s.fistH.isActive : s.palmH.isActive;
-    if (!poseStill) {
-      s.thrust = null;
-      return;
-    }
 
     // Retract within the hold window resolves to the discrete move. The
     // retract signal is windowed bbox SHRINK (the on-screen hand getting
@@ -1082,35 +1134,32 @@ export class MoveEngine {
     // elbow RE-FLEX (the arm folding back) also counts as retract.
     if (this.isRetract(s)) {
       s.thrust = null;
-      if (th.family === 'fist') this.emitJab(events, t, hand, s, th);
-      else this.emitPalmWave(events, t, hand, s, th);
+      this.emitJab(events, t, hand, s, th);
       return;
     }
 
-    // Held extended past the window resolves to the sustained move.
+    // Held extended past the window resolves to Fire Stream, the only
+    // sustained move since the 7-move simplification.
     if (t - th.tSpike >= EXTEND_HOLD_MS) {
       s.thrust = null;
-      const move: MoveName = th.family === 'fist' ? 'fire-stream' : 'flame-fan';
-      const costPerSec = th.family === 'fist' ? STREAM_COST_PER_SEC : FAN_COST_PER_SEC;
       const aim = this.thrustAim(hand, th.aimVel);
       const emitted = this.emit(events, t, {
-        move,
+        move: 'fire-stream',
         hand,
         kind: 'sustain-start',
         aim,
         origin: s.wrist,
         completedAt: th.tSpike + EXTEND_HOLD_MS,
         cost: 0,
-        minBreath: costPerSec * SUSTAIN_MIN_SEC,
+        minBreath: STREAM_COST_PER_SEC * SUSTAIN_MIN_SEC,
         cooldownMs: 0,
         lockoutMs: 0,
       });
       if (emitted) {
         this.sustain = {
-          move,
+          move: 'fire-stream',
           hand,
-          family: th.family,
-          costPerSec,
+          costPerSec: STREAM_COST_PER_SEC,
           aim,
           lastOrigin: s.wrist,
         };
@@ -1156,26 +1205,6 @@ export class MoveEngine {
     }
   }
 
-  private emitPalmWave(
-    events: MoveEvent[],
-    t: number,
-    hand: Handedness,
-    s: HandState,
-    th: ThrustRecord
-  ): void {
-    this.emit(events, t, {
-      move: 'palm-wave',
-      hand,
-      kind: 'trigger',
-      aim: this.thrustAim(hand, th.aimVel),
-      origin: s.wrist as Vec3,
-      completedAt: t,
-      cost: 0,
-      cooldownMs: PALM_WAVE_COOLDOWN_MS,
-      lockoutMs: LOCKOUT_MS['palm-wave'],
-    });
-  }
-
   // -------------------------------------------------------------------------
   // Sustained move lifecycle
   // -------------------------------------------------------------------------
@@ -1188,14 +1217,14 @@ export class MoveEngine {
     this.breathValue -= su.costPerSec * dtSec;
     if (s.wrist !== null) su.lastOrigin = s.wrist;
 
-    const poseActive =
-      s.present && (su.family === 'fist' ? s.fistH.isActive : s.palmH.isActive);
-    // Windowed bbox shrink (or, pose fresh, a fast elbow re-flex): robust
-    // against noise over a long hold (the retract threshold sits well above
-    // the measured hold-noise floor); a real retract crosses it within ~2
-    // frames.
+    // Pose-agnostic since the 7-move simplification: the stream ends when
+    // the hand is lost, the arm retracts, or Breath runs out; finger curl
+    // never ends it. Windowed bbox shrink (or, pose fresh, a fast elbow
+    // re-flex): robust against noise over a long hold (the retract
+    // threshold sits well above the measured hold-noise floor); a real
+    // retract crosses it within ~2 frames.
     const retracting = s.present && this.isRetract(s);
-    const ended = this.breathValue <= 0 || !poseActive || retracting;
+    const ended = this.breathValue <= 0 || !s.present || retracting;
 
     if (ended) {
       this.breathValue = Math.max(0, this.breathValue);
@@ -1314,12 +1343,12 @@ export class MoveEngine {
   }
 
   /**
-   * Thrust-family aim (jab / cross / palm-wave / stream / fan): when pose is
-   * fresh, blend the forearm direction (elbow -> wrist, screen space, z
-   * borrowed from the velocity aim since 2D pose says nothing about depth)
-   * with the velocity aim at AIM_FOREARM_WEIGHT / AIM_VELOCITY_WEIGHT
-   * (tunable, see the constants). Pose absent: pure velocity aim, exactly
-   * as before. Twin / rising / whip keep the velocity aim regardless.
+   * Thrust-family aim (jab / cross / stream): when pose is fresh, blend the
+   * forearm direction (elbow -> wrist, screen space, z borrowed from the
+   * velocity aim since 2D pose says nothing about depth) with the velocity
+   * aim at AIM_FOREARM_WEIGHT / AIM_VELOCITY_WEIGHT (tunable, see the
+   * constants). Pose absent: pure velocity aim, exactly as before.
+   * Twin / rising / whip keep the velocity aim regardless.
    */
   private thrustAim(hand: Handedness, aimVel: Vec3): Vec3 {
     const velAim = this.aimOf(aimVel);
@@ -1341,20 +1370,6 @@ export class MoveEngine {
     });
     if (blended.x === 0 && blended.y === 0 && blended.z === 0) return velAim;
     return blended;
-  }
-
-  private thrustFamily(s: HandState): PoseFamily | null {
-    const fistA = s.fistH.isActive;
-    const palmA = s.palmH.isActive;
-    if (fistA && palmA) {
-      // Both linger during transitions; the instantaneous score decides,
-      // with the Section 7 tie priority palm > fist.
-      const sc = s.scores;
-      return sc !== null && sc.palm >= sc.fist ? 'palm' : 'fist';
-    }
-    if (palmA) return 'palm';
-    if (fistA) return 'fist';
-    return null;
   }
 
   private consumeThrust(s: HandState, t: number): void {

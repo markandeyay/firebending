@@ -112,7 +112,13 @@ function crossComboSpec(): FixtureSpec {
   };
 }
 
-/** Open palm raised, fast thrust toward the camera, quick retract. */
+/**
+ * Open palm raised, fast thrust toward the camera, quick retract. Since the
+ * 7-move simplification (palm removed from the critical path) this motion
+ * is expected to fire jab-blast: thrust detection is pose-agnostic. The
+ * label stays 'palm-wave' because the studio/analyze pipeline and tests
+ * reference the recording by name.
+ */
 function palmWaveSpec(): FixtureSpec {
   const durationMs = 1800;
   return {
@@ -131,7 +137,12 @@ function palmWaveSpec(): FixtureSpec {
   };
 }
 
-/** Palm thrust, then held extended ~960 ms with a slow lateral sweep. */
+/**
+ * Palm thrust, then held extended ~960 ms with a slow lateral sweep. Since
+ * the 7-move simplification this is a sustained thrust and must run a
+ * fire-stream lifecycle; the label stays 'flame-fan' for the same
+ * name-stability reason as palm-wave above.
+ */
 function flameFanSpec(): FixtureSpec {
   const durationMs = 2600;
   return {

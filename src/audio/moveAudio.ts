@@ -28,13 +28,11 @@ import type { CoalHandle, StopHandle, SustainHandle } from './engine';
 export interface EngineLike {
   jab(empowered?: boolean): void;
   crossCombo(): void;
-  palmWave(): void;
   twinCannon(empowered?: boolean): void;
   whipCrack(): void;
   risingFlame(): void;
   breathCharge(): StopHandle;
   streamStart(): SustainHandle;
-  fanStart(): SustainHandle;
   killHit(): void;
   coalWhistle(flightTimeSec: number): CoalHandle;
   duck(amount: number, ms: number): void;
@@ -155,9 +153,6 @@ export class MoveAudio {
       case 'cross-combo':
         this.engine.crossCombo();
         return;
-      case 'palm-wave':
-        this.engine.palmWave();
-        return;
       case 'twin-cannon':
         this.engine.twinCannon(e.empowered);
         return;
@@ -178,17 +173,16 @@ export class MoveAudio {
         return;
       }
       case 'fire-stream':
-      case 'flame-fan':
         // Sustained moves never arrive as plain triggers; ignore defensively.
         return;
     }
   }
 
   private onSustainStart(e: MoveEvent): void {
-    if (e.move !== 'fire-stream' && e.move !== 'flame-fan') return;
+    if (e.move !== 'fire-stream') return;
     this.stopCharge(); // an empowered sustain consumes the charge too
     this.stopSustain(); // the engine allows one sustain at a time; mirror it
-    const handle = e.move === 'fire-stream' ? this.engine.streamStart() : this.engine.fanStart();
+    const handle = this.engine.streamStart();
     handle.setIntensity(TICK_INTENSITY);
     this.sustain = {
       move: e.move,

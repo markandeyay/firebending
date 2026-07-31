@@ -43,13 +43,11 @@ function ev(
 
 function makeMock() {
   const streams: Array<{ setIntensity: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }> = [];
-  const fans: Array<{ setIntensity: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }> = [];
   const charges: Array<{ stop: ReturnType<typeof vi.fn> }> = [];
   const coals: Array<{ land: ReturnType<typeof vi.fn> }> = [];
   const engine = {
     jab: vi.fn(),
     crossCombo: vi.fn(),
-    palmWave: vi.fn(),
     twinCannon: vi.fn(),
     whipCrack: vi.fn(),
     risingFlame: vi.fn(),
@@ -63,11 +61,6 @@ function makeMock() {
       streams.push(h);
       return h;
     }),
-    fanStart: vi.fn(() => {
-      const h = { setIntensity: vi.fn(), stop: vi.fn() };
-      fans.push(h);
-      return h;
-    }),
     killHit: vi.fn(),
     coalWhistle: vi.fn((_flightTimeSec: number) => {
       const h = { land: vi.fn() };
@@ -76,7 +69,7 @@ function makeMock() {
     }),
     duck: vi.fn(),
   } satisfies EngineLike;
-  return { engine, streams, fans, charges, coals };
+  return { engine, streams, charges, coals };
 }
 
 afterEach(() => {
@@ -152,7 +145,6 @@ describe('AudioEngine headless', () => {
     const moves: MoveName[] = [
       'jab-blast',
       'cross-combo',
-      'palm-wave',
       'twin-cannon',
       'rising-flame',
       'fire-whip',
@@ -163,8 +155,6 @@ describe('AudioEngine headless', () => {
       audio.handleEvent(ev('fire-stream', 'sustain-start'));
       audio.handleEvent(ev('fire-stream', 'sustain-tick'));
       audio.handleEvent(ev('fire-stream', 'sustain-end'));
-      audio.handleEvent(ev('flame-fan', 'sustain-start'));
-      audio.handleEvent(ev('flame-fan', 'sustain-end'));
       audio.onKill();
       audio.onHitStop(120);
       audio.onCoalLob(1.4);
@@ -184,7 +174,6 @@ describe('MoveAudio mapping', () => {
   const triggerMap: Array<[MoveName, keyof ReturnType<typeof makeMock>['engine']]> = [
     ['jab-blast', 'jab'],
     ['cross-combo', 'crossCombo'],
-    ['palm-wave', 'palmWave'],
     ['twin-cannon', 'twinCannon'],
     ['rising-flame', 'risingFlame'],
     ['fire-whip', 'whipCrack'],
@@ -202,19 +191,17 @@ describe('MoveAudio mapping', () => {
         if (other !== spyName) expect(engine[other]).not.toHaveBeenCalled();
       }
       expect(engine.streamStart).not.toHaveBeenCalled();
-      expect(engine.fanStart).not.toHaveBeenCalled();
     });
   }
 
-  it('fire-stream sustain-start calls streamStart, flame-fan calls fanStart', () => {
+  it('fire-stream sustain-start calls streamStart (the only sustained move)', () => {
     const { engine } = makeMock();
     const audio = new MoveAudio(engine);
     audio.handleEvent(ev('fire-stream', 'sustain-start'));
     expect(engine.streamStart).toHaveBeenCalledTimes(1);
-    expect(engine.fanStart).not.toHaveBeenCalled();
     audio.handleEvent(ev('fire-stream', 'sustain-end'));
-    audio.handleEvent(ev('flame-fan', 'sustain-start'));
-    expect(engine.fanStart).toHaveBeenCalledTimes(1);
+    audio.handleEvent(ev('fire-stream', 'sustain-start'));
+    expect(engine.streamStart).toHaveBeenCalledTimes(2);
   });
 
   it('empowered flag passes through to jab and twin cannon', () => {
@@ -260,27 +247,26 @@ describe('MoveAudio sustain lifecycle', () => {
     const audio = new MoveAudio(engine);
     expect(() => {
       audio.handleEvent(ev('fire-stream', 'sustain-tick'));
-      audio.handleEvent(ev('flame-fan', 'sustain-end'));
+      audio.handleEvent(ev('fire-stream', 'sustain-end'));
     }).not.toThrow();
     expect(engine.streamStart).not.toHaveBeenCalled();
-    expect(engine.fanStart).not.toHaveBeenCalled();
   });
 
   it('a tick for a different move does not feed the active sustain', () => {
     const { engine, streams } = makeMock();
     const audio = new MoveAudio(engine);
     audio.handleEvent(ev('fire-stream', 'sustain-start'));
-    audio.handleEvent(ev('flame-fan', 'sustain-tick'));
+    audio.handleEvent(ev('jab-blast', 'sustain-tick'));
     expect(streams[0]?.setIntensity).toHaveBeenCalledTimes(1); // start only
   });
 
   it('a new sustain-start stops the previous handle first', () => {
-    const { engine, streams, fans } = makeMock();
+    const { engine, streams } = makeMock();
     const audio = new MoveAudio(engine);
     audio.handleEvent(ev('fire-stream', 'sustain-start'));
-    audio.handleEvent(ev('flame-fan', 'sustain-start'));
+    audio.handleEvent(ev('fire-stream', 'sustain-start'));
     expect(streams[0]?.stop).toHaveBeenCalledTimes(1);
-    expect(fans[0]?.stop).not.toHaveBeenCalled();
+    expect(streams[1]?.stop).not.toHaveBeenCalled();
   });
 
   it('safety timeout stops the handle after 0.6s without ticks', () => {
@@ -314,13 +300,13 @@ describe('MoveAudio sustain lifecycle', () => {
 
   it('dispose stops the active sustain and clears the safety timer', () => {
     vi.useFakeTimers();
-    const { engine, fans } = makeMock();
+    const { engine, streams } = makeMock();
     const audio = new MoveAudio(engine);
-    audio.handleEvent(ev('flame-fan', 'sustain-start'));
+    audio.handleEvent(ev('fire-stream', 'sustain-start'));
     audio.dispose();
-    expect(fans[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(streams[0]?.stop).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(SUSTAIN_SAFETY_MS * 2);
-    expect(fans[0]?.stop).toHaveBeenCalledTimes(1); // timer was cleared
+    expect(streams[0]?.stop).toHaveBeenCalledTimes(1); // timer was cleared
   });
 });
 

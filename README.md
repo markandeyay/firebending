@@ -1,6 +1,6 @@
 # FIREBENDING
 
-![Ember Fan in action](docs/firebending-fan.gif)
+![Sustained flame in action](docs/firebending-fan.gif)
 
 Punch at your webcam and fire comes out of your hands. A browser martial-arts game with no controller, no keyboard, no VR: the camera is the only sensor.
 
@@ -8,9 +8,9 @@ Punch at your webcam and fire comes out of your hands. A browser martial-arts ga
 
 ## How it works
 
-Your webcam feed goes through MediaPipe hand and face landmarkers, entirely on your machine. The raw landmarks pass through One Euro filters and confidence gates so a jittery hand never becomes a jittery flame. Pure-function pose scorers (fist, palm, grip) feed a nine-move state machine with hysteresis, so a move fires when you commit to it and never on a single noisy frame. Every projectile and stream is aimed along the filtered velocity of the hand that threw it. The hand is the crosshair.
+Your webcam feed goes through MediaPipe hand, body-pose and face landmarkers, entirely on your machine. The raw landmarks pass through One Euro filters and confidence gates so a jittery hand never becomes a jittery flame. Thrusts are detected pose-agnostically from motion alone (elbow extension fused with wrist speed and apparent-size growth), so a punch fires whether your fingers read as a fist or a palm; the grip pose scorer feeds only the whip. A seven-move state machine with hysteresis fires when you commit to a move and never on a single noisy frame. Every projectile and stream is aimed along the filtered velocity of the hand that threw it. The hand is the crosshair.
 
-The pipeline: webcam frame, MediaPipe landmarks, One Euro filtering, pose scoring, nine-move state machine, fire.
+The pipeline: webcam frame, MediaPipe landmarks, One Euro filtering, motion fusion, seven-move state machine, fire.
 
 ![Gameplay](docs/firebending-demo.gif)
 
@@ -18,13 +18,11 @@ The pipeline: webcam frame, MediaPipe landmarks, One Euro filtering, pose scorin
 
 | Move | Gesture | Effect |
 |---|---|---|
-| Cinder Bolt | Quick punch toward the camera | Fast small fireball along your punch line |
-| Kiln Lance | Hold the fist extended after a punch | Narrow sustained jet, steer it with your fist |
-| Third Strike Comet | Three alternating punches within 1.5 seconds | The third hit upgrades to a heavy comet with knockback |
-| Hearth Wave | Open palm thrust | Wide short-range cone that shoves enemies back |
-| Ember Fan | Hold the open palm extended | Wide sustained flame cone, sweep your arm to steer it |
-| Furnace Shot | Both fists together at the chest, then thrust | Giant fireball, screen shake, slow motion on a kill |
-| Kindled Wall | Both palms low, fast upward sweep | Wall of flame that blocks incoming projectiles |
+| Cinder Bolt | Quick thrust toward the camera, any hand shape | Fast small fireball along your punch line |
+| Kiln Lance | Hold the arm extended after a thrust | Narrow sustained jet, steer it with your hand |
+| Third Strike Comet | Three alternating thrusts within 1.5 seconds | The third hit upgrades to a heavy comet with knockback |
+| Furnace Shot | Both hands together at the chest, then a joint thrust | Giant fireball, screen shake, slow motion on a kill |
+| Kindled Wall | Both hands low, fast upward sweep | Wall of flame that blocks incoming projectiles |
 | Cinder Lash | Raised grip held, then a fast sideways swing | Arcing whip crack in the swing direction |
 | Inner Coal | Both fists at the hips, held one second | Embers gather at your fists; your next move is empowered |
 

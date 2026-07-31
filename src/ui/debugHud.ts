@@ -30,7 +30,6 @@ export const REFRESH_HZ = 10;
 /** Short move labels for near-miss lines. */
 const SHORT_NAME: Partial<Record<MoveName, string>> = {
   'jab-blast': 'JAB',
-  'palm-wave': 'PALM',
   'rising-flame': 'RISING',
   'fire-whip': 'WHIP',
   'twin-cannon': 'TWIN',
@@ -140,12 +139,11 @@ export class DebugHud {
       const flag = (on: boolean): string => (on ? '*' : ' ');
       lines.push(
         `${label}  fist ${s.fist.toFixed(2)}${flag(s.fistActive)} ` +
-          `palm ${s.palm.toFixed(2)}${flag(s.palmActive)} ` +
           `grip ${s.grip.toFixed(2)}${flag(s.gripActive)}`,
       );
       lines.push(
         `    speed ${m.speed.toFixed(2)} growth ${m.growth.toFixed(2)} ` +
-          `thrust:${m.thrustFamily ?? '-'} whip:${m.whipArmed ? 'armed' : '-'}`,
+          `thrust:${m.thrustArmed ? 'armed' : '-'} whip:${m.whipArmed ? 'armed' : '-'}`,
       );
     };
 

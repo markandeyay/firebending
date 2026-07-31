@@ -74,8 +74,9 @@ export interface MoveDamageSpec {
 }
 
 /**
- * Per Section 7: jab light; cross-combo bigger plus knockback; palm-wave a
- * short-range pushback; stream/fan sustained per-second ticks; twin-cannon
+ * Per Section 7, folded to the 7-move set (palm-wave and flame-fan retired
+ * with the pose-agnostic thrust simplification): jab light; cross-combo
+ * bigger plus knockback; stream sustained per-second ticks; twin-cannon
  * huge with hit-stop; whip medium; rising-flame purely defensive;
  * breath-charge deals nothing itself (it empowers the next move by
  * EMPOWER_MULTIPLIER, applied here to whatever it empowered).
@@ -83,9 +84,7 @@ export interface MoveDamageSpec {
 export const DAMAGE_TABLE: Readonly<Record<MoveName, MoveDamageSpec>> = {
   'jab-blast': { damage: 8, impulse: 0, perSecond: false },
   'cross-combo': { damage: 18, impulse: 20, perSecond: false },
-  'palm-wave': { damage: 6, impulse: 26, perSecond: false },
   'fire-stream': { damage: 14, impulse: 0, perSecond: true },
-  'flame-fan': { damage: 20, impulse: 0, perSecond: true },
   'twin-cannon': { damage: 42, impulse: 40, perSecond: false },
   'rising-flame': { damage: 0, impulse: 0, perSecond: false },
   'fire-whip': { damage: 16, impulse: 14, perSecond: false },
@@ -103,21 +102,15 @@ export const PLAYER_WORLD_POSITION = new THREE.Vector3(0, 1.4, 0);
 export const CHEST_HEIGHT = 1.25;
 export const CHEST_RADIUS = 0.55;
 
-/** Palm Wave: wide cone, short range only (effective within 3 m). */
-export const PALM_WAVE_RANGE = 3.0;
-export const PALM_WAVE_HALF_ANGLE_RAD = 0.7;
-
 /** Fire Whip: melee arc reach and lateral tolerance around dead ahead. */
 export const WHIP_RANGE = 4.0;
 export const WHIP_LATERAL_TOLERANCE = 0.75;
 /** |world aim x| below this treats the swing as a full frontal arc. */
 const WHIP_MIN_LATERAL_AIM = 0.35;
 
-/** Sustained beams: max ray length (stream) and cone reach (fan). */
+/** Sustained beam: max ray length and radius of the fire-stream. */
 export const STREAM_RANGE = 14.0;
 export const STREAM_BEAM_RADIUS = 0.25;
-export const FAN_RANGE = 8.0;
-export const FAN_HALF_ANGLE_RAD = 0.6;
 
 /** Twin Cannon feel (Section 7): 120 ms hit-stop, slow-mo on kill. */
 export const TWIN_HIT_STOP_MS = 120;
@@ -474,8 +467,8 @@ export class CombatSystem {
 
   /**
    * Route one MoveEvent. The effects provider already spawned the visuals;
-   * combat only does damage bookkeeping: instant melee-range hits (fire-whip,
-   * palm-wave), pending empowerment for projectile moves, and sustain tick
+   * combat only does damage bookkeeping: instant melee-range hits
+   * (fire-whip), pending empowerment for projectile moves, and sustain tick
    * damage (delegated to applySustainTick).
    */
   handleMoveEvent(e: MoveEvent): void {
@@ -492,7 +485,6 @@ export class CombatSystem {
           this.pendingEmpower.set(e.move, e.t + PENDING_EMPOWER_TTL_MS);
         }
         if (e.move === 'fire-whip') this.whipInstantHit(e);
-        else if (e.move === 'palm-wave') this.palmInstantHit(e);
         break;
       case 'sustain-start':
         this.sustainBook.set(sustainKey(e), { lastT: e.t, empowered: e.empowered });
@@ -507,7 +499,7 @@ export class CombatSystem {
   }
 
   /**
-   * Apply one sustained-beam tick (fire-stream ray, flame-fan cone) against
+   * Apply one sustained-beam tick (the fire-stream ray) against
    * the constructs, dealing damage * dt. Damage per second comes from
    * DAMAGE_TABLE; dt derives from consecutive tick timestamps (first tick
    * without a preceding sustain-start assumes one 30 fps frame). Returns the
@@ -530,7 +522,7 @@ export class CombatSystem {
 
     const origin = beamOriginToWorld(e.origin, this.playerPos, this.playerQuat, _origin);
     const aim = screenAimToWorld(e.aim, this.playerQuat, _dir);
-    const target = this.pickBeamTarget(e.move, origin, aim);
+    const target = this.pickBeamTarget(origin, aim);
     if (!target) return 0;
 
     const empowered = book.empowered || e.empowered;
@@ -570,24 +562,6 @@ export class CombatSystem {
         if (_local.x * side < -WHIP_LATERAL_TOLERANCE) continue;
       }
       this.dealInstantHit(construct, 'fire-whip', e.empowered, aimWorld);
-    }
-  }
-
-  /**
-   * Palm Wave: a wide cone of pushback, short range only (PALM_WAVE_RANGE).
-   */
-  private palmInstantHit(e: MoveEvent): void {
-    const aim = screenAimToWorld(e.aim, this.playerQuat, _dir);
-    const origin = beamOriginToWorld(e.origin, this.playerPos, this.playerQuat, _origin);
-    for (const construct of this.deps.manager.constructs) {
-      if (!construct.isAlive) continue;
-      const center = this.chestCenter(construct, _center);
-      _toC.copy(center).sub(origin);
-      const dist = _toC.length();
-      if (dist > PALM_WAVE_RANGE || dist < 1e-6) continue;
-      const cosAngle = _toC.divideScalar(dist).dot(aim);
-      if (cosAngle < Math.cos(PALM_WAVE_HALF_ANGLE_RAD)) continue;
-      this.dealInstantHit(construct, 'palm-wave', e.empowered, aim);
     }
   }
 
@@ -807,7 +781,6 @@ export class CombatSystem {
   }
 
   private pickBeamTarget(
-    move: MoveName,
     origin: THREE.Vector3,
     dir: THREE.Vector3,
   ): Construct | null {
@@ -819,17 +792,10 @@ export class CombatSystem {
       _toC.copy(center).sub(origin);
       const along = _toC.dot(dir);
       if (along <= 0) continue; // behind the beam
-      if (move === 'flame-fan') {
-        const dist = _toC.length();
-        if (dist > FAN_RANGE) continue;
-        const cosAngle = along / dist;
-        if (cosAngle < Math.cos(FAN_HALF_ANGLE_RAD)) continue;
-      } else {
-        if (along > STREAM_RANGE) continue;
-        const offAxisSq = _toC.lengthSq() - along * along;
-        const reach = CHEST_RADIUS + STREAM_BEAM_RADIUS;
-        if (offAxisSq > reach * reach) continue;
-      }
+      if (along > STREAM_RANGE) continue;
+      const offAxisSq = _toC.lengthSq() - along * along;
+      const reach = CHEST_RADIUS + STREAM_BEAM_RADIUS;
+      if (offAxisSq > reach * reach) continue;
       if (along < bestAlong) {
         bestAlong = along;
         best = construct;

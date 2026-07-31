@@ -66,7 +66,11 @@ const COLOR_BAR_BG = '#2a231c';
  */
 export const REPLAY_VELOCITY_SCALE = 1.1;
 
-/** The 10 positive fixtures, in cycle order. */
+/**
+ * The 10 positive fixtures, in cycle order. The palm-wave and flame-fan
+ * recordings are kept: since the 7-move simplification they are thrust
+ * motions and must fire jab-blast and fire-stream respectively.
+ */
 export const POSITIVE_FIXTURES: readonly string[] = [
   'jab-left',
   'jab-right',
@@ -443,8 +447,6 @@ export async function mountMovesDebug(
       ctx.fillText(label + (s === null ? ' (absent)' : ''), 16, y);
       y += 14;
       drawBar(16, y, 'fist', s?.fist ?? 0, s?.fistActive ?? false, COLOR_AMBER);
-      y += 16;
-      drawBar(16, y, 'palm', s?.palm ?? 0, s?.palmActive ?? false, COLOR_AMBER);
       y += 16;
       drawBar(16, y, 'grip', s?.grip ?? 0, s?.gripActive ?? false, COLOR_AMBER);
       y += 26;

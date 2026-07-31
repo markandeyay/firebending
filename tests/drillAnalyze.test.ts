@@ -1,13 +1,16 @@
 /**
- * Analyze-pipeline test (Round 3 Phase 4f): synthesizes a fake studio
- * export IN THE TEST from the committed synthetic fixtures, piped through
- * the REAL SignalTracker (src/studio/signals.ts) and wrapped in the export
- * schema with meta.synthetic = true, then asserts the full tools/analyze.ts
- * pipeline: replay through a real MoveEngine, fired counts inside rep
- * windows, a deliberate miss with blocker diagnosis, false-positive
- * detection on a negative take, threshold proposals, the palm 3D-vs-2D
- * comparison on a static-palm take, and the loud SYNTHETIC labeling of the
- * generated report. No file is written to docs/ by this test.
+ * Analyze-pipeline test (Round 3 Phase 4f; extended for AUTO-PEAK + the
+ * 7-move set): synthesizes a fake studio export IN THE TEST from the
+ * committed synthetic fixtures, piped through the REAL SignalTracker
+ * (src/studio/signals.ts) and wrapped in the export schema with
+ * meta.synthetic = true, then asserts the full tools/analyze.ts pipeline:
+ * replay through a real MoveEngine under the current derived tuning, fired
+ * counts inside rep windows, the AUTO-PEAK fallback for takes with zero
+ * confirmed reps, a deliberate miss with blocker diagnosis, false-positive
+ * detection on a negative take, the per-move summary, threshold proposals,
+ * the palm 3D-vs-2D comparison on a static-palm take, and the loud
+ * SYNTHETIC + AUTO-PEAK labeling of the generated report. No file is
+ * written to docs/ by this test.
  */
 
 import { readFileSync } from 'node:fs';
@@ -19,6 +22,7 @@ import { DEFAULT_PROFILE, thresholdsFrom } from '../src/gestures/profile';
 import {
   analyzeExport,
   buildReport,
+  effectiveReps,
   proposeSeparator,
   replayTake,
   summarize,
@@ -93,6 +97,9 @@ const JAB_REPS = [rep(300, 1100), rep(1300, 1750)];
 const buildAnalysis = () => {
   const takes = [
     makeTake('jab-right-x5', 'jab-right', JAB_REPS),
+    // ZERO confirmed reps: this take must fall back to AUTO-PEAK windows
+    // detected over its primary signal (abs-vx for the whip slot).
+    makeTake('fire-whip-right-x3', 'fire-whip', []),
     // Static palm slot from the palm-wave fixture: gives the 3D-vs-2D palm
     // comparison real palm frames to chew on.
     makeTake('palm-static-5s', 'palm-wave', []),
@@ -112,10 +119,10 @@ describe('drill analyze pipeline on a synthesized export', () => {
     expect(analysis.synthetic).toBe(true);
   });
 
-  it('replays a take through a real MoveEngine under exported thresholds', () => {
+  it('replays a take through a real MoveEngine under current derived tuning', () => {
     const take = exp.takes[0];
     if (!take) throw new Error('missing take');
-    const { events } = replayTake(take, null);
+    const { events } = replayTake(take, thresholdsFrom(DEFAULT_PROFILE));
     const fired = events.filter((e) => e.kind === 'trigger');
     expect(fired).toHaveLength(1);
     const first = fired[0];
@@ -127,11 +134,34 @@ describe('drill analyze pipeline on a synthesized export', () => {
     const jab = analysis.takes.find((t) => t.id === 'jab-right-x5');
     if (!jab) throw new Error('missing jab analysis');
     expect(jab.kind).toBe('positive');
-    expect(jab.repsConfirmed).toBe(2);
+    expect(jab.repsUsed).toBe(2);
+    expect(jab.autoReps).toBe(false);
     expect(jab.totalFired).toBe(1);
     const hit = jab.reps[0];
     expect(hit?.fired).toBe(1);
     expect(hit?.miss).toBe(false);
+    expect(hit?.auto).toBe(false);
+  });
+
+  it('AUTO-PEAK fallback: zero confirmed reps get machine-detected windows', () => {
+    const take = exp.takes.find((t) => t.id === 'fire-whip-right-x3');
+    if (!take) throw new Error('missing whip take');
+    const windows = effectiveReps(take);
+    expect(windows.length).toBeGreaterThan(0);
+    for (const w of windows) {
+      expect(w.auto).toBe(true);
+      expect(w.endMs).toBeGreaterThanOrEqual(w.startMs);
+    }
+
+    const whip = analysis.takes.find((t) => t.id === 'fire-whip-right-x3');
+    if (!whip) throw new Error('missing whip analysis');
+    expect(whip.autoReps).toBe(true);
+    expect(whip.repsUsed).toBe(windows.length);
+    // The whip fixture fires exactly one fire-whip; the auto window around
+    // the swing peak must contain it.
+    expect(whip.totalFired).toBe(1);
+    expect(whip.reps.reduce((s, r) => s + r.fired, 0)).toBe(1);
+    expect(analysis.autoPeakUsed).toBe(true);
   });
 
   it('detects the deliberate miss and names the blocking signals', () => {
@@ -170,6 +200,29 @@ describe('drill analyze pipeline on a synthesized export', () => {
     expect(idle?.falsePositives).toHaveLength(0);
   });
 
+  it('builds the per-move summary with hit rates and out-of-rep FPs', () => {
+    const jabRow = analysis.moveSummary.find((r) => r.move === 'jab-blast');
+    if (!jabRow) throw new Error('missing jab-blast summary row');
+    expect(jabRow.takes).toContain('jab-right-x5#1');
+    expect(jabRow.reps).toBe(2);
+    expect(jabRow.firedInRep).toBe(1);
+    expect(jabRow.hitRate).toBeCloseTo(0.5, 10);
+    // The deliberate FP on the negative take counts against jab-blast.
+    expect(jabRow.fpOutOfRep).toBeGreaterThanOrEqual(1);
+
+    const whipRow = analysis.moveSummary.find((r) => r.move === 'fire-whip');
+    if (!whipRow) throw new Error('missing fire-whip summary row');
+    expect(whipRow.autoReps).toBe(whipRow.reps);
+    expect(whipRow.firedInRep).toBe(1);
+  });
+
+  it('maps every fired move per take (take-to-move table data)', () => {
+    const neg = analysis.takes.find((t) => t.id === 'neg-reaching-20s');
+    const jabCount = neg?.firedByMove.find((f) => f.move === 'jab-blast');
+    expect(jabCount?.total).toBe(1);
+    expect(jabCount?.outOfRep).toBe(1); // negatives have no rep windows
+  });
+
   it('computes signal-to-noise rows for positive takes', () => {
     const jab = analysis.takes.find((t) => t.id === 'jab-right-x5');
     if (!jab) throw new Error('missing jab analysis');
@@ -189,6 +242,11 @@ describe('drill analyze pipeline on a synthesized export', () => {
     // frames above the 0.75 enter level.
     expect(c.score3D.above75).toBeGreaterThan(0);
     expect(c.score2D.above75).toBeGreaterThan(0);
+  });
+
+  it('uses the negative takes as the noise pool when they exist', () => {
+    expect(analysis.noiseProvenance).toContain('negative takes');
+    expect(analysis.noiseProvenance).not.toContain('ABSENT');
   });
 
   it('emits threshold proposals with honest separation reporting', () => {
@@ -228,9 +286,12 @@ describe('drill analyze pipeline on a synthesized export', () => {
     const report = buildReport(analysis);
     expect(report).toContain('[SYNTHETIC DATA]');
     expect(report).toContain('SYNTHETIC INPUT - NOT REAL PLAYER DATA');
-    expect(report).toContain('## Takes: reps confirmed vs fired');
+    expect(report).toContain('AUTO-PEAK REP WINDOWS IN USE');
+    expect(report).toContain('## Takes: reps vs fired (7-move set)');
+    expect(report).toContain('## Which moves fired in which takes');
+    expect(report).toContain('## Per-move summary: reps, hit rate, false positives');
     expect(report).toContain('## Missed reps: what blocked them');
-    expect(report).toContain('## False positives on negative takes');
+    expect(report).toContain('## False positives on negative / static takes');
     expect(report).toContain('## Signal-to-noise per move');
     expect(report).toContain('palmScore2D (live)');
     expect(report).toContain('## Threshold proposals (max-margin separators)');
@@ -239,6 +300,7 @@ describe('drill analyze pipeline on a synthesized export', () => {
 
     const summary = summarize(analysis);
     expect(summary).toContain('SYNTHETIC INPUT');
+    expect(summary).toContain('AUTO-PEAK');
     expect(summary).toContain('NOT auto-applied');
   });
 });

@@ -1,30 +1,43 @@
 /**
- * Drill-export analysis pipeline (Round 3 Phase 4f).
+ * Drill-export analysis pipeline (Round 3 Phase 4f; extended for the
+ * 2026-07-31 drill review: AUTO-PEAK rep fallback + the 7-move set).
  *
  * Run: npm run analyze [path-to-export.json]
  *
  * Ingests the newest fixtures/recorded/firebending-drill-*.json (or the
  * given path), replays every take's trimmed frames through a REAL MoveEngine
- * configured with the take's exported thresholds (MoveEngineConfig.thresholds
- * bypasses profile derivation, so the replay runs under the exact values the
- * capture ran under), and reports:
+ * under the CURRENT derived tuning (thresholdsFrom(export profile ??
+ * DEFAULT_PROFILE)), so a rerun after a constants change validates exactly
+ * the tuning that will ship; the capture-time thresholds each take exported
+ * are shown in the report header for provenance. It reports:
  *
- * - per positive take: confirmed reps vs fired events inside each confirmed
- *   rep window (+REP_SLACK_MS), and for each MISS which gating signal
- *   blocked it and by how much (per-rep maxima from the exported signals,
- *   cross-checked against the engine's near-miss diagnostics captured via
- *   MoveEngine.nearMissListener);
- * - per negative take: every fired event as a false positive with its
- *   timestamp and the triggering frame's signal values;
- * - signal-to-noise per gating signal per move: median in-rep peak vs the
- *   95th percentile of the out-of-rep + negative-take noise pool;
- * - THRESHOLD PROPOSALS: per motion threshold, the value that separates
- *   confirmed-rep peaks from negative-take noise with maximum margin,
- *   expressed also as the implied profile fraction (JAB_TRIGGER_FRACTION /
- *   SWEEP_FRACTION, src/gestures/profile.ts);
+ * - AUTO-PEAK rep windows: a take with ZERO confirmed reps (markers never
+ *   clicked in review) falls back to deterministic peak detection
+ *   (src/studio/peaks.ts detectReps) over the take's primary review signal
+ *   (src/studio/takes.ts). Auto windows are labeled auto everywhere, loudly:
+ *   they are the machine's guess at where the player's reps were, not a
+ *   human-confirmed ground truth.
+ * - per positive take: reps (confirmed or AUTO-PEAK) vs fired events inside
+ *   each rep window (+REP_SLACK_MS), and for each MISS which gating signal
+ *   blocked it and by how much;
+ * - the take-to-move mapping table: per take, every move that fired
+ *   (trigger / sustain-start) anywhere in the take;
+ * - the per-move summary: reps, fired in-rep, hit rate, and false positives
+ *   measured across all OTHER takes' out-of-rep spans;
+ * - signal-to-noise per gating signal per move;
+ * - THRESHOLD PROPOSALS (max-margin separators between rep-window signal
+ *   peaks and the noise pool). NOISE FLOOR PROVENANCE: when the export
+ *   carries negative takes they are the noise pool; when they are ABSENT
+ *   (this recording session) the pool is the between-rep (out-of-rep) spans
+ *   of the positive takes plus every frame of the static-palm hold, and the
+ *   report says so loudly;
  * - the palm-static take scored by BOTH palm scorers (legacy 3D palmScore
- *   and the live palmScore2D) so the user's own recording gives the final
- *   live verdict on the 2D switch (docs/hagrid-report.md appendix).
+ *   and palmScore2D) for the docs/hagrid-report.md appendix verdict.
+ *
+ * 7-MOVE MAPPING: palm is no longer a classified pose on the critical path
+ * (src/gestures/moves.ts header). The studio's palm-strike takes therefore
+ * map to jab-blast and the flame-fan take maps to fire-stream; the mapping
+ * is reported per take.
  *
  * Output: docs/drill-report.md plus a terminal summary. Proposals are NEVER
  * auto-applied: constants change only after review, against the user's
@@ -38,12 +51,15 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { MoveEngine, GRIP_ENTER_SCORE } from '../src/gestures/moves';
+import { MoveEngine, GRIP_ENTER_SCORE, BREATH_FIST_ENTER } from '../src/gestures/moves';
 import type { MoveEvent, MoveName, NearMissRecord } from '../src/gestures/moves';
-import { DEFAULT_PROFILE } from '../src/gestures/profile';
+import { DEFAULT_PROFILE, thresholdsFrom } from '../src/gestures/profile';
 import type { MotionProfile, MotionThresholds } from '../src/gestures/profile';
 import { palmScore, palmScore2D } from '../src/gestures/poses';
 import type { Handedness } from '../src/gestures/poses';
+import { detectReps } from '../src/studio/peaks';
+import type { SignalSample } from '../src/studio/peaks';
+import { primarySignalValue, takeDef } from '../src/studio/takes';
 import type {
   StudioExport,
   StudioFrame,
@@ -54,13 +70,26 @@ import type {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Slack added to the end of each confirmed rep window when counting fires. */
+/**
+ * Slack added to BOTH ends of each rep window when counting fires and
+ * signal peaks: at the recorded ~14 fps a peak-detected boundary can start
+ * a frame late, so the window is treated symmetrically.
+ */
 export const REP_SLACK_MS = 150;
-/** Standard pose hysteresis enter level (tracking/filters.ts default). */
-const POSE_ENTER = 0.75;
+
+/** All seven moves, for the mapping and summary tables. */
+export const ALL_MOVES: readonly MoveName[] = [
+  'jab-blast',
+  'fire-stream',
+  'cross-combo',
+  'twin-cannon',
+  'rising-flame',
+  'fire-whip',
+  'breath-charge',
+];
 
 // ---------------------------------------------------------------------------
-// Take expectations
+// Take expectations (7-move mapping)
 // ---------------------------------------------------------------------------
 
 export type TakeKind = 'positive' | 'negative' | 'static-palm';
@@ -71,21 +100,40 @@ export interface TakeExpectation {
   move?: MoveName;
   /** Event kinds that count as a fire (trigger vs sustain-start). */
   eventKinds?: ReadonlyArray<MoveEvent['kind']>;
+  /** Present when the slot's original move was folded into another one. */
+  mappedFrom?: string;
 }
 
 export const EXPECTATIONS: Record<TakeId, TakeExpectation> = {
   'jab-left-x5': { kind: 'positive', move: 'jab-blast', eventKinds: ['trigger'] },
   'jab-right-x5': { kind: 'positive', move: 'jab-blast', eventKinds: ['trigger'] },
   'alt-jab-combo-x3': { kind: 'positive', move: 'cross-combo', eventKinds: ['trigger'] },
-  'palm-strike-left-x5': { kind: 'positive', move: 'palm-wave', eventKinds: ['trigger'] },
-  'palm-strike-right-x5': { kind: 'positive', move: 'palm-wave', eventKinds: ['trigger'] },
+  // 7-move mapping: a palm strike is a thrust; it must fire jab-blast now.
+  'palm-strike-left-x5': {
+    kind: 'positive',
+    move: 'jab-blast',
+    eventKinds: ['trigger'],
+    mappedFrom: 'palm-wave',
+  },
+  'palm-strike-right-x5': {
+    kind: 'positive',
+    move: 'jab-blast',
+    eventKinds: ['trigger'],
+    mappedFrom: 'palm-wave',
+  },
   'palm-static-5s': { kind: 'static-palm' },
   'fire-stream-4s-x2': {
     kind: 'positive',
     move: 'fire-stream',
     eventKinds: ['sustain-start'],
   },
-  'flame-fan-4s-x2': { kind: 'positive', move: 'flame-fan', eventKinds: ['sustain-start'] },
+  // 7-move mapping: a held palm push is a sustained thrust: fire-stream.
+  'flame-fan-4s-x2': {
+    kind: 'positive',
+    move: 'fire-stream',
+    eventKinds: ['sustain-start'],
+    mappedFrom: 'flame-fan',
+  },
   'twin-cannon-x3': { kind: 'positive', move: 'twin-cannon', eventKinds: ['trigger'] },
   'rising-flame-x3': { kind: 'positive', move: 'rising-flame', eventKinds: ['trigger'] },
   'fire-whip-left-x3': { kind: 'positive', move: 'fire-whip', eventKinds: ['trigger'] },
@@ -101,6 +149,50 @@ export function relevantHands(id: TakeId): Handedness[] {
   if (id.includes('-left')) return ['left'];
   if (id.includes('-right')) return ['right'];
   return ['left', 'right'];
+}
+
+// ---------------------------------------------------------------------------
+// Rep windows: confirmed markers, or the AUTO-PEAK fallback
+// ---------------------------------------------------------------------------
+
+export interface RepWindow {
+  startMs: number;
+  endMs: number;
+  /** True when the window came from peak detection, not a confirmed marker. */
+  auto: boolean;
+  manual: boolean;
+}
+
+/**
+ * The rep windows analysis runs on: the take's CONFIRMED markers when any
+ * exist, else AUTO-PEAK windows from deterministic peak detection
+ * (src/studio/peaks.ts detectReps, the same code that drives the studio's
+ * live rep counter) over the take's primary review signal. Negative and
+ * static-palm takes never get windows.
+ */
+export function effectiveReps(take: StudioTakeExport): RepWindow[] {
+  const exp = EXPECTATIONS[take.id] ?? { kind: 'positive' as const };
+  if (exp.kind !== 'positive') return [];
+  const confirmed = take.reps.filter((r) => r.confirmed);
+  if (confirmed.length > 0) {
+    return confirmed.map((r) => ({
+      startMs: r.startMs,
+      endMs: r.endMs,
+      auto: false,
+      manual: r.manual,
+    }));
+  }
+  const spec = takeDef(take.id).primary;
+  const samples: SignalSample[] = take.frames.map((f) => ({
+    t: f.t,
+    v: primarySignalValue(f.signals, spec),
+  }));
+  return detectReps(samples).map((c) => ({
+    startMs: c.startMs,
+    endMs: c.endMs,
+    auto: true,
+    manual: false,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -146,29 +238,29 @@ interface Gate {
   needsPose?: boolean;
 }
 
-const THRUST_GATES = (pose: 'fist' | 'palm'): Gate[] => [
-  { signal: pose, thresholdOf: () => POSE_ENTER },
+/**
+ * Pose-agnostic thrust gates (7-move set): the elbow/speed/growth fusion
+ * alone; NO finger-pose gate anywhere in the thrust family.
+ */
+const THRUST_GATES: Gate[] = [
   { signal: 'elbowVel', thresholdOf: (th) => th.elbowExtendVel, needsPose: true },
   { signal: 'wristSpeed', thresholdOf: (th) => th.spikeSpeed },
   { signal: 'bboxGrowth', thresholdOf: (th) => th.spikeGrowth },
 ];
 
 export const MOVE_GATES: Record<MoveName, Gate[]> = {
-  'jab-blast': THRUST_GATES('fist'),
-  'cross-combo': THRUST_GATES('fist'),
-  'fire-stream': THRUST_GATES('fist'),
-  'twin-cannon': THRUST_GATES('fist'),
-  'palm-wave': THRUST_GATES('palm'),
-  'flame-fan': THRUST_GATES('palm'),
-  'rising-flame': [
-    { signal: 'palm', thresholdOf: () => POSE_ENTER },
-    { signal: 'upVel', thresholdOf: (th) => th.risingUpVel },
-  ],
+  'jab-blast': THRUST_GATES,
+  'cross-combo': THRUST_GATES,
+  'fire-stream': THRUST_GATES,
+  'twin-cannon': THRUST_GATES,
+  'rising-flame': [{ signal: 'upVel', thresholdOf: (th) => th.risingUpVel }],
   'fire-whip': [
     { signal: 'grip', thresholdOf: () => GRIP_ENTER_SCORE },
     { signal: 'swingVx', thresholdOf: (th) => th.whipSwingVx },
   ],
-  'breath-charge': [{ signal: 'fist', thresholdOf: () => POSE_ENTER }],
+  // The breath chamber keeps its fist read at the data-derived enter level
+  // (see BREATH_FIST_ENTER in src/gestures/moves.ts).
+  'breath-charge': [{ signal: 'fist', thresholdOf: () => BREATH_FIST_ENTER }],
 };
 
 // ---------------------------------------------------------------------------
@@ -181,15 +273,16 @@ export interface ReplayResult {
 }
 
 /**
- * Replay a take's trimmed frames through a real MoveEngine under the take's
- * exported thresholds, with near-miss diagnostics captured in full via the
- * engine's nearMissListener (the 8-slot HUD ring would drop records).
+ * Replay a take's trimmed frames through a real MoveEngine under the GIVEN
+ * thresholds (analysis passes the current derived tuning), with near-miss
+ * diagnostics captured in full via the engine's nearMissListener (the 8-slot
+ * HUD ring would drop records).
  */
-export function replayTake(take: StudioTakeExport, profile: MotionProfile | null): ReplayResult {
-  const engine = new MoveEngine({
-    profile: profile ?? undefined,
-    thresholds: take.thresholds,
-  });
+export function replayTake(
+  take: StudioTakeExport,
+  thresholds: MotionThresholds,
+): ReplayResult {
+  const engine = new MoveEngine({ thresholds });
   engine.debugEnabled = true;
   const nearMisses: NearMissRecord[] = [];
   engine.nearMissListener = (rec) => nearMisses.push({ ...rec });
@@ -227,6 +320,7 @@ export interface RepResult {
   index: number;
   startMs: number;
   endMs: number;
+  auto: boolean;
   manual: boolean;
   /** Expected-move events fired inside [startMs, endMs + REP_SLACK_MS]. */
   fired: number;
@@ -248,9 +342,9 @@ export interface FalsePositive {
 
 export interface SnrRow {
   signal: SignalName;
-  /** Median of per-confirmed-rep in-window peaks. */
+  /** Median of per-rep in-window peaks. */
   peakMedian: number;
-  /** 95th percentile of the out-of-rep + negative-take noise pool. */
+  /** 95th percentile of the noise pool (see noise provenance). */
   noiseP95: number;
   /** peakMedian / noiseP95 (Infinity when the noise floor is 0). */
   ratio: number;
@@ -271,6 +365,15 @@ export interface PalmCompare {
   score2D: Dist;
 }
 
+/** Fired counts for one move within one take. */
+export interface MoveFireCount {
+  move: MoveName;
+  /** Trigger/sustain-start events anywhere in the take. */
+  total: number;
+  /** Of those, events OUTSIDE every rep window (+slack) of the take. */
+  outOfRep: number;
+}
+
 export interface TakeAnalysis {
   id: TakeId;
   takeIndex: number;
@@ -278,11 +381,18 @@ export interface TakeAnalysis {
   status: string;
   kind: TakeKind;
   move?: MoveName;
+  /** Original move name when the 7-move fold remapped the slot. */
+  mappedFrom?: string;
   hasPose: boolean;
-  repsConfirmed: number;
+  /** Rep windows used (confirmed markers or AUTO-PEAK). */
+  repsUsed: number;
+  /** True when the windows came from AUTO-PEAK detection. */
+  autoReps: boolean;
   /** Expected-move fires anywhere in the take (positive takes). */
   totalFired: number;
   reps: RepResult[];
+  /** Every move that fired anywhere in this take (mapping table). */
+  firedByMove: MoveFireCount[];
   falsePositives: FalsePositive[];
   snr: SnrRow[];
   palmCompare?: PalmCompare;
@@ -307,10 +417,27 @@ export interface Proposal {
   threshold: number | null;
   /** Half-gap between the lowest separable rep peak and the max noise. */
   margin: number;
-  /** Confirmed reps whose peak sits at or below the proposed threshold. */
+  /** Reps whose peak sits at or below the proposed threshold. */
   missingReps: number;
   current: number;
   fraction: FractionProposal | null;
+}
+
+/** One row of the per-move summary table. */
+export interface MoveSummaryRow {
+  move: MoveName;
+  /** Takes expected to produce this move. */
+  takes: string[];
+  reps: number;
+  autoReps: number;
+  firedInRep: number;
+  misses: number;
+  /** firedInRep / reps (NaN when reps is 0). */
+  hitRate: number;
+  /** Fires of this move in OTHER takes' out-of-rep spans. */
+  fpOutOfRep: number;
+  /** Fires of this move inside OTHER takes' rep windows (cross-fires). */
+  crossInRep: number;
 }
 
 export interface DrillAnalysis {
@@ -318,7 +445,14 @@ export interface DrillAnalysis {
   synthetic: boolean;
   exportedAt: string;
   profileSource: 'export' | 'default';
+  /** The thresholds every replay ran under (current derived tuning). */
+  thresholds: MotionThresholds;
+  /** True when at least one take ran on AUTO-PEAK rep windows. */
+  autoPeakUsed: boolean;
+  /** Human-readable provenance of the noise pool used for proposals. */
+  noiseProvenance: string;
   takes: TakeAnalysis[];
+  moveSummary: MoveSummaryRow[];
   proposals: Proposal[];
 }
 
@@ -362,7 +496,11 @@ function frameSignalMax(frame: StudioFrame, hands: Handedness[], sig: SignalName
 }
 
 function inWindow(t: number, startMs: number, endMs: number): boolean {
-  return t >= startMs && t <= endMs + REP_SLACK_MS;
+  return t >= startMs - REP_SLACK_MS && t <= endMs + REP_SLACK_MS;
+}
+
+function inAnyWindow(t: number, reps: RepWindow[]): boolean {
+  return reps.some((r) => inWindow(t, r.startMs, r.endMs));
 }
 
 function frameSignals(frame: StudioFrame, hands: Handedness[]): Partial<Record<SignalName, number>> {
@@ -382,15 +520,27 @@ function frameAt(frames: StudioFrame[], t: number): StudioFrame | null {
   return best ?? (frames.length > 0 ? (frames[0] ?? null) : null);
 }
 
+const isFire = (e: MoveEvent): boolean =>
+  e.kind === 'trigger' || e.kind === 'sustain-start';
+
 export function analyzeTake(
   take: StudioTakeExport,
-  profile: MotionProfile | null,
+  reps: RepWindow[],
+  thresholds: MotionThresholds,
 ): TakeAnalysis {
   const exp = EXPECTATIONS[take.id] ?? { kind: 'positive' as const };
   const hands = relevantHands(take.id);
   const hasPose = take.frames.some((f) => f.pose !== null);
-  const { events, nearMisses } = replayTake(take, profile);
-  const confirmed = take.reps.filter((r) => r.confirmed);
+  const { events, nearMisses } = replayTake(take, thresholds);
+
+  const firedByMove: MoveFireCount[] = ALL_MOVES.map((move) => {
+    const fires = events.filter((e) => e.move === move && isFire(e));
+    return {
+      move,
+      total: fires.length,
+      outOfRep: fires.filter((e) => !inAnyWindow(e.t, reps)).length,
+    };
+  }).filter((c) => c.total > 0);
 
   const base: TakeAnalysis = {
     id: take.id,
@@ -399,19 +549,22 @@ export function analyzeTake(
     status: take.status,
     kind: exp.kind,
     hasPose,
-    repsConfirmed: confirmed.length,
+    repsUsed: reps.length,
+    autoReps: reps.some((r) => r.auto),
     totalFired: 0,
     reps: [],
+    firedByMove,
     falsePositives: [],
     snr: [],
   };
   if (exp.move) base.move = exp.move;
+  if (exp.mappedFrom !== undefined) base.mappedFrom = exp.mappedFrom;
 
   if (exp.kind === 'negative' || exp.kind === 'static-palm') {
     // Every fired event on a negative (or the static-palm hold) is a false
     // positive; report it with the triggering frame's signal values.
     for (const e of events) {
-      if (e.kind !== 'trigger' && e.kind !== 'sustain-start') continue;
+      if (!isFire(e)) continue;
       const evHands: Handedness[] = e.hand === 'both' ? ['left', 'right'] : [e.hand];
       const f = frameAt(take.frames, e.t);
       base.falsePositives.push({
@@ -448,7 +601,7 @@ export function analyzeTake(
   const fired = events.filter((e) => e.move === move && kinds.includes(e.kind));
   base.totalFired = fired.length;
 
-  base.reps = confirmed.map((rep, index) => {
+  base.reps = reps.map((rep, index) => {
     const inRep = fired.filter((e) => inWindow(e.t, rep.startMs, rep.endMs));
     const miss = inRep.length === 0;
     const blockers: Blocker[] = [];
@@ -456,7 +609,7 @@ export function analyzeTake(
     if (miss) {
       const repFrames = take.frames.filter((f) => inWindow(f.t, rep.startMs, rep.endMs));
       for (const g of activeGates) {
-        const threshold = g.thresholdOf(take.thresholds);
+        const threshold = g.thresholdOf(thresholds);
         let max = -Infinity;
         for (const f of repFrames) {
           const v = frameSignalMax(f, hands, g.signal);
@@ -493,6 +646,7 @@ export function analyzeTake(
       index,
       startMs: rep.startMs,
       endMs: rep.endMs,
+      auto: rep.auto,
       manual: rep.manual,
       fired: inRep.length,
       miss,
@@ -502,11 +656,11 @@ export function analyzeTake(
   });
 
   // Signal-to-noise: per gate signal, median in-rep peak vs p95 of the
-  // out-of-rep frames of this take (negative-take noise is appended by the
-  // caller via appendNoise below when building the full analysis).
+  // out-of-rep frames of this take (the full cross-take noise pool is
+  // folded in by analyzeExport).
   base.snr = activeGates.map((g) => {
     const peaks: number[] = [];
-    for (const rep of confirmed) {
+    for (const rep of reps) {
       let max = -Infinity;
       for (const f of take.frames) {
         if (!inWindow(f.t, rep.startMs, rep.endMs)) continue;
@@ -517,8 +671,7 @@ export function analyzeTake(
     }
     const noise: number[] = [];
     for (const f of take.frames) {
-      const inAnyRep = confirmed.some((r) => inWindow(f.t, r.startMs, r.endMs));
-      if (!inAnyRep) noise.push(frameSignalMax(f, hands, g.signal));
+      if (!inAnyWindow(f.t, reps)) noise.push(frameSignalMax(f, hands, g.signal));
     }
     const peakMedian = median(peaks);
     const noiseP95 = percentile(noise, 0.95);
@@ -537,24 +690,70 @@ export function analyzeTake(
 // Cross-take: noise pools and threshold proposals
 // ---------------------------------------------------------------------------
 
-/** Per-frame signal values across all frames of the given takes (both hands). */
-function noisePool(takes: StudioTakeExport[], sig: SignalName): number[] {
-  const out: number[] = [];
-  for (const t of takes) {
-    for (const f of t.frames) {
-      out.push(frameSignalMax(f, ['left', 'right'], sig));
-    }
-  }
-  return out;
+export interface NoisePoolResult {
+  /** Per-frame signal values of the noise pool for one signal. */
+  values: number[];
+  provenance: string;
 }
 
-/** Per-confirmed-rep peaks of a signal across the given takes. */
-function repPeaks(takes: StudioTakeExport[], sig: SignalName): number[] {
+/**
+ * The noise pool for one signal. When the export carries negative takes,
+ * every frame of every negative take (the original design). When they are
+ * ABSENT, the fallback pool: every OUT-OF-REP frame of every positive take
+ * plus every frame of the static-palm hold. The provenance string states
+ * which pool was used; the report prints it loudly.
+ */
+export function noisePoolFor(
+  exp: StudioExport,
+  repsByTake: Map<StudioTakeExport, RepWindow[]>,
+  sig: SignalName,
+): NoisePoolResult {
+  const negatives = exp.takes.filter((t) => EXPECTATIONS[t.id]?.kind === 'negative');
+  if (negatives.length > 0) {
+    const values: number[] = [];
+    for (const t of negatives) {
+      for (const f of t.frames) values.push(frameSignalMax(f, ['left', 'right'], sig));
+    }
+    return { values, provenance: `all frames of ${negatives.length} negative takes` };
+  }
+  const values: number[] = [];
+  let posTakes = 0;
+  let staticTakes = 0;
+  for (const t of exp.takes) {
+    const kind = EXPECTATIONS[t.id]?.kind ?? 'positive';
+    if (kind === 'negative') continue;
+    if (kind === 'static-palm') {
+      staticTakes++;
+      for (const f of t.frames) values.push(frameSignalMax(f, ['left', 'right'], sig));
+      continue;
+    }
+    posTakes++;
+    const reps = repsByTake.get(t) ?? [];
+    for (const f of t.frames) {
+      if (!inAnyWindow(f.t, reps)) {
+        values.push(frameSignalMax(f, ['left', 'right'], sig));
+      }
+    }
+  }
+  return {
+    values,
+    provenance:
+      `NEGATIVE TAKES ABSENT: noise floor built from the between-rep ` +
+      `(out-of-rep) spans of ${posTakes} positive takes plus all frames of ` +
+      `${staticTakes} static-palm hold(s)`,
+  };
+}
+
+/** Per-rep peaks of a signal across the given takes' rep windows. */
+function repPeaksFor(
+  takes: StudioTakeExport[],
+  repsByTake: Map<StudioTakeExport, RepWindow[]>,
+  sig: SignalName,
+): number[] {
   const out: number[] = [];
   for (const t of takes) {
     const hands = relevantHands(t.id);
-    for (const rep of t.reps) {
-      if (!rep.confirmed) continue;
+    for (const rep of repsByTake.get(t) ?? []) {
       let max = -Infinity;
       for (const f of t.frames) {
         if (!inWindow(f.t, rep.startMs, rep.endMs)) continue;
@@ -568,7 +767,7 @@ function repPeaks(takes: StudioTakeExport[], sig: SignalName): number[] {
 }
 
 /**
- * Max-margin separator between confirmed-rep peaks and negative noise: the
+ * Max-margin separator between rep-window peaks and the noise pool: the
  * midpoint between the largest noise value and the smallest rep peak above
  * it. Reps whose peak falls at or below the proposal would still miss and
  * are counted, not hidden.
@@ -675,10 +874,14 @@ const PROPOSAL_SPECS: ProposalSpec[] = [
   },
 ];
 
-export function buildProposals(exp: StudioExport): Proposal[] {
+export function buildProposals(
+  exp: StudioExport,
+  repsByTake: Map<StudioTakeExport, RepWindow[]>,
+  thresholds: MotionThresholds,
+): { proposals: Proposal[]; provenance: string } {
   const profile = exp.meta.motionProfile ?? DEFAULT_PROFILE;
-  const negatives = exp.takes.filter((t) => EXPECTATIONS[t.id]?.kind === 'negative');
   const out: Proposal[] = [];
+  let provenance = '';
   for (const spec of PROPOSAL_SPECS) {
     const takes = exp.takes.filter((t) => spec.takeIds.includes(t.id));
     if (spec.needsPose === true) {
@@ -686,11 +889,11 @@ export function buildProposals(exp: StudioExport): Proposal[] {
       const withPose = takes.filter((t) => t.frames.some((f) => f.pose !== null));
       if (withPose.length === 0) continue;
     }
-    const peaks = repPeaks(takes, spec.signal);
+    const peaks = repPeaksFor(takes, repsByTake, spec.signal);
     if (peaks.length === 0) continue;
-    const noise = noisePool(negatives, spec.signal);
-    const sep = proposeSeparator(peaks, noise);
-    const currentTh = takes[0]?.thresholds[spec.name] ?? NaN;
+    const noise = noisePoolFor(exp, repsByTake, spec.signal);
+    provenance = noise.provenance;
+    const sep = proposeSeparator(peaks, noise.values);
     out.push({
       name: spec.name,
       signal: spec.signal,
@@ -699,11 +902,11 @@ export function buildProposals(exp: StudioExport): Proposal[] {
       threshold: sep.threshold,
       margin: sep.margin,
       missingReps: sep.missingReps,
-      current: currentTh,
+      current: thresholds[spec.name],
       fraction: sep.threshold !== null ? spec.fraction(profile, sep.threshold) : null,
     });
   }
-  return out;
+  return { proposals: out, provenance };
 }
 
 // ---------------------------------------------------------------------------
@@ -712,26 +915,22 @@ export function buildProposals(exp: StudioExport): Proposal[] {
 
 export function analyzeExport(exp: StudioExport, sourcePath: string): DrillAnalysis {
   const profile = exp.meta.motionProfile;
-  const takes = exp.takes.map((t) => analyzeTake(t, profile));
+  // CURRENT derived tuning: rerunning analyze after a constants change
+  // validates the tuning that will actually ship.
+  const thresholds = thresholdsFrom(profile ?? DEFAULT_PROFILE);
 
-  // Fold the negative takes into every positive take's noise floor: the
-  // reported noise p95 is over out-of-rep frames of the take itself PLUS
-  // every frame of every negative take.
-  const negatives = exp.takes.filter((t) => EXPECTATIONS[t.id]?.kind === 'negative');
+  const repsByTake = new Map<StudioTakeExport, RepWindow[]>();
+  for (const t of exp.takes) repsByTake.set(t, effectiveReps(t));
+
+  const takes = exp.takes.map((t) => analyzeTake(t, repsByTake.get(t) ?? [], thresholds));
+
+  // Fold the full noise pool into every positive take's reported SNR: the
+  // noise p95 covers the cross-take pool, not just the take's own frames.
   for (const ta of takes) {
     if (ta.kind !== 'positive') continue;
-    const src = exp.takes.find((t) => t.id === ta.id && t.takeIndex === ta.takeIndex);
-    if (!src) continue;
-    const confirmed = src.reps.filter((r) => r.confirmed);
     ta.snr = ta.snr.map((row) => {
-      const noise: number[] = [];
-      const hands = relevantHands(src.id);
-      for (const f of src.frames) {
-        const inAnyRep = confirmed.some((r) => inWindow(f.t, r.startMs, r.endMs));
-        if (!inAnyRep) noise.push(frameSignalMax(f, hands, row.signal));
-      }
-      for (const n of negatives) noise.push(...noisePool([n], row.signal));
-      const noiseP95 = percentile(noise, 0.95);
+      const pool = noisePoolFor(exp, repsByTake, row.signal);
+      const noiseP95 = percentile(pool.values, 0.95);
       return {
         ...row,
         noiseP95,
@@ -740,13 +939,56 @@ export function analyzeExport(exp: StudioExport, sourcePath: string): DrillAnaly
     });
   }
 
+  // Per-move summary: reps, fired, hit rate, plus false positives measured
+  // across all OTHER takes' out-of-rep spans (cross-fires inside other
+  // takes' rep windows are reported separately, not hidden).
+  const moveSummary: MoveSummaryRow[] = ALL_MOVES.map((move) => {
+    const own = takes.filter((t) => t.kind === 'positive' && t.move === move);
+    const others = takes.filter((t) => !(t.kind === 'positive' && t.move === move));
+    const reps = own.reduce((s, t) => s + t.repsUsed, 0);
+    const autoReps = own.reduce(
+      (s, t) => s + t.reps.filter((r) => r.auto).length,
+      0,
+    );
+    const firedInRep = own.reduce(
+      (s, t) => s + t.reps.reduce((ss, r) => ss + r.fired, 0),
+      0,
+    );
+    const misses = own.reduce((s, t) => s + t.reps.filter((r) => r.miss).length, 0);
+    let fpOutOfRep = 0;
+    let crossInRep = 0;
+    for (const t of others) {
+      const c = t.firedByMove.find((f) => f.move === move);
+      if (!c) continue;
+      fpOutOfRep += c.outOfRep;
+      crossInRep += c.total - c.outOfRep;
+    }
+    return {
+      move,
+      takes: own.map((t) => `${t.id}#${t.takeIndex}`),
+      reps,
+      autoReps,
+      firedInRep,
+      misses,
+      hitRate: reps > 0 ? firedInRep / reps : NaN,
+      fpOutOfRep,
+      crossInRep,
+    };
+  });
+
+  const { proposals, provenance } = buildProposals(exp, repsByTake, thresholds);
+
   return {
     sourcePath,
     synthetic: exp.meta.synthetic === true,
     exportedAt: exp.exportedAt,
     profileSource: profile !== null ? 'export' : 'default',
+    thresholds,
+    autoPeakUsed: takes.some((t) => t.autoReps),
+    noiseProvenance: provenance,
     takes,
-    proposals: buildProposals(exp),
+    moveSummary,
+    proposals,
   };
 }
 
@@ -757,6 +999,8 @@ export function analyzeExport(exp: StudioExport, sourcePath: string): DrillAnaly
 const fmt = (x: number | null | undefined, digits = 3): string =>
   x === null || x === undefined || Number.isNaN(x) ? 'n/a' : x.toFixed(digits);
 
+const pct = (x: number): string => (Number.isNaN(x) ? 'n/a' : `${(100 * x).toFixed(0)}%`);
+
 function syntheticBanner(a: DrillAnalysis): string {
   if (!a.synthetic) return '';
   return [
@@ -765,6 +1009,20 @@ function syntheticBanner(a: DrillAnalysis): string {
     '> from a synthesized export (pipeline test fixtures). None of the numbers',
     '> below may be used to tune thresholds. Record real drills in the studio',
     '> and re-run `npm run analyze`.',
+    '',
+  ].join('\n');
+}
+
+function autoPeakBanner(a: DrillAnalysis): string {
+  if (!a.autoPeakUsed) return '';
+  return [
+    '',
+    '> **AUTO-PEAK REP WINDOWS IN USE.** One or more takes had ZERO confirmed',
+    '> rep markers (review markers were never clicked), so their rep windows',
+    '> were AUTO-DETECTED by deterministic peak detection over each take\'s',
+    '> primary review signal (src/studio/peaks.ts). Auto windows are marked',
+    '> `auto` in every table below. They are the machine\'s reconstruction of',
+    '> where the player\'s reps were, not human-confirmed ground truth.',
     '',
   ].join('\n');
 }
@@ -780,20 +1038,75 @@ export function buildReport(a: DrillAnalysis): string {
   L.push(
     `- Motion profile: ${a.profileSource === 'export' ? 'from export (calibrated)' : 'DEFAULT_PROFILE (no calibration in export)'}`,
   );
+  L.push(
+    `- Replayed under CURRENT derived tuning: spikeSpeed ${fmt(a.thresholds.spikeSpeed)}, ` +
+      `spikeGrowth ${fmt(a.thresholds.spikeGrowth)}, elbowExtendVel ${fmt(a.thresholds.elbowExtendVel)}, ` +
+      `risingUpVel ${fmt(a.thresholds.risingUpVel)}, whipSwingVx ${fmt(a.thresholds.whipSwingVx)} ` +
+      `(capture-time thresholds are stored per take in the export)`,
+  );
   L.push(syntheticBanner(a));
+  L.push(autoPeakBanner(a));
 
-  L.push('## Takes: reps confirmed vs fired', '');
-  L.push('| take | status | starred | pose | reps confirmed | fired in-rep | misses | false positives |');
-  L.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+  L.push('## Takes: reps vs fired (7-move set)', '');
+  L.push(
+    'Palm-strike takes map to jab-blast and the flame-fan take maps to',
+    'fire-stream: palm is no longer a classified pose on the critical path.',
+    '',
+  );
+  L.push('| take | maps to | status | pose | reps used | rep source | fired in-rep | misses | false positives |');
+  L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const t of a.takes) {
     const firedInRep = t.reps.reduce((s, r) => s + r.fired, 0);
     const misses = t.reps.filter((r) => r.miss).length;
+    const mapped = t.move
+      ? `${t.move}${t.mappedFrom !== undefined ? ` (was ${t.mappedFrom})` : ''}`
+      : t.kind;
     L.push(
-      `| ${t.id}#${t.takeIndex} | ${t.status} | ${t.starred ? 'yes' : ''} | ${t.hasPose ? 'yes' : 'no'} | ` +
-        `${t.kind === 'positive' ? t.repsConfirmed : '-'} | ` +
+      `| ${t.id}#${t.takeIndex} | ${mapped} | ${t.status} | ${t.hasPose ? 'yes' : 'no'} | ` +
+        `${t.kind === 'positive' ? t.repsUsed : '-'} | ` +
+        `${t.kind === 'positive' ? (t.autoReps ? '**AUTO-PEAK**' : 'confirmed') : '-'} | ` +
         `${t.kind === 'positive' ? firedInRep : '-'} | ` +
         `${t.kind === 'positive' ? misses : '-'} | ` +
         `${t.kind !== 'positive' ? t.falsePositives.length : '-'} |`,
+    );
+  }
+  L.push('');
+
+  // Take-to-move mapping: every move that fired anywhere in each take.
+  L.push('## Which moves fired in which takes', '');
+  L.push(
+    'Trigger / sustain-start events per move across each whole take',
+    '(in-rep + out-of-rep). The expected move is marked with `<-`.',
+    '',
+  );
+  L.push('| take | ' + ALL_MOVES.join(' | ') + ' |');
+  L.push('| --- |' + ALL_MOVES.map(() => ' --- |').join(''));
+  for (const t of a.takes) {
+    const cells = ALL_MOVES.map((m) => {
+      const c = t.firedByMove.find((f) => f.move === m);
+      const mark = t.kind === 'positive' && t.move === m ? ' <-' : '';
+      if (!c) return `0${mark}`;
+      return `${c.total} (${c.outOfRep} out-of-rep)${mark}`;
+    });
+    L.push(`| ${t.id}#${t.takeIndex} | ${cells.join(' | ')} |`);
+  }
+  L.push('');
+
+  // Per-move summary.
+  L.push('## Per-move summary: reps, hit rate, false positives', '');
+  L.push(
+    'False positives are fires of the move inside OTHER takes\' out-of-rep',
+    'spans; cross-fires inside other takes\' rep windows are listed',
+    'separately (a jab firing during a twin-cannon rep is a cross-fire, not',
+    'background noise).',
+    '',
+  );
+  L.push('| move | takes | reps (auto) | fired in-rep | hit rate | misses | FP (other takes, out-of-rep) | cross-fires (other takes, in-rep) |');
+  L.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+  for (const row of a.moveSummary) {
+    L.push(
+      `| ${row.move} | ${row.takes.join(', ') || '-'} | ${row.reps} (${row.autoReps} auto) | ` +
+        `${row.firedInRep} | ${pct(row.hitRate)} | ${row.misses} | ${row.fpOutOfRep} | ${row.crossInRep} |`,
     );
   }
   L.push('');
@@ -807,7 +1120,8 @@ export function buildReport(a: DrillAnalysis): string {
         if (!r.miss) continue;
         L.push(
           `### ${t.id}#${t.takeIndex} rep ${r.index + 1} ` +
-            `(${fmt(r.startMs, 0)}..${fmt(r.endMs, 0)} ms${r.manual ? ', manual marker' : ''})`,
+            `(${fmt(r.startMs, 0)}..${fmt(r.endMs, 0)} ms` +
+            `${r.auto ? ', AUTO-PEAK window' : r.manual ? ', manual marker' : ''})`,
           '',
         );
         if (r.blockers.length === 0) {
@@ -840,10 +1154,10 @@ export function buildReport(a: DrillAnalysis): string {
     }
   }
 
-  // False positives.
+  // False positives on negative/static takes.
   const fps = a.takes.filter((t) => t.falsePositives.length > 0);
   if (fps.length > 0) {
-    L.push('## False positives on negative takes', '');
+    L.push('## False positives on negative / static takes', '');
     L.push('| take | t (ms) | move | hand | kind | wristSpeed | bboxGrowth | elbowVel | fist | palm | grip |');
     L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const t of fps) {
@@ -860,16 +1174,18 @@ export function buildReport(a: DrillAnalysis): string {
   }
 
   // SNR.
-  const withSnr = a.takes.filter((t) => t.snr.length > 0 && t.repsConfirmed > 0);
+  const withSnr = a.takes.filter((t) => t.snr.length > 0 && t.repsUsed > 0);
   if (withSnr.length > 0) {
     L.push('## Signal-to-noise per move', '');
-    L.push('In-rep peak median vs out-of-rep + negative-take 95th percentile.', '');
-    L.push('| take | signal | peak median (in rep) | noise p95 | ratio |');
-    L.push('| --- | --- | --- | --- | --- |');
+    L.push(`In-rep peak median vs the noise pool 95th percentile.`, '');
+    L.push(`Noise pool: ${a.noiseProvenance || 'negative takes'}.`, '');
+    L.push('| take | rep source | signal | peak median (in rep) | noise p95 | ratio |');
+    L.push('| --- | --- | --- | --- | --- | --- |');
     for (const t of withSnr) {
       for (const row of t.snr) {
         L.push(
-          `| ${t.id}#${t.takeIndex} | ${row.signal} | ${fmt(row.peakMedian)} | ` +
+          `| ${t.id}#${t.takeIndex} | ${t.autoReps ? 'AUTO-PEAK' : 'confirmed'} | ` +
+            `${row.signal} | ${fmt(row.peakMedian)} | ` +
             `${fmt(row.noiseP95)} | ${row.ratio === Infinity ? 'inf' : fmt(row.ratio, 2)} |`,
         );
       }
@@ -883,11 +1199,9 @@ export function buildReport(a: DrillAnalysis): string {
     L.push('## Static palm hold: palmScore (3D) vs palmScore2D (live scorer)', '');
     L.push(
       'palmScore2D is the LIVE scorer since the HaGRID investigation (see',
-      'docs/hagrid-report.md appendix): equal recall, better precision on',
-      'HaGRID, and no dependence on MediaPipe z. This section is the final,',
-      'player-data verdict: if the 2D column does not hold clearly more',
-      'frames above the 0.75 enter level on the static-palm take, the switch',
-      'must be re-reviewed.',
+      'docs/hagrid-report.md appendix). Since the 7-move simplification no',
+      'MOVE reads either scorer; this comparison remains the player-data',
+      'verdict on the 2D switch for the studio and any future palm use.',
       '',
     );
     L.push('| take | scorer | hands scored | p5 | median | p95 | frames > 0.75 | frames > 0.55 |');
@@ -910,15 +1224,19 @@ export function buildReport(a: DrillAnalysis): string {
   // Proposals.
   L.push('## Threshold proposals (max-margin separators)', '');
   if (a.proposals.length === 0) {
-    L.push('No proposals: no confirmed reps with usable signals were found.', '');
+    L.push('No proposals: no rep windows with usable signals were found.', '');
   } else {
     L.push(
-      'For each motion threshold: the midpoint between the loudest negative-',
-      'take noise and the quietest confirmed-rep peak above it. Reps whose',
-      'peak falls at or below the proposal are listed as still-missing, not',
-      'hidden. Fractions are relative to the profile the export carried.',
+      'For each motion threshold: the midpoint between the loudest noise-pool',
+      'value and the quietest rep-window peak above it. Reps whose peak falls',
+      'at or below the proposal are listed as still-missing, not hidden.',
+      'Fractions are relative to the profile the export carried.',
       '',
     );
+    L.push(`**Noise pool provenance: ${a.noiseProvenance || 'negative takes'}.**`, '');
+    if (a.autoPeakUsed) {
+      L.push('**Rep peaks come from AUTO-PEAK windows (see banner above).**', '');
+    }
     L.push('| threshold | signal | current | proposed | margin | rep peaks (min..med..max) | noise max | reps still missing | implied fraction |');
     L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const p of a.proposals) {
@@ -950,13 +1268,19 @@ export function buildReport(a: DrillAnalysis): string {
 export function summarize(a: DrillAnalysis): string {
   const L: string[] = [];
   if (a.synthetic) L.push('*** SYNTHETIC INPUT - numbers unusable for tuning ***');
+  if (a.autoPeakUsed) {
+    L.push('*** AUTO-PEAK REP WINDOWS IN USE: zero confirmed markers found on');
+    L.push('*** one or more takes; windows are machine-detected, not reviewed.');
+  }
   L.push(`Analyzed ${a.takes.length} takes from ${a.sourcePath}`);
   for (const t of a.takes) {
     if (t.kind === 'positive') {
       const firedInRep = t.reps.reduce((s, r) => s + r.fired, 0);
       const misses = t.reps.filter((r) => r.miss).length;
       L.push(
-        `  ${t.id}#${t.takeIndex}: ${t.repsConfirmed} reps confirmed, ` +
+        `  ${t.id}#${t.takeIndex} -> ${t.move ?? '?'}` +
+          `${t.mappedFrom !== undefined ? ` (was ${t.mappedFrom})` : ''}: ` +
+          `${t.repsUsed} reps${t.autoReps ? ' [AUTO-PEAK]' : ''}, ` +
           `${firedInRep} fired in-rep, ${misses} missed` +
           (misses > 0
             ? ` (blocked by: ${t.reps
@@ -974,7 +1298,15 @@ export function summarize(a: DrillAnalysis): string {
       );
     }
   }
+  L.push('Per-move hit rates:');
+  for (const row of a.moveSummary) {
+    L.push(
+      `  ${row.move}: ${row.firedInRep}/${row.reps} in-rep (${pct(row.hitRate)}), ` +
+        `${row.fpOutOfRep} FP out-of-rep, ${row.crossInRep} cross-fires`,
+    );
+  }
   L.push(`  ${a.proposals.length} threshold proposals (see docs/drill-report.md)`);
+  L.push(`  Noise pool: ${a.noiseProvenance || 'negative takes'}`);
   L.push('  Proposals are NOT auto-applied; apply only after review with real data.');
   return L.join('\n');
 }
