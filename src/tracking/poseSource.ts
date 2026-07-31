@@ -34,7 +34,7 @@ import type { RawLandmark } from './handSource';
 
 /** Official Google CDN model asset (LITE, float16). */
 export const POSE_MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker.task';
+  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 
 /** Landmarks may carry a per-point visibility score in Tasks Vision. */
 export interface RawPoseLandmark extends RawLandmark {

@@ -17,10 +17,18 @@ import {
   routeFor,
 } from '../src/boot/route';
 import {
+  ML_BUDGET_MS,
   PERF_BUDGET_MS,
+  PERF_MEASURE_SEC,
+  PERF_WARMUP_SEC,
+  mlPass,
   perfPass,
   quantileSorted,
+  stepPerfClock,
   summarizeFrames,
+  summarizeMl,
+  type PerfClockState,
+  type PerfGateResult,
 } from '../src/screens/perfGate';
 import {
   EMPOWER_GLOW_MAX_OPACITY,
@@ -146,6 +154,144 @@ describe('perf gate math', () => {
     // healthy median but dropped frames at p95 fails
     expect(perfPass(16.7, 33)).toBe(false);
     expect(perfPass(16.7, 18)).toBe(true);
+  });
+
+  it('summarizeMl amortizes per-model cost over rendered frames', () => {
+    // Totals accumulated over 150 rendered frames; scheduling discount is
+    // already baked into the totals (pose ran on half the frames, etc.).
+    const ml = summarizeMl(true, { handMs: 300, poseMs: 150, faceMs: 75 }, 150);
+    expect(ml).toEqual({
+      available: true,
+      handMs: 2,
+      poseMs: 1,
+      faceMs: 0.5,
+      totalMsPerFrame: 3.5,
+    });
+    expect(ML_BUDGET_MS).toBe(7);
+    expect(mlPass(ml.totalMsPerFrame)).toBe(true);
+    expect(mlPass(ML_BUDGET_MS)).toBe(true);
+    expect(mlPass(ML_BUDGET_MS + 0.01)).toBe(false);
+  });
+
+  it('summarizeMl degrades to zeros when unavailable or windowless', () => {
+    expect(summarizeMl(false, { handMs: 99, poseMs: 9, faceMs: 9 }, 100)).toEqual({
+      available: false,
+      handMs: 0,
+      poseMs: 0,
+      faceMs: 0,
+      totalMsPerFrame: 0,
+    });
+    const empty = summarizeMl(true, { handMs: 5, poseMs: 5, faceMs: 5 }, 0);
+    expect(empty.available).toBe(true);
+    expect(empty.totalMsPerFrame).toBe(0);
+  });
+
+  // Clock stepper: each case is a regression guard for the live-run hang
+  // (warmup looping forever with frames: 0 under heavy ML frames).
+  it('stepPerfClock runs loading -> warmup -> measure -> done with one finish', () => {
+    // 250 ms per frame: exact binary fraction, so elapsed sums exactly.
+    let s: PerfClockState = { phase: 'loading', elapsed: 0 };
+    for (let i = 0; i < 10; i++) {
+      const step = stepPerfClock(s, 250, true);
+      expect(step.state.phase).toBe('loading');
+      expect(step.state.elapsed).toBe(0);
+      expect(step.recordMs).toBeNull();
+      expect(step.finish).toBe(false);
+      s = step.state;
+    }
+    // Models resolve: the transition frame spans the load period, so it is
+    // discarded and warmup starts at 0.
+    let step = stepPerfClock(s, 9999, false);
+    expect(step.state).toEqual({ phase: 'warmup', elapsed: 0 });
+    expect(step.recordMs).toBeNull();
+    s = step.state;
+
+    let finishes = 0;
+    let records = 0;
+    let prevElapsed = 0;
+    for (let i = 0; i < 100; i++) {
+      step = stepPerfClock(s, 250, false);
+      expect(step.state.elapsed).toBeGreaterThanOrEqual(prevElapsed);
+      prevElapsed = step.state.elapsed;
+      s = step.state;
+      if (step.recordMs !== null) records++;
+      if (step.finish) finishes++;
+    }
+    expect(s.phase).toBe('done');
+    expect(finishes).toBe(1);
+    // Warmup ends at 3 s (frame 12), done at 18 s (frame 72): frames 12..72.
+    expect(records).toBe(
+      ((PERF_WARMUP_SEC + PERF_MEASURE_SEC) - PERF_WARMUP_SEC) * 4 + 1,
+    );
+  });
+
+  it('stepPerfClock advances by UNCAPPED wall time, so heavy ML frames cannot stretch the window', () => {
+    // 500 ms frames (~2 fps, CPU-delegate territory): the whole window must
+    // still complete in 18 s of wall time = 36 frames. The old accumulator
+    // capped each frame's contribution at 0.1 s, stretching warmup ~5x --
+    // the "warming up forever" hang.
+    let s: PerfClockState = { phase: 'warmup', elapsed: 0 };
+    let frames = 0;
+    let finishes = 0;
+    while (s.phase !== 'done' && frames < 1000) {
+      const step = stepPerfClock(s, 500, false);
+      s = step.state;
+      frames++;
+      if (step.finish) finishes++;
+    }
+    expect(frames).toBe((PERF_WARMUP_SEC + PERF_MEASURE_SEC) * 2);
+    expect(finishes).toBe(1);
+  });
+
+  it('stepPerfClock clamps negative rAF deltas: the countdown never rewinds', () => {
+    const w = stepPerfClock({ phase: 'warmup', elapsed: 1 }, -250, false);
+    expect(w.state).toEqual({ phase: 'warmup', elapsed: 1 });
+    const m = stepPerfClock({ phase: 'measure', elapsed: 5 }, -50, false);
+    expect(m.state.elapsed).toBe(5);
+    expect(m.recordMs).toBe(0); // clamped sample, never negative
+  });
+
+  it('stepPerfClock: leaving loading is one-way; ML flag noise mid-measure cannot reset the clock', () => {
+    // A detect-throw disables ML mid-run; even if pending-style flag noise
+    // reached the stepper, phases past 'loading' must ignore it.
+    const step = stepPerfClock({ phase: 'measure', elapsed: 10 }, 250, true);
+    expect(step.state).toEqual({ phase: 'measure', elapsed: 10.25 });
+    expect(step.recordMs).toBe(250);
+    expect(step.finish).toBe(false);
+    // 'done' absorbs everything: finish can never fire twice.
+    const d = stepPerfClock({ phase: 'done', elapsed: 18 }, 250, true);
+    expect(d.state).toEqual({ phase: 'done', elapsed: 18 });
+    expect(d.recordMs).toBeNull();
+    expect(d.finish).toBe(false);
+  });
+
+  it('PerfGateResult carries the optional ml block through JSON', () => {
+    const base: PerfGateResult = {
+      frames: 10,
+      medianMs: 16,
+      p95Ms: 17,
+      maxMs: 20,
+      pass: true,
+      budgetMs: PERF_BUDGET_MS,
+      drawCalls: 120,
+      particles: { flames: 0, embers: 0, smoke: 0, total: 0 },
+      lightsActive: 0,
+    };
+    // Merge exactly the way finish() does: conditional spread.
+    const ml = summarizeMl(true, { handMs: 40, poseMs: 20, faceMs: 10 }, 10);
+    const withMl: PerfGateResult = { ...base, ...(ml ? { ml } : {}) };
+    const parsed = JSON.parse(JSON.stringify(withMl)) as PerfGateResult;
+    expect(parsed.ml).toEqual({
+      available: true,
+      handMs: 4,
+      poseMs: 2,
+      faceMs: 1,
+      totalMsPerFrame: 7,
+    });
+    expect(parsed.pass).toBe(true);
+    // Without &ml=1 the field is absent entirely, not null.
+    const parsedBase = JSON.parse(JSON.stringify(base)) as PerfGateResult;
+    expect('ml' in parsedBase).toBe(false);
   });
 });
 

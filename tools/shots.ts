@@ -27,6 +27,10 @@ const SUFFIX = process.env.SHOT_SUFFIX ? `-${process.env.SHOT_SUFFIX}` : '';
 const SHOTS = [1, 2, 3];
 /** SHOT_BARE=1 drops gloves/PIP/HUD for clean environment hero shots. */
 const BARE = process.env.SHOT_BARE === '1' ? '&bare=1' : '';
+/** SHOT_DELAY_MS waits after the ready flag before capturing (fire timing). */
+const DELAY_MS = Number.parseInt(process.env.SHOT_DELAY_MS ?? '0', 10) || 0;
+/** SHOT_ONLY limits capture to one pose index (e.g. SHOT_ONLY=1). */
+const ONLY = Number.parseInt(process.env.SHOT_ONLY ?? '0', 10) || 0;
 
 async function serverUp(): Promise<boolean> {
   try {
@@ -57,6 +61,7 @@ async function main(): Promise<void> {
   const browser = await chromium.launch();
   try {
     for (const n of SHOTS) {
+      if (ONLY !== 0 && n !== ONLY) continue;
       const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
       page.on('console', (m) => {
         if (m.type() === 'error') console.error(`[shot-${n}] console.error:`, m.text());
@@ -78,6 +83,7 @@ async function main(): Promise<void> {
         await page.close();
         continue;
       }
+      if (DELAY_MS > 0) await page.waitForTimeout(DELAY_MS);
       await page.screenshot({ path });
       console.log(`captured ${path}  (${url})`);
       await page.close();

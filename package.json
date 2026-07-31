@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "fixtures": "node --loader tsx fixtures/generate.ts",
     "typecheck": "tsc --noEmit",
-    "shots": "tsx tools/shots.ts"
+    "shots": "tsx tools/shots.ts",
+    "perf": "tsx tools/perfrun.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
