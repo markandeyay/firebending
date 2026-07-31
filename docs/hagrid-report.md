@@ -211,3 +211,76 @@ slightly below the measured values (e.g. fist precision >= 0.93 at 0.75,
 palm separable-precision >= 0.96 and recall >= 0.91, grip precision >= 0.94
 and recall >= 0.60 above the 0.75 shelf, dislike <= 1% at grip 0.45). It
 runs headless in node with no network.
+
+## Appendix (Round 3 Phase 4f): palmScore2D and the live-scorer switch
+
+### Why a 2D palm scorer
+
+The user reports palm poses are barely recognized LIVE while the same
+constants score well here. The suspect is palmScore's facing factor:
+`normal.z` of `normalize(cross(indexMCP - wrist, pinkyMCP - wrist))`. The
+numerator of that z component is a pure 2D winding determinant, but the
+NORMALIZATION divides by the full 3D cross-product length whose x/y
+components are products of landmark z values. MediaPipe hand z is a
+monocular depth guess (the reason z is banned from the motion loop, see
+src/gestures/motion.ts); live z noise inflates the normal's x/y
+components, deflates `normal.z`, and the facing smoothstep (0.1 -> 0.6)
+then multiplies real palms down. HaGRID cannot exhibit this failure: its
+landmarks are 2D, z is exactly 0, and facing degenerates to a binary
++1/-1 - which is precisely why the original retune could not tune the
+facing edges. `palmScore2D` (src/gestures/poses.ts) removes z entirely:
+
+1. extension: per-finger tip/MCP wrist-distance ratios from x/y only;
+2. together: mean adjacent 2D fingertip gap / 2D hand scale;
+3. winding: the raw signed 2D determinant / hand-scale^2 (the same
+   winding information as the facing factor, positive iff the palm faces
+   the camera, immune to z noise), smoothstepped 0.05 -> 0.35;
+4. hull aspect: minor/major of the min-area rectangle over the 2D
+   landmark convex hull (rotating calipers), smoothstepped 0.12 -> 0.25
+   as a permissive guard against knife-thin edge-on silhouettes.
+
+### Edge tuning (tools/hagrid/features.ts 2D block + analyze.ts sweeps)
+
+Extension and gap edges carry over verbatim from palmScore (1.3/1.65,
+0.55/1.0): HaGRID's z = 0 means those constants were ALREADY tuned on the
+identical 2D quantities. Winding: palm p5 0.35 / stop p5 0.33 vs
+stop_inverted p95 -0.40, no_gesture p75 -0.20, mute median 0.01. Swept
+WIND_FULL over 0.15/0.25/0.35/0.40/0.45/0.55: 0.35 is the largest value
+that keeps recall exactly at the 3D scorer's numbers at both hysteresis
+levels while maximizing precision; 0.40 begins dropping recall (0.9233 at
+enter 0.75). WIND_MIN 0.1 also nicks recall (0.9300), so 0.05 stays.
+Aspect: palm p5 0.43, stop p5 0.28; ASPECT_FULL 0.35 drops recall to
+0.9100 (narrow real stop hands), so the guard sits at 0.12 -> 0.25.
+
+### palmScore vs palmScore2D on HaGRID (pos = palm + stop, 300 hands each)
+
+| operating point | palmScore (3D) | palmScore2D |
+| --- | --- | --- |
+| enter 0.75: recall | 0.9317 | **0.9317** (equal) |
+| enter 0.75: precision, full suite | 0.6671 | **0.6817** |
+| enter 0.75: precision, suite minus four/no_gesture | 0.9790 | **0.9859** |
+| enter 0.75: precision, suite minus four | 0.946 | **0.976** |
+| exit 0.55: recall | 0.9583 | **0.9583** (equal) |
+| stop_inverted > 0.55 (back of hand) | 0/300 | 0/300 |
+| no_gesture > 0.75 | 20/300 | **6/300** |
+| four > 0.75 (open-hand alias, by design) | 247/300 | 247/300 |
+
+palmScore2D dominates: identical recall at both hysteresis levels with
+strictly better precision at every swept threshold, and back-of-hand
+rejection intact via the winding sign alone.
+
+### Decision (rule: 2D recall >= 3D recall at equal-or-better precision)
+
+**Applied: palmScore2D is the live palm scorer.** `moves.ts` (the palm
+hysteresis input) and the studio's `signals.ts` (the exported `palm`
+signal) now call palmScore2D; palmScore stays exported for comparison.
+Synthetic-fixture replays were verified unaffected (palm-wave, flame-fan,
+rising-flame all hold 26+ frames above the 0.75 enter on the 2D scorer;
+full move suite green). `tools/analyze.ts` scores the palm-static-5s take
+of a real export with BOTH scorers side by side; since HaGRID cannot show
+the live z-noise failure, the user's recording is the final verdict on
+the switch (docs/drill-report.md, palm section).
+
+Regression floors for palmScore2D live in tests/hagridPoses.test.ts,
+including a pin that its recall never drops below palmScore's at either
+hysteresis level (the decision rule re-checked on every run).

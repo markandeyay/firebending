@@ -12,4 +12,22 @@ declare module 'node:fs' {
   export function writeFileSync(path: string | URL, data: string): void;
   export function readFileSync(path: string | URL, encoding: 'utf8'): string;
   export function existsSync(path: string | URL): boolean;
+  export function readdirSync(path: string | URL): string[];
+  export function statSync(path: string | URL): { mtimeMs: number };
 }
+
+declare module 'node:path' {
+  export function join(...parts: string[]): string;
+  export function dirname(path: string): string;
+}
+
+declare module 'node:url' {
+  export function fileURLToPath(url: string | URL): string;
+  export function pathToFileURL(path: string): URL;
+}
+
+/** Minimal process surface for tools/analyze.ts (tsx entry + tests). */
+declare const process: {
+  argv: string[];
+  env: Record<string, string | undefined>;
+};

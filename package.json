@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "studio": "vite --port 5205 --strictPort --open /studio.html",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
@@ -12,7 +13,8 @@
     "fixtures": "node --loader tsx fixtures/generate.ts",
     "typecheck": "tsc --noEmit",
     "shots": "tsx tools/shots.ts",
-    "perf": "tsx tools/perfrun.ts"
+    "perf": "tsx tools/perfrun.ts",
+    "analyze": "tsx tools/analyze.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",

@@ -58,7 +58,7 @@ import {
   handSpeed,
   lm,
   normalize,
-  palmScore,
+  palmScore2D,
   scale,
   HANDS_TOGETHER_THRESHOLD,
 } from './poses';
@@ -121,6 +121,13 @@ export interface MoveEngineConfig {
    * fixtures, tests) DEFAULT_PROFILE reproduces the classic tuned values.
    */
   profile?: MotionProfile;
+  /**
+   * EXACT motion thresholds, bypassing profile derivation entirely. Used by
+   * the analyze tool (tools/analyze.ts) to replay a recorded take under the
+   * very thresholds that were active when it was captured (the studio
+   * exports them per take). Takes precedence over `profile` when present.
+   */
+  thresholds?: MotionThresholds;
 }
 
 /**
@@ -460,6 +467,14 @@ export class MoveEngine {
    * When false every record call is guarded off: zero allocation, zero cost.
    */
   debugEnabled = false;
+  /**
+   * Optional sink receiving EVERY near-miss record the instant it is
+   * written, before the ring can overwrite it (the analyze tool captures
+   * per-rep maxima; the 8-slot ring only serves the debug HUD). Called only
+   * while debugEnabled. The record object is REUSED in place: listeners
+   * must copy fields they keep.
+   */
+  nearMissListener: ((rec: Readonly<NearMissRecord>) => void) | null = null;
   /** Preallocated ring of the last NEAR_MISS_CAPACITY near-miss records. */
   private readonly nearMissRing: NearMissRecord[] = [];
   private nearMissNext = 0;
@@ -491,7 +506,7 @@ export class MoveEngine {
     this.velocityScale = config.velocityScale ?? 1.0;
     this.togetherThreshold = config.handsTogetherThreshold ?? HANDS_TOGETHER_THRESHOLD;
     this.breathValue = config.initialBreath ?? BREATH_MAX;
-    this.th = thresholdsFrom(config.profile ?? DEFAULT_PROFILE);
+    this.th = config.thresholds ?? thresholdsFrom(config.profile ?? DEFAULT_PROFILE);
   }
 
   /** The derived motion thresholds in use (debug HUD display). */
@@ -614,6 +629,7 @@ export class MoveEngine {
     rec.threshold2 = threshold2;
     this.nearMissNext = (this.nearMissNext + 1) % NEAR_MISS_CAPACITY;
     this.nearMissCount = Math.min(this.nearMissCount + 1, NEAR_MISS_CAPACITY);
+    if (this.nearMissListener !== null) this.nearMissListener(rec);
   }
 
   /** Process one frame. Returns every MoveEvent emitted on this frame. */
@@ -732,8 +748,15 @@ export class MoveEngine {
     // fist (see gestures/motion.ts).
     s.growth = bboxGrowthRate(s.window, dt);
 
+    // Palm runs on the pure-2D scorer (Round 3 Phase 4f): palmScore's
+    // facing factor divides by a z-noise-inflated 3D normal length and
+    // multiplied real palms down live; palmScore2D keeps the same winding
+    // information from landmark x/y only. On HaGRID it matches the 3D
+    // scorer's recall exactly at both hysteresis levels with better
+    // precision (docs/hagrid-report.md appendix). palmScore stays exported
+    // for comparison; tools/analyze.ts computes both on recorded takes.
     const fist = fistScore(raw);
-    const palm = palmScore(raw, handedness);
+    const palm = palmScore2D(raw, handedness);
     const grip = gripScore(raw);
     // Grip runs on a short moving average; see GRIP_SMOOTH_FRAMES above.
     s.gripRecent.push(grip);

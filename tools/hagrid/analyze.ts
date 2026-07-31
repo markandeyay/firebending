@@ -24,6 +24,10 @@ import { fileURLToPath } from 'node:url';
 import {
   fistScore,
   palmScore,
+  palmScore2D,
+  palmWinding2D,
+  hullAspect2D,
+  handScale2D,
   gripScore,
   smoothstep,
   clamp01,
@@ -41,6 +45,14 @@ import {
   PALM_GAP_SPREAD,
   PALM_FACING_MIN,
   PALM_FACING_FULL,
+  PALM2D_EXT_NONE_RATIO,
+  PALM2D_EXT_FULL_RATIO,
+  PALM2D_GAP_TIGHT,
+  PALM2D_GAP_SPREAD,
+  PALM2D_WIND_MIN,
+  PALM2D_WIND_FULL,
+  PALM2D_ASPECT_MIN,
+  PALM2D_ASPECT_FULL,
   GRIP_THUMB_NEAR,
   GRIP_THUMB_FAR,
   GRIP_THUMB_RISE_MIN,
@@ -96,6 +108,14 @@ const C = {
   PALM_GAP_SPREAD,
   PALM_FACING_MIN,
   PALM_FACING_FULL,
+  PALM2D_EXT_NONE_RATIO,
+  PALM2D_EXT_FULL_RATIO,
+  PALM2D_GAP_TIGHT,
+  PALM2D_GAP_SPREAD,
+  PALM2D_WIND_MIN,
+  PALM2D_WIND_FULL,
+  PALM2D_ASPECT_MIN,
+  PALM2D_ASPECT_FULL,
   GRIP_THUMB_NEAR,
   GRIP_THUMB_FAR,
   GRIP_THUMB_RISE_MIN,
@@ -151,6 +171,42 @@ function pPalm(hand: HandFrame, handedness: Handedness, c: Consts): number {
   const towardCameraZ = handedness === 'right' ? normal.z : -normal.z;
   const facing = smoothstep(c.PALM_FACING_MIN, c.PALM_FACING_FULL, towardCameraZ);
   return clamp01(extension * together * facing);
+}
+
+function dist2D(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** Parametrized mirror of poses.ts palmScore2D (parity-checked below).
+ *  Winding and hull aspect reuse the exported feature functions (they carry
+ *  no tunable constants); only the smoothstep edges are parametrized. */
+function pPalm2D(hand: HandFrame, handedness: Handedness, c: Consts): number {
+  const s = handScale2D(hand);
+  if (s < 1e-6) return 0;
+  const wrist = lm(hand, LM.WRIST);
+  let extSum = 0;
+  for (const [mcp, tip] of FINGERS) {
+    const mcpDist = dist2D(lm(hand, mcp), wrist);
+    if (mcpDist < 1e-6) continue;
+    const r = dist2D(lm(hand, tip), wrist) / mcpDist;
+    extSum += smoothstep(c.PALM2D_EXT_NONE_RATIO, c.PALM2D_EXT_FULL_RATIO, r);
+  }
+  const extension = extSum / FINGERS.length;
+  const tips = [LM.INDEX_TIP, LM.MIDDLE_TIP, LM.RING_TIP, LM.PINKY_TIP];
+  let gapSum = 0;
+  for (let i = 0; i + 1 < tips.length; i++) {
+    gapSum += dist2D(lm(hand, tips[i]!), lm(hand, tips[i + 1]!)) / s;
+  }
+  const together = 1 - smoothstep(c.PALM2D_GAP_TIGHT, c.PALM2D_GAP_SPREAD, gapSum / 3);
+  const facing = smoothstep(
+    c.PALM2D_WIND_MIN,
+    c.PALM2D_WIND_FULL,
+    palmWinding2D(hand, handedness),
+  );
+  const aspect = smoothstep(c.PALM2D_ASPECT_MIN, c.PALM2D_ASPECT_FULL, hullAspect2D(hand));
+  return clamp01(extension * together * facing * aspect);
 }
 
 function pGrip(hand: HandFrame, c: Consts): number {
@@ -258,9 +314,12 @@ const names = [...classes.keys()].sort();
       const p = Math.abs(
         pPalm(s.hand, s.handedness, C) - palmScore(s.hand, s.handedness)
       );
+      const p2 = Math.abs(
+        pPalm2D(s.hand, s.handedness, C) - palmScore2D(s.hand, s.handedness)
+      );
       const g = Math.abs(pGrip(n, C) - gripScore(n));
-      if (f > 1e-12 || p > 1e-12 || g > 1e-12) {
-        throw new Error(`parity failure: fist=${f} palm=${p} grip=${g}`);
+      if (f > 1e-12 || p > 1e-12 || p2 > 1e-12 || g > 1e-12) {
+        throw new Error(`parity failure: fist=${f} palm=${p} palm2D=${p2} grip=${g}`);
       }
       checked++;
     }
@@ -292,11 +351,13 @@ const names = [...classes.keys()].sort();
 // Score every class under every scorer.
 const fistS = new Map<string, number[]>();
 const palmS = new Map<string, number[]>();
+const palm2DS = new Map<string, number[]>();
 const gripS = new Map<string, number[]>();
 for (const cls of names) {
   const samples = classes.get(cls)!;
   fistS.set(cls, samples.map((s) => pFist(s.hand, c)));
   palmS.set(cls, samples.map((s) => pPalm(s.hand, s.handedness, c)));
+  palm2DS.set(cls, samples.map((s) => pPalm2D(s.hand, s.handedness, c)));
   gripS.set(cls, samples.map((s) => pGrip(atNeutralY(s.hand), c)));
 }
 
@@ -367,6 +428,32 @@ const evals: PoseEval[] = [
     label: 'palm (pos=palm+stop)',
     pos: [...palmS.get('palm')!, ...palmS.get('stop')!],
     neg: collect(palmS, NEG_SUITE),
+  },
+  {
+    label: 'palm2D (pos=palm+stop)',
+    pos: [...palm2DS.get('palm')!, ...palm2DS.get('stop')!],
+    neg: collect(palm2DS, NEG_SUITE),
+    extra: [
+      ['stop_inverted', palm2DS.get('stop_inverted')!],
+      ['four', palm2DS.get('four')!],
+      ['no_gesture', palm2DS.get('no_gesture')!],
+    ],
+  },
+  {
+    label: 'palm2D separable (suite minus four/no_gesture)',
+    pos: [...palm2DS.get('palm')!, ...palm2DS.get('stop')!],
+    neg: collect(
+      palm2DS,
+      NEG_SUITE.filter((n) => n !== 'four' && n !== 'no_gesture')
+    ),
+  },
+  {
+    label: 'palm separable REFERENCE (3D, suite minus four/no_gesture)',
+    pos: [...palmS.get('palm')!, ...palmS.get('stop')!],
+    neg: collect(
+      palmS,
+      NEG_SUITE.filter((n) => n !== 'four' && n !== 'no_gesture')
+    ),
   },
   {
     label: 'grip shape (pos=like; suite negatives)',

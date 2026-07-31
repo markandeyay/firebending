@@ -144,6 +144,40 @@ export const PALM_GAP_SPREAD = 1.0;
 export const PALM_FACING_MIN = 0.1;
 export const PALM_FACING_FULL = 0.6;
 
+// palmScore2D edges (pure 2D; tuned on HaGRID via tools/hagrid/features.ts +
+// analyze.ts, see docs/hagrid-report.md appendix). The extension and gap
+// edges reuse the HaGRID-tuned palmScore values: HaGRID landmarks are 2D
+// (z = 0), so those edges were ALREADY tuned on exactly the 2D quantities.
+
+/** 2D finger extension edges (tip/MCP wrist-distance ratio, x/y only). */
+export const PALM2D_EXT_NONE_RATIO = 1.3;
+export const PALM2D_EXT_FULL_RATIO = 1.65;
+/** 2D adjacent-fingertip gap / 2D hand scale: together / spread edges. */
+export const PALM2D_GAP_TIGHT = 0.55;
+export const PALM2D_GAP_SPREAD = 1.0;
+/**
+ * Signed 2D palm winding area (det(indexMCP-wrist, pinkyMCP-wrist) / s^2,
+ * sign-flipped for the left hand so positive = palm toward camera). HaGRID:
+ * palm p5 0.35 / stop p5 0.33, stop_inverted p95 -0.40, no_gesture p75
+ * -0.20, mute median 0.01. Swept 0.15/0.25/0.35/0.40/0.45/0.55: FULL 0.35
+ * is the largest edge that keeps recall exactly at the 3D scorer's values
+ * (0.9317 at enter 0.75, 0.9583 at exit 0.55) while maximizing precision
+ * (suite 0.6817 vs 3D 0.6671); 0.40 starts dropping recall (0.9233).
+ * MIN 0.1 also nicks recall (0.9300), so 0.05 stays.
+ */
+export const PALM2D_WIND_MIN = 0.05;
+export const PALM2D_WIND_FULL = 0.35;
+/**
+ * Min-area-rect aspect (minor/major) of the 2D landmark hull. A permissive
+ * tail-guard against edge-on silhouettes only: HaGRID palm p5 0.43, stop p5
+ * 0.28, so full credit at 0.25 costs almost no positives while cutting
+ * knife-thin (strongly foreshortened) hands. FULL 0.35 was tried and drops
+ * recall to 0.9100 at enter 0.75 (narrow real stop hands lose credit); the
+ * guard must stay at 0.25.
+ */
+export const PALM2D_ASPECT_MIN = 0.12;
+export const PALM2D_ASPECT_FULL = 0.25;
+
 /** Thumb tip distance to index PIP/MCP, / hand scale: near / far edges. */
 export const GRIP_THUMB_NEAR = 1.1;
 export const GRIP_THUMB_FAR = 1.7;
@@ -242,6 +276,201 @@ export function palmScore(hand: HandFrame, handedness: Handedness): number {
   const facing = smoothstep(PALM_FACING_MIN, PALM_FACING_FULL, towardCameraZ);
 
   return clamp01(extension * together * facing);
+}
+
+// ---------------------------------------------------------------------------
+// palmScore2D (pure 2D palm detection; no landmark z anywhere)
+// ---------------------------------------------------------------------------
+
+/** 2D (x/y only) distance between two landmarks. */
+function dist2D(a: Vec3, b: Vec3): number {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** 2D hand scale unit: wrist to middle MCP distance, x/y only. */
+export function handScale2D(hand: HandFrame): number {
+  return dist2D(lm(hand, LM.WRIST), lm(hand, LM.MIDDLE_MCP));
+}
+
+interface Pt2 {
+  x: number;
+  y: number;
+}
+
+const cross2 = (o: Pt2, a: Pt2, b: Pt2): number =>
+  (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+/**
+ * Monotone-chain convex hull over the x/y projection of the given points,
+ * returned in counter-clockwise order (screen coords, y down). Collinear
+ * points are dropped. Fewer than 3 distinct points return what exists.
+ * Exported for tools and tests.
+ */
+export function convexHull2D(points: readonly Vec3[]): Pt2[] {
+  const p: Pt2[] = points
+    .map((q) => ({ x: q.x, y: q.y }))
+    .sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length <= 2) return p;
+  const lower: Pt2[] = [];
+  for (const pt of p) {
+    while (lower.length >= 2) {
+      const o = lower[lower.length - 2];
+      const a = lower[lower.length - 1];
+      if (o && a && cross2(o, a, pt) <= 0) lower.pop();
+      else break;
+    }
+    lower.push(pt);
+  }
+  const upper: Pt2[] = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const pt = p[i];
+    if (!pt) continue;
+    while (upper.length >= 2) {
+      const o = upper[upper.length - 2];
+      const a = upper[upper.length - 1];
+      if (o && a && cross2(o, a, pt) <= 0) upper.pop();
+      else break;
+    }
+    upper.push(pt);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+/**
+ * Aspect ratio (minor extent / major extent, 0..1) of the minimum-area
+ * bounding rectangle of the 2D landmark hull (rotating calipers over hull
+ * edges). Rotation-invariant, unlike an axis-aligned bbox: a tilted open
+ * hand keeps its true silhouette proportions. Degenerate hulls return 0.
+ * Exported for tools and tests.
+ */
+export function hullAspect2D(hand: HandFrame): number {
+  const h = convexHull2D(hand.landmarks);
+  if (h.length < 3) return 0;
+  let bestArea = Infinity;
+  let bestAspect = 0;
+  for (let i = 0; i < h.length; i++) {
+    const a = h[i];
+    const b = h[(i + 1) % h.length];
+    if (!a || !b) continue;
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const elen = Math.sqrt(ex * ex + ey * ey);
+    if (elen < EPS) continue;
+    const ux = ex / elen;
+    const uy = ey / elen;
+    let minU = Infinity;
+    let maxU = -Infinity;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    for (const pt of h) {
+      const u = pt.x * ux + pt.y * uy;
+      const v = -pt.x * uy + pt.y * ux;
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    const w = maxU - minU;
+    const hh = maxV - minV;
+    const area = w * hh;
+    if (area < bestArea) {
+      bestArea = area;
+      const major = Math.max(w, hh);
+      bestAspect = major < EPS ? 0 : Math.min(w, hh) / major;
+    }
+  }
+  return clamp01(bestAspect);
+}
+
+/**
+ * Signed 2D palm winding area: det(indexMCP - wrist, pinkyMCP - wrist)
+ * divided by the squared 2D hand scale, sign-flipped for the left hand so
+ * the result is positive iff the palm faces the camera (same winding
+ * argument as palmScore's facing factor, but WITHOUT the 3D normalization:
+ * the determinant reads only landmark x/y). Twice the signed area of the
+ * wrist / index-MCP / pinky-MCP triangle in hand-scale units: large when the
+ * palm is flat to the camera, near 0 edge-on, negative for back-of-hand.
+ * Exported for tools and tests.
+ */
+export function palmWinding2D(hand: HandFrame, handedness: Handedness): number {
+  const s = handScale2D(hand);
+  if (s < EPS) return 0;
+  const w = lm(hand, LM.WRIST);
+  const i = lm(hand, LM.INDEX_MCP);
+  const p = lm(hand, LM.PINKY_MCP);
+  const det = (i.x - w.x) * (p.y - w.y) - (i.y - w.y) * (p.x - w.x);
+  const signed = handedness === 'right' ? det : -det;
+  const wind = signed / (s * s);
+  return Number.isFinite(wind) ? wind : 0;
+}
+
+/**
+ * Open palm shown to the camera, from PURE 2D features (landmark x/y only;
+ * no z anywhere). Motivation: palmScore's facing factor divides the winding
+ * determinant by the full 3D cross-product length, whose x/y components are
+ * built from MediaPipe's monocular-depth z guesses; live z noise inflates
+ * that length, shrinks |normal.z| and multiplies real palms down (the
+ * "palm poses barely recognized live" report). This scorer keeps the same
+ * winding INFORMATION via the raw 2D determinant, which no z noise can
+ * touch. Product of four factors:
+ *
+ * 1. Extension: per-finger 2D tip/MCP wrist-distance ratio, smoothstepped
+ *    PALM2D_EXT_NONE_RATIO -> PALM2D_EXT_FULL_RATIO, averaged.
+ * 2. Together: mean adjacent 2D fingertip gap / 2D hand scale, credited
+ *    below PALM2D_GAP_TIGHT, gone by PALM2D_GAP_SPREAD.
+ * 3. Winding: palmWinding2D smoothstepped PALM2D_WIND_MIN -> _FULL
+ *    (positive = palm toward camera; rejects back-of-hand and edge-on).
+ * 4. Aspect: min-area-rect aspect of the 2D landmark hull, smoothstepped
+ *    PALM2D_ASPECT_MIN -> _FULL; a permissive guard that only cuts
+ *    knife-thin (strongly foreshortened) silhouettes.
+ *
+ * Edges tuned on HaGRID (docs/hagrid-report.md appendix). All-finite and
+ * clamped like every other scorer.
+ */
+export function palmScore2D(hand: HandFrame, handedness: Handedness): number {
+  const s = handScale2D(hand);
+  if (s < EPS) return 0;
+
+  // 1. Extension (2D ratios).
+  const wrist = lm(hand, LM.WRIST);
+  let extSum = 0;
+  for (const [mcp, , , tip] of FINGERS) {
+    const mcpDist = dist2D(lm(hand, mcp), wrist);
+    if (mcpDist < EPS) continue;
+    const r = dist2D(lm(hand, tip), wrist) / mcpDist;
+    extSum += smoothstep(PALM2D_EXT_NONE_RATIO, PALM2D_EXT_FULL_RATIO, r);
+  }
+  const extension = extSum / FINGERS.length;
+
+  // 2. Fingers together (2D gaps).
+  const tips = [LM.INDEX_TIP, LM.MIDDLE_TIP, LM.RING_TIP, LM.PINKY_TIP];
+  let gapSum = 0;
+  let gapCount = 0;
+  for (let i = 0; i + 1 < tips.length; i++) {
+    const a = tips[i];
+    const b = tips[i + 1];
+    if (a === undefined || b === undefined) continue;
+    gapSum += dist2D(lm(hand, a), lm(hand, b)) / s;
+    gapCount++;
+  }
+  const meanGap = gapCount > 0 ? gapSum / gapCount : Infinity;
+  const together = 1 - smoothstep(PALM2D_GAP_TIGHT, PALM2D_GAP_SPREAD, meanGap);
+
+  // 3. Winding (2D facing surrogate).
+  const facing = smoothstep(
+    PALM2D_WIND_MIN,
+    PALM2D_WIND_FULL,
+    palmWinding2D(hand, handedness),
+  );
+
+  // 4. Hull aspect guard.
+  const aspect = smoothstep(PALM2D_ASPECT_MIN, PALM2D_ASPECT_FULL, hullAspect2D(hand));
+
+  return clamp01(extension * together * facing * aspect);
 }
 
 // ---------------------------------------------------------------------------

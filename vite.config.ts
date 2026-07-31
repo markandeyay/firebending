@@ -6,6 +6,12 @@ export default defineConfig({
   build: {
     target: 'es2022',
     sourcemap: true,
+    // The game bundle builds ONLY index.html. studio.html (the recording
+    // studio, `npm run studio`) is a dev-server page and must never ship
+    // in the game build.
+    rollupOptions: {
+      input: 'index.html',
+    },
   },
   worker: {
     // The pose worker dynamically imports @mediapipe/tasks-vision, which

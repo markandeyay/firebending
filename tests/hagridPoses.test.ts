@@ -26,6 +26,7 @@ import {
   lm,
   normalize,
   palmScore,
+  palmScore2D,
   sub,
 } from '../src/gestures/poses';
 import type { Handedness } from '../src/gestures/poses';
@@ -213,6 +214,59 @@ describe('palmScore on real hands', () => {
   it('holds recall at the 0.55 exit level', () => {
     const { recall } = precisionRecall(pos, negSeparable, 0.55);
     expect(recall).toBeGreaterThanOrEqual(0.94); // measured 0.958
+  });
+});
+
+describe('palmScore2D on real hands (the LIVE palm scorer since R3 P4f)', () => {
+  // Measured at switch time (docs/hagrid-report.md appendix): at enter 0.75
+  // recall 0.9317 (identical to palmScore) with separable precision 0.9859
+  // (vs 3D 0.9790); at exit 0.55 recall 0.9583 (identical). Floors sit
+  // slightly below the measured values, as for the other scorers.
+  const palm2DOf = (s: Sample) => palmScore2D(s.hand, s.handedness);
+  const pos = scores(['palm', 'stop'], palm2DOf);
+  const pos3D = scores(['palm', 'stop'], palmOf);
+  const negSeparable = scores(
+    NEG_SUITE.filter((c) => c !== 'four' && c !== 'no_gesture'),
+    palm2DOf
+  );
+  const negNoFour = scores(
+    NEG_SUITE.filter((c) => c !== 'four'),
+    palm2DOf
+  );
+
+  it('meets the floors at the 0.75 enter level (separable distractors)', () => {
+    const { precision, recall } = precisionRecall(pos, negSeparable, 0.75);
+    expect(precision).toBeGreaterThanOrEqual(0.97); // measured 0.986
+    expect(recall).toBeGreaterThanOrEqual(0.91); // measured 0.932
+  });
+
+  it('stays precise with no_gesture included (open-hand aliases remain)', () => {
+    const { precision } = precisionRecall(pos, negNoFour, 0.75);
+    expect(precision).toBeGreaterThanOrEqual(0.96); // measured 0.976
+  });
+
+  it('rejects back-of-hand open palms via the 2D winding sign', () => {
+    const inv = scores(['stop_inverted'], palm2DOf);
+    expect(inv.filter((x) => x > 0.55).length / inv.length).toBeLessThanOrEqual(
+      0.01 // measured 0/300
+    );
+  });
+
+  it('holds recall at the 0.55 exit level', () => {
+    const { recall } = precisionRecall(pos, negSeparable, 0.55);
+    expect(recall).toBeGreaterThanOrEqual(0.94); // measured 0.958
+  });
+
+  it('pins the switch decision: recall never below the 3D scorer', () => {
+    // The live-scorer decision rule (equal-or-better recall at
+    // equal-or-better precision on HaGRID) must keep holding as fixtures
+    // or constants evolve; a regression here means the switch needs
+    // re-evaluation against docs/hagrid-report.md.
+    for (const t of [0.55, 0.75]) {
+      const r2 = precisionRecall(pos, negSeparable, t).recall;
+      const r3 = precisionRecall(pos3D, [], t).recall;
+      expect(r2).toBeGreaterThanOrEqual(r3 - 1e-9);
+    }
   });
 });
 
