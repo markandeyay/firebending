@@ -46,66 +46,6 @@
 /* Shared controls                                                     */
 /* ------------------------------------------------------------------ */
 
-/* Wax seal button: deep vermilion disc, embossed with inset shadows and a
-   faint speckle texture (repeating radial gradients, reads as wax grain),
-   muted gold rim. Press feel is a small heavy sink, no bounce; hover
-   already presses in slightly, like a thumb testing the wax. */
-.fb-seal-btn {
-  width: 122px;
-  height: 122px;
-  border-radius: 50%;
-  background-color: var(--fb-vermilion);
-  background-image:
-    repeating-radial-gradient(
-      circle at 31% 27%,
-      rgba(13, 10, 8, 0.09) 0 1px,
-      rgba(13, 10, 8, 0) 1px 4px
-    ),
-    repeating-radial-gradient(
-      circle at 67% 71%,
-      rgba(224, 164, 88, 0.05) 0 1px,
-      rgba(224, 164, 88, 0) 1px 5px
-    );
-  border: 2px solid rgba(168, 133, 60, 0.55);
-  color: var(--fb-parchment);
-  font-family: var(--fb-font-display);
-  font-size: 1.3rem;
-  letter-spacing: 0.24em;
-  text-indent: 0.24em;
-  cursor: pointer;
-  box-shadow:
-    inset 0 3px 6px rgba(224, 164, 88, 0.2),
-    inset 0 -7px 14px rgba(13, 10, 8, 0.68),
-    inset 0 0 0 7px rgba(107, 31, 21, 0.95),
-    inset 0 0 0 9px rgba(13, 10, 8, 0.3),
-    0 5px 16px rgba(0, 0, 0, 0.65);
-  transition: transform 90ms ease-out, box-shadow 90ms ease-out;
-}
-
-.fb-seal-btn:hover {
-  transform: translateY(1px) scale(0.99);
-  box-shadow:
-    inset 0 3px 7px rgba(13, 10, 8, 0.4),
-    inset 0 -6px 12px rgba(13, 10, 8, 0.62),
-    inset 0 0 0 7px rgba(107, 31, 21, 0.95),
-    inset 0 0 0 9px rgba(13, 10, 8, 0.35),
-    0 3px 12px rgba(0, 0, 0, 0.6);
-}
-
-.fb-seal-btn:active {
-  transform: translateY(3px) scale(0.97);
-  box-shadow:
-    inset 0 5px 10px rgba(13, 10, 8, 0.6),
-    inset 0 0 0 7px rgba(107, 31, 21, 0.95),
-    inset 0 0 0 9px rgba(13, 10, 8, 0.4),
-    0 2px 7px rgba(0, 0, 0, 0.55);
-}
-
-.fb-seal-btn:focus-visible {
-  outline: 2px solid var(--fb-gold);
-  outline-offset: 4px;
-}
-
 /* Parchment panel for HUD and dialogs. */
 .fb-panel {
   background-color: var(--fb-parchment);
@@ -129,26 +69,12 @@
 /* Title screen                                                        */
 /* ------------------------------------------------------------------ */
 
+/* Film title card cut like a woodblock print. Flat near-black field, one
+   left vertical axis, the wordmark hung low-left, a temple banner on the
+   right. No vignette, no gradient washes: the field is a solid block of
+   near-black, like unprinted paper soaked in sumi. */
 .fb-title {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* Black lacquer with a subtle firelit vignette, plus a barely-visible
-     warm cast around the wordmark so it sits in firelight, not void.
-     Lighting, not decoration. */
-  background:
-    radial-gradient(
-      ellipse 62% 48% at 50% 40%,
-      rgba(201, 119, 46, 0.085) 0%,
-      rgba(201, 119, 46, 0.035) 42%,
-      rgba(201, 119, 46, 0) 72%
-    ),
-    radial-gradient(
-      ellipse at 50% 44%,
-      var(--fb-charcoal) 0%,
-      #120e0b 58%,
-      var(--fb-lacquer) 100%
-    );
+  background-color: #0b0907;
 }
 
 .fb-title-embers {
@@ -159,15 +85,135 @@
   pointer-events: none;
 }
 
-.fb-title-stack {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3rem;
-  text-align: center;
+/* The printing-block edge: one hairline running the full height. */
+.fb-title-axis {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 11%;
+  width: 1px;
+  background-color: rgba(168, 133, 60, 0.22);
+  pointer-events: none;
 }
 
+/* Hanging oxblood temple banner, swallowtail cut, top-hung on the right.
+   The one bold block of color; the ember column drifts around it. */
+.fb-title-banner {
+  position: absolute;
+  top: -6px;
+  right: 17%;
+  width: 4.9rem;
+  height: 70%;
+  background-color: var(--fb-oxblood);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 82%, 0 100%);
+  /* Hung cloth is never perfectly plumb. */
+  transform: rotate(1.4deg);
+  transform-origin: top center;
+  pointer-events: none;
+}
+
+/* Wordmark and menu column, hung off the axis, set low-left. */
+.fb-title-block {
+  position: absolute;
+  left: calc(11% + 2.4rem);
+  top: 40%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.fb-title-mark {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.fb-title-fire {
+  font-family: var(--fb-font-display);
+  font-weight: 700;
+  font-size: clamp(3.4rem, 8vw, 6.2rem);
+  line-height: 0.95;
+  letter-spacing: 0.02em;
+  color: var(--fb-parchment);
+}
+
+/* Vermilion stroke between the two words: the printer's second color.
+   Stretched to the full measure of FIREBENDING, a real printed bar. The
+   letters of SIMULATOR justify edge to edge across the same measure
+   (per-letter spans set from title.ts). */
+.fb-title-sim {
+  align-self: stretch;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 1.2rem;
+  padding-top: 0.9rem;
+  border-top: 4px solid var(--fb-vermilion);
+  font-family: var(--fb-font-display);
+  font-weight: 400;
+  font-size: clamp(0.9rem, 1.8vw, 1.2rem);
+  color: rgba(216, 200, 168, 0.72);
+}
+
+/* The menu steps off the wordmark axis onto its own, indented right: a
+   second column in the composition, not a continuation of the type block. */
+.fb-title-menu {
+  margin-top: 4.2rem;
+  margin-left: clamp(4rem, 9vw, 8.5rem);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1.3rem;
+}
+
+/* Understated ink text, not buttons. Hover: an ember underline bleeds in
+   from the left like ink wicking into paper. */
+.fb-menu-item {
+  position: relative;
+  padding: 0 0 5px;
+  background: none;
+  border: none;
+  font-family: var(--fb-font-display);
+  font-size: 1.05rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(216, 200, 168, 0.78);
+  cursor: pointer;
+  transition: color 180ms ease-out;
+}
+
+.fb-menu-item::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  background-color: var(--fb-ember);
+  border-radius: 0 2px 2px 0;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 260ms cubic-bezier(0.25, 0.8, 0.35, 1);
+}
+
+.fb-menu-item:hover,
+.fb-menu-item:focus-visible {
+  color: var(--fb-parchment);
+  outline: none;
+}
+
+.fb-menu-item:hover::after,
+.fb-menu-item:focus-visible::after {
+  transform: scaleX(1);
+}
+
+.fb-title-privacy {
+  position: absolute;
+  left: calc(11% + 2.4rem);
+  bottom: 2.2rem;
+}
+
+/* Brushstroke wordmark for the gate/message screens (mobile front door). */
 .fb-wordmark {
   margin: 0;
   font-family: var(--fb-font-display);
@@ -176,10 +222,7 @@
   letter-spacing: 0.3em;
   text-indent: 0.3em;
   color: var(--fb-parchment);
-  /* Ink depth plus a faint warm cast from the embers. Kept restrained. */
-  text-shadow:
-    0 2px 4px rgba(0, 0, 0, 0.85),
-    0 0 24px rgba(201, 119, 46, 0.2);
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.85);
 }
 
 /* ------------------------------------------------------------------ */
