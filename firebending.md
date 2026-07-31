@@ -253,6 +253,8 @@ Format: `[timestamp] agent | tasks touched | result | next`
 
 [2026-07-31] orchestrator | ROUND 3 complete, phases 1-7, one commit each (61d5819..3fda461 + handoff) | P1 ROI crops (pose finds wrists, hands run on upscaled 256px crops, handedness from pose side, full-frame fallback); P2 FaceLandmarker deleted (head pose from pose nose/ears, 9 sign-contract tests), pose in a worker at 25Hz with interpolation, FULL selectable behind a measured-adoption rule; P3 body.ts signals + framing gate (7 specific correctives, 2s hold, calibration step + mid-game pause); P4 RECORDING STUDIO (npm run studio, 16 takes, synced video+signal capture, review/trim/rep labeling, IndexedDB, export) + npm run analyze (real-engine replay, per-miss blocking signal, proposals never auto-applied) + palmScore2D switched live on HaGRID evidence (equal recall, no_gesture FPs 20->6 per 300); P5 anatomical hands (mitt sphere deleted); P6 post chain (DoF measured 49.7ms and cut), normal/roughness maps, 6 stations recomposed, palette audit clean, perf PASS 16.7ms median with full post | 588 tests, tsc clean | NEXT: user records takes, npm run analyze, apply proposals
 
+[2026-07-31 night] orchestrator | FINAL PASS begun; drill export ingested (11 takes) | CRITICAL: 0 reps confirmed in review on every take (user recorded but never clicked confirm), 5 takes absent (palm strikes x2, all 3 negatives); palm-static take: 83/83 frames >0.75 on BOTH palm scorers (palm detection vindicated on real data) | P1: analyze extended to auto-peak rep windows (data-derived, logged, not guessed); moveset simplification to 7 pose-agnostic moves per user directive
+
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
 
