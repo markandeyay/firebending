@@ -160,6 +160,8 @@ async function bootGameFlow(
         : {}),
       // Live camera feed for the webcam PIP panel; replay paths pass none.
       ...(liveStream !== null ? { stream: liveStream } : {}),
+      // First-run hint chip: LIVE flow only (replay loops skip it).
+      ...(replayFixture === null ? { firstRun: true } : {}),
     };
     void manager.show('arena', ctx).then(() => {
       // Brazier crackle bed once the hall is on screen.

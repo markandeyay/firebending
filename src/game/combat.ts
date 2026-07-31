@@ -292,6 +292,13 @@ export interface CombatDeps {
    * fixed pose at deps.playerPosition ?? PLAYER_WORLD_POSITION, forward -z.
    */
   cameraPose?: CameraPoseProvider;
+  /**
+   * A discrete projectile resolved against a construct (same site where the
+   * VFX impact/spark burst spawns). Wire to a small camera-shake kick so
+   * jabs land with physical weight. Position is a clone; damage is the
+   * final amount dealt (empowerment applied).
+   */
+  onImpact?: (position: THREE.Vector3, damage: number) => void;
   /** Twin Cannon impact freeze, milliseconds. */
   onHitStop?: (ms: number) => void;
   /** Kill slow-mo: time scale and duration in milliseconds. */
@@ -672,6 +679,7 @@ export class CombatSystem {
     construct.takeHit(damage, _impulse.copy(_dir).multiplyScalar(spec.impulse), hitPoint);
     p.onImpact(hitPoint.clone(), _normal.clone());
     this.deps.impacts?.burst(hitPoint.clone(), _normal.clone(), damage / 20);
+    this.deps.onImpact?.(hitPoint.clone(), damage);
 
     if (p.sourceMove === 'twin-cannon') {
       this.deps.onHitStop?.(TWIN_HIT_STOP_MS);

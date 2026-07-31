@@ -2,25 +2,31 @@
  * In-game HUD (T051, spec Sections 8 and 9): ink and parchment, DOM based,
  * no WebGL. Three pieces:
  *
- *   1. Breath meter, bottom left: an ink brush stroke drawn on a small
- *      canvas over a parchment backing with a muted gold frame. The stroke
- *      width follows the Breath value smoothly (exponential approach).
- *   2. Enemy health: a wax-seal indicator floated above the construct's
- *      screen-projected position. Crack lines are revealed in four stages as
- *      damage rises, and the seal shatters on death.
+ *   1. Breath meter, bottom left: a clean horizontal brush-stroke bar in
+ *      deep charcoal ink on a parchment track (tapered right end via
+ *      asymmetric border-radius). The fill follows the Breath value smoothly
+ *      (exponential approach); below LOW_BREATH_THRESHOLD the stroke tip
+ *      warms to ember and pulses gently.
+ *   2. Enemy health: a small cracked wax seal floated just above the
+ *      construct's head. Pure CSS (radial gradients + inset shadows): deep
+ *      vermilion wax, embossed ring, a stamped ember glyph. Damage reveals
+ *      1/2/3 crack lines at <75/50/25% hp (setSealDamage, is-cracked-N
+ *      classes) with a squash-pop when the crack level rises, and the seal
+ *      shatters on death.
  *   3. Floating damage numbers: brush-styled plain numerals that spawn at
- *      the projected hit position, drift up and fade over 0.9 s. Empowered
- *      and twin hits render bigger in deeper vermilion. Spawn position is
- *      biased toward the side the player faces (head yaw, Section 8).
+ *      the projected hit position with a scale-pop entrance and a small
+ *      deterministic rotation jitter, drift up and fade over 0.9 s.
+ *      Empowered and twin hits render bigger in muted gold.
  *
  * three.js is deliberately kept OUT of this module: the combat/integration
  * layer projects world positions to screen pixels and passes plain numbers
- * (projectTo, damageNumber). Styling lives in src/ui/theme.css (--fb-*
- * palette custom properties).
+ * (projectTo, setSealDamage, damageNumber). Styling lives in
+ * src/ui/theme.css (--fb-* palette custom properties).
  *
- * Headless testing: the pure parts (crackStageFor, approach,
- * sideBiasFromYaw, DamageNumberLedger) are exported and DOM-free. The HUD
- * class itself requires a DOM and throws early without one.
+ * Headless testing: the pure parts (sealCrackLevel, approach,
+ * sideBiasFromYaw, damageNumberRotationDeg, DamageNumberLedger) are exported
+ * and DOM-free. The HUD class itself requires a DOM and throws early
+ * without one.
  */
 
 // ---------------------------------------------------------------------------
@@ -39,13 +45,33 @@ export const SIDE_BIAS_MAX_PX = 56;
 /** Seal shatter animation length, seconds. Matches fb-seal-shatter CSS. */
 export const SEAL_SHATTER_SECONDS = 0.65;
 
+/** Below this Breath value the ink stroke's tip warms to ember and pulses. */
+export const LOW_BREATH_THRESHOLD = 30;
+
+/** Damage-number rotation jitter bound, degrees (deterministic per spawn). */
+export const DAMAGE_NUMBER_JITTER_DEG = 4;
+
 /**
- * Crack stage from damage percent (0..1): 0 pristine, then one more crack
- * for every 20% of damage taken, capped at 4. Death shatters regardless.
+ * Seal crack level from the damage fraction (0..1): one crack line each time
+ * the construct drops below 75/50/25% hp (damage above 0.25/0.5/0.75),
+ * capped at 3. Death shatters the seal regardless.
  */
-export function crackStageFor(damagePercent: number): number {
-  if (!Number.isFinite(damagePercent) || damagePercent <= 0) return 0;
-  return Math.min(4, Math.floor(damagePercent * 5));
+export function sealCrackLevel(damageFraction: number): number {
+  if (!Number.isFinite(damageFraction)) return 0;
+  if (damageFraction > 0.75) return 3;
+  if (damageFraction > 0.5) return 2;
+  if (damageFraction > 0.25) return 1;
+  return 0;
+}
+
+/**
+ * Deterministic damage-number rotation for spawn `seq` (a running counter):
+ * an integer sweep across [-JITTER, +JITTER] degrees that never repeats on
+ * consecutive spawns. Pure, for tests and the HUD alike.
+ */
+export function damageNumberRotationDeg(seq: number): number {
+  const span = DAMAGE_NUMBER_JITTER_DEG * 2 + 1;
+  return ((Math.abs(seq) * 5) % span) - DAMAGE_NUMBER_JITTER_DEG;
 }
 
 /**
@@ -119,89 +145,61 @@ export interface DamageNumberOptions {
   side?: number;
 }
 
-const BREATH_W = 240;
-const BREATH_H = 26;
 const BREATH_MAX = 100;
-/** Redraw threshold, breath units; avoids repainting a static bar. */
+/** Redraw threshold, breath units; avoids restyling a static bar. */
 const BREATH_REDRAW_EPS = 0.25;
-
-/** Deterministic jitter for the brush-stroke edges (stable across redraws). */
-function makeJitter(seed: number, count: number): number[] {
-  let a = seed >>> 0;
-  const out: number[] = [];
-  for (let i = 0; i < count; i++) {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    out.push(((t ^ (t >>> 14)) >>> 0) / 4294967296);
-  }
-  return out;
-}
-
-const SEAL_SVG = `
-<svg viewBox="0 0 64 64" aria-hidden="true">
-  <circle cx="32" cy="32" r="26" style="fill: var(--fb-vermilion); stroke: var(--fb-gold); stroke-width: 2; opacity: 0.96;" />
-  <circle cx="32" cy="32" r="19" style="fill: none; stroke: rgba(13, 10, 8, 0.4); stroke-width: 1.5;" />
-  <circle cx="32" cy="32" r="6" style="fill: rgba(13, 10, 8, 0.28);" />
-  <path class="fb-crack" d="M32 7 L29 17 L34 26 L31 32" />
-  <path class="fb-crack" d="M56 36 L46 34 L39 38 L33 34" />
-  <path class="fb-crack" d="M14 50 L22 43 L26 36 L31 33" />
-  <path class="fb-crack" d="M44 55 L40 46 L34 41 L32 35" />
-</svg>`;
+/** Seal crack-level classes, index = level (0 = pristine, no class). */
+const SEAL_CRACK_CLASSES = ['', 'is-cracked-1', 'is-cracked-2', 'is-cracked-3'] as const;
 
 export class HUD {
   private readonly root: HTMLDivElement;
-  private readonly breathCanvas: HTMLCanvasElement;
-  private readonly breathCtx: CanvasRenderingContext2D | null;
+  private readonly breathFill: HTMLDivElement;
   private readonly sealEl: HTMLDivElement;
-  private readonly crackEls: SVGPathElement[];
   private readonly flashEl: HTMLDivElement;
-  private readonly jitter: number[];
   private readonly ledger = new DamageNumberLedger();
 
   private breathTarget = BREATH_MAX;
   private breathShown = BREATH_MAX;
   private lastDrawnBreath = -1;
+  private breathLow = false;
 
   private construct: AttachedConstruct | null = null;
   private sealPlaced = false;
   private shattered = false;
   private shatterAge = 0;
-  private lastCrackStage = -1;
+  private sealLevel = 0;
+  private dmgSeq = 0;
 
   constructor(container: HTMLElement) {
     if (typeof document === 'undefined') {
       throw new Error('HUD requires a DOM; use the exported pure helpers headlessly.');
     }
-    this.jitter = makeJitter(0x51ea1, 64);
 
     this.root = document.createElement('div');
     this.root.className = 'fb-hud';
 
-    // Breath meter.
+    // Breath meter: parchment track, charcoal ink stroke.
     const breathWrap = document.createElement('div');
     breathWrap.className = 'fb-breath';
     const label = document.createElement('div');
     label.className = 'fb-breath-label';
     label.textContent = 'BREATH';
-    const frame = document.createElement('div');
-    frame.className = 'fb-breath-frame';
-    this.breathCanvas = document.createElement('canvas');
-    this.breathCanvas.className = 'fb-breath-canvas';
-    this.breathCanvas.width = BREATH_W * 2;
-    this.breathCanvas.height = BREATH_H * 2;
-    this.breathCtx = this.breathCanvas.getContext('2d');
-    this.breathCtx?.scale(2, 2);
-    frame.appendChild(this.breathCanvas);
-    breathWrap.append(label, frame);
+    const track = document.createElement('div');
+    track.className = 'fb-breath-track';
+    this.breathFill = document.createElement('div');
+    this.breathFill.className = 'fb-breath-fill';
+    track.appendChild(this.breathFill);
+    breathWrap.append(label, track);
 
-    // Wax-seal enemy health indicator.
+    // Cracked wax seal enemy health indicator (pure CSS, see theme.css).
     this.sealEl = document.createElement('div');
     this.sealEl.className = 'fb-seal-mark';
     this.sealEl.style.display = 'none';
-    this.sealEl.innerHTML = SEAL_SVG;
-    this.crackEls = Array.from(this.sealEl.querySelectorAll<SVGPathElement>('.fb-crack'));
+    for (let i = 1; i <= 3; i++) {
+      const crack = document.createElement('div');
+      crack.className = `fb-seal-crack fb-seal-crack--${i}`;
+      this.sealEl.appendChild(crack);
+    }
 
     // Player-hit screen-edge flash.
     this.flashEl = document.createElement('div');
@@ -236,9 +234,41 @@ export class HUD {
     this.shattered = false;
     this.shatterAge = 0;
     this.sealPlaced = false;
-    this.lastCrackStage = -1;
-    this.sealEl.classList.remove('is-shattered');
+    this.sealLevel = 0;
+    this.sealEl.classList.remove(
+      'is-shattered',
+      'is-pop',
+      'is-cracked-1',
+      'is-cracked-2',
+      'is-cracked-3',
+    );
     this.sealEl.style.display = 'none';
+  }
+
+  /**
+   * Reflect the construct's damage fraction (0..1) on the seal: crack lines
+   * appear at <75/50/25% hp with a small squash-pop each time the crack
+   * level rises. The integration layer wires this from the construct's hp.
+   */
+  setSealDamage(fraction: number): void {
+    const level = sealCrackLevel(fraction);
+    if (level === this.sealLevel) return;
+    const rose = level > this.sealLevel;
+    this.sealLevel = level;
+    this.sealEl.classList.remove('is-cracked-1', 'is-cracked-2', 'is-cracked-3');
+    const cls = SEAL_CRACK_CLASSES[level];
+    if (cls) this.sealEl.classList.add(cls);
+    if (rose && level > 0) {
+      this.sealEl.classList.remove('is-pop');
+      // Force a reflow so back-to-back crack steps restart the pop.
+      void this.sealEl.offsetWidth;
+      this.sealEl.classList.add('is-pop');
+    }
+  }
+
+  /** Current seal crack level 0..3 (bookkeeping view, for tuning). */
+  get sealCrackLevelShown(): number {
+    return this.sealLevel;
   }
 
   /**
@@ -267,7 +297,9 @@ export class HUD {
 
   /**
    * Spawn a floating damage number at screen pixel (x, y). Plain numerals;
-   * the brush feel comes from the display font and CSS weight only.
+   * the brush feel comes from the display font and CSS weight only. Each
+   * spawn gets a scale-pop entrance and a small deterministic rotation
+   * jitter (counter-seeded, so replays render identically).
    */
   damageNumber(x: number, y: number, amount: number, opts?: DamageNumberOptions): void {
     const bias = opts?.side ?? sideBiasFromYaw(opts?.faceYaw ?? 0);
@@ -276,6 +308,7 @@ export class HUD {
     el.textContent = String(Math.max(1, Math.round(amount)));
     el.style.left = `${x + bias * SIDE_BIAS_MAX_PX}px`;
     el.style.top = `${y}px`;
+    el.style.setProperty('--fb-dmg-rot', `${damageNumberRotationDeg(this.dmgSeq++)}deg`);
     this.root.appendChild(el);
     this.ledger.spawn(DAMAGE_NUMBER_SECONDS, () => el.remove());
   }
@@ -316,7 +349,9 @@ export class HUD {
       if (!this.shattered) {
         this.shattered = true;
         this.shatterAge = 0;
-        for (const crack of this.crackEls) crack.classList.add('is-open');
+        // All cracks open as the wax lets go.
+        this.sealEl.classList.remove('is-cracked-1', 'is-cracked-2', 'is-pop');
+        this.sealEl.classList.add('is-cracked-3');
         if (this.sealPlaced) this.sealEl.classList.add('is-shattered');
       }
       this.shatterAge += dt;
@@ -325,13 +360,9 @@ export class HUD {
       }
       return;
     }
-    const stage = crackStageFor(c.damagePercent);
-    if (stage !== this.lastCrackStage) {
-      this.lastCrackStage = stage;
-      this.crackEls.forEach((crack, i) => {
-        crack.classList.toggle('is-open', i < stage);
-      });
-    }
+    // Crack level follows the attached construct even without explicit
+    // setSealDamage wiring (the integration layer may also call it).
+    this.setSealDamage(c.damagePercent);
   }
 
   dispose(): void {
@@ -343,53 +374,15 @@ export class HUD {
   // Brush stroke rendering
   // -------------------------------------------------------------------------
 
+  /** Restyle the ink stroke: width from the smoothed value, ember tip low. */
   private drawBreath(): void {
-    const ctx = this.breathCtx;
-    if (!ctx) return;
     this.lastDrawnBreath = this.breathShown;
-    const w = BREATH_W;
-    const h = BREATH_H;
-    ctx.clearRect(0, 0, w, h);
     const fraction = Math.max(0, Math.min(1, this.breathShown / BREATH_MAX));
-    if (fraction <= 0.01) return;
-
-    const pad = 3;
-    const barW = (w - pad * 2) * fraction;
-    const midY = h / 2;
-    const body = h * 0.32;
-    // Ink darkens the parchment; near-empty Breath warms toward vermilion.
-    ctx.fillStyle = fraction < 0.25 ? '#5e2417' : '#221a14';
-
-    const steps = Math.max(2, Math.floor(barW / 7));
-    ctx.beginPath();
-    for (let i = 0; i <= steps; i++) {
-      const u = i / steps;
-      const x = pad + barW * u;
-      const taper = u > 0.82 ? 1 - ((u - 0.82) / 0.18) * 0.7 : 1;
-      const j = this.jitter[(i * 2) % this.jitter.length] ?? 0.5;
-      const yTop = midY - body * taper - (j - 0.5) * 5;
-      if (i === 0) ctx.moveTo(x, yTop);
-      else ctx.lineTo(x, yTop);
+    this.breathFill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    const low = this.breathShown < LOW_BREATH_THRESHOLD;
+    if (low !== this.breathLow) {
+      this.breathLow = low;
+      this.breathFill.classList.toggle('is-low', low);
     }
-    for (let i = steps; i >= 0; i--) {
-      const u = i / steps;
-      const x = pad + barW * u;
-      const taper = u > 0.82 ? 1 - ((u - 0.82) / 0.18) * 0.7 : 1;
-      const j = this.jitter[(i * 2 + 1) % this.jitter.length] ?? 0.5;
-      ctx.lineTo(x, midY + body * taper + (j - 0.5) * 5);
-    }
-    ctx.closePath();
-    ctx.fill();
-
-    // Dry-brush streaks near the stroke's tip.
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.globalAlpha = 0.45;
-    for (let s = 0; s < 3; s++) {
-      const j = this.jitter[(steps + s * 5) % this.jitter.length] ?? 0.5;
-      const y = midY + (j - 0.5) * body * 1.6;
-      ctx.fillRect(pad + barW * 0.7, y, barW * 0.3, 1.1);
-    }
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
   }
 }

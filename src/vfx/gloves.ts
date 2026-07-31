@@ -65,7 +65,14 @@ export const GLOVE_EASE_SEC = 0.15;
 /** Real-ish hand size: wrist to middle MCP, meters (screen fallback scale). */
 export const HAND_SIZE_M = 0.085;
 /** Overall chunkiness multiplier on glove volumes (1 = anatomical). */
-export const GLOVE_SIZE_SCALE = 1.25;
+export const GLOVE_SIZE_SCALE = 1.55;
+/**
+ * Constant down-screen bias (normalized screen units, y grows down) added to
+ * the wrist anchor before unprojection, so resting hands settle toward the
+ * bottom of the frame like first-person boxing games instead of hovering at
+ * mid-screen.
+ */
+export const GLOVE_REST_DROP = 0.09;
 /** Base finger segment radius, meters, before GLOVE_SIZE_SCALE. */
 export const GLOVE_FINGER_RADIUS_M = 0.011;
 /** Charge light between the fists: intensity / radius. */
@@ -288,6 +295,8 @@ function makeAssets(): GloveAssets {
 // ---------------------------------------------------------------------------
 
 const ZERO_AIM: Vec3 = { x: 0, y: 0, z: 0 };
+/** Scratch wrist point with the rest-drop bias applied (no allocation). */
+const _wristDropped: Vec3 = { x: 0, y: 0, z: 0 };
 const _camQuat = new THREE.Quaternion();
 const _target = new THREE.Vector3();
 const _vel = new THREE.Vector3();
@@ -337,19 +346,24 @@ class GloveRig {
     mitt.castShadow = false;
     // Teardrop, not a ball: wider than tall, longest along the fingers so
     // it swallows the MCP knuckle row and tapers toward the wrist. The
-    // mitt silhouette, not the knuckle spheres, defines the glove.
-    mitt.scale.set(0.64, 0.52, 1.45);
-    mitt.position.set(0, 0.1, 0);
+    // mitt silhouette, not the knuckle spheres, defines the glove; the
+    // straps and palm box must stay INSIDE it (anything poking below the
+    // dome reads as a plate the glove sits on in the POV shots).
+    // Local y is exaggerated (0.92) against the palm's squeezed y scale so
+    // the mitt keeps its absolute height while the palm BOX shrinks fully
+    // inside the dome; poking box corners read as a plate under the glove.
+    mitt.scale.set(0.72, 0.92, 1.3);
+    mitt.position.set(0, 0.17, 0);
     this.palm.add(mitt);
     const strapA = new THREE.Mesh(assets.box, assets.strap);
     strapA.castShadow = false;
-    strapA.scale.set(1.06, 0.16, 1.35);
+    strapA.scale.set(0.9, 0.16, 1.2);
     strapA.position.set(0, 0.16, 0);
     this.palm.add(strapA);
     const strapB = new THREE.Mesh(assets.box, assets.strap);
     strapB.castShadow = false;
-    strapB.scale.set(1.06, 0.14, 1.3);
-    strapB.position.set(0, -0.22, 0);
+    strapB.scale.set(0.82, 0.12, 1.05);
+    strapB.position.set(0, -0.14, 0);
     strapB.rotation.z = 0.06;
     this.palm.add(strapB);
     this.group.add(this.palm);
@@ -371,7 +385,12 @@ class GloveRig {
     if (!wristScreen) return;
 
     // --- Anchor on the reach plane (same mapping as the fire origin) ------
-    const mapped = screenToWorld(wristScreen, ZERO_AIM, camera);
+    // Biased slightly down-screen (GLOVE_REST_DROP) so resting hands sit
+    // near the frame bottom; the fire keeps spawning from the true wrist.
+    _wristDropped.x = wristScreen.x;
+    _wristDropped.y = wristScreen.y + GLOVE_REST_DROP;
+    _wristDropped.z = wristScreen.z;
+    const mapped = screenToWorld(_wristDropped, ZERO_AIM, camera);
     _target.copy(mapped.origin);
     camera.getWorldQuaternion(_camQuat);
 
@@ -430,20 +449,19 @@ class GloveRig {
         (idx.y + pnk.y) * 0.5 * 0.55,
         (idx.z + pnk.z) * 0.5 * 0.55,
       );
-      this.palm.scale.set(width, height * 1.05, depth);
+      // The box hides inside the mitt (its bottom corners must not poke
+      // out below the dome).
+      this.palm.scale.set(width * 0.7, height * 0.5, depth);
       handBasisQuaternion(shape, this.palm.quaternion);
 
-      // Gold cuff ring just below the wrist along the hand's "up" axis,
-      // wide enough to clear the mitt bulge so the trim always reads.
-      const upLen = height > 1e-6 ? height : 1;
-      this.cuff.position.set(
-        (-mid.x / upLen) * 0.03,
-        (-mid.y / upLen) * 0.03,
-        (-mid.z / upLen) * 0.03,
-      );
+      // Gold cuff: a SHORT trim ring tucked up against the mitt base, a
+      // little above the wrist along the hand's "up" axis. Anything wider,
+      // taller or lower reads as a pedestal the glove sits on (the arena
+      // shots made them look like pots on stands).
+      this.cuff.position.set(mid.x * 0.12, mid.y * 0.12, mid.z * 0.12);
       this.cuff.quaternion.copy(this.palm.quaternion);
-      // Narrower than the mitt: the cuff is trim, not a pedestal.
-      this.cuff.scale.set(width * 0.34, 0.032, width * 0.34);
+      // Narrower than the mitt and squat: the cuff is trim, not a stand.
+      this.cuff.scale.set(width * 0.22, 0.022, width * 0.22);
     }
 
     this.posed = true;

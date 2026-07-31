@@ -29,7 +29,8 @@ interface Ember {
 }
 
 const EMBER_COLORS = ['#e0a458', '#c9772e', '#a85a22', '#8a2f1d'] as const;
-const EMBER_COUNT = 34;
+/** Noticeably denser than the first pass (34) yet still sparse and calm. */
+const EMBER_COUNT = 62;
 
 function makeEmber(width: number, height: number, anywhere: boolean): Ember {
   return {

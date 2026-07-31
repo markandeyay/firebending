@@ -153,6 +153,11 @@ export interface ArenaContext {
    * and HUD so hero shots show only the world.
    */
   bare?: boolean;
+  /**
+   * First arena entry of a LIVE session (set by main.ts on the live path
+   * only): shows a small parchment hint chip for a few seconds on arrival.
+   */
+  firstRun?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,8 +167,16 @@ export interface ArenaContext {
 const CAMERA_FOV = 55;
 /** Largest wall-clock dt a frame will integrate (tab-switch protection). */
 const MAX_FRAME_DT_SEC = 0.1;
-/** Seal floats this high above the construct's base (world y). */
-const SEAL_ANCHOR_Y = 2.5;
+/** Seal hovers just over the construct's head (~1.9 m above its LOCAL floor). */
+const SEAL_ANCHOR_Y = 1.9;
+/** Projectile impact kick (a whisper of weight for jabs): base + damage
+ *  scaling, capped, brief. Twin Cannon keeps its bigger hit-stop on top. */
+const IMPACT_SHAKE_BASE = 0.03;
+const IMPACT_SHAKE_PER_DAMAGE = 0.002;
+const IMPACT_SHAKE_MAX = 0.09;
+const IMPACT_SHAKE_SEC = 0.18;
+/** First-run hint chip stays up this long before fading (seconds). */
+const FIRST_RUN_HINT_MS = 6000;
 /** Damage-number accumulator: flush immediately at or above this. */
 const DAMAGE_FLUSH_IMMEDIATE = 5;
 /** Otherwise flush at most this often (sustained-beam batching). */
@@ -305,6 +318,8 @@ export class ArenaScreen implements Screen {
   private lossLayer: HTMLElement | null = null;
   private lossCountEl: HTMLElement | null = null;
   private hintChipEl: HTMLElement | null = null;
+  private firstRunChipEl: HTMLElement | null = null;
+  private firstRunTimer: ReturnType<typeof setTimeout> | null = null;
   private faultLayer: HTMLElement | null = null;
   private onContextLost: ((e: Event) => void) | null = null;
 
@@ -454,6 +469,15 @@ export class ArenaScreen implements Screen {
         this.audio.onHitStop?.(ms);
       },
       onSlowMo: (scale, ms) => this.startSlowMo(scale, ms),
+      // Every discrete projectile impact lands a small physical kick; the
+      // clamp keeps a jab a tap and a twin-cannon slug still modest (its
+      // real weight is the hit-stop).
+      onImpact: (_position, damage) => {
+        rig.shake(
+          Math.min(IMPACT_SHAKE_BASE + damage * IMPACT_SHAKE_PER_DAMAGE, IMPACT_SHAKE_MAX),
+          IMPACT_SHAKE_SEC,
+        );
+      },
       onPlayerHit: (damage) => {
         hud?.playerHitFlash();
         this.audio.onPlayerHit?.(damage);
@@ -523,6 +547,9 @@ export class ArenaScreen implements Screen {
     this.hint = new SingleHandHint();
     this.buildLossOverlay(root);
     this.buildHintChip(root);
+
+    // First-run hint (live flow only): fade in on arrival, out after 6 s.
+    if (context.firstRun && !context.bare) this.buildFirstRunChip(root);
 
     // Debug HUD overlay (D key), hidden until toggled.
     this.debugHud = new DebugHud(root);
@@ -626,6 +653,12 @@ export class ArenaScreen implements Screen {
     this.lossCountEl = null;
     this.hintChipEl?.remove();
     this.hintChipEl = null;
+    if (this.firstRunTimer !== null) {
+      clearTimeout(this.firstRunTimer);
+      this.firstRunTimer = null;
+    }
+    this.firstRunChipEl?.remove();
+    this.firstRunChipEl = null;
     this.faultLayer?.remove();
     this.faultLayer = null;
     this.detachFrames?.();
@@ -816,6 +849,8 @@ export class ArenaScreen implements Screen {
         .setY(construct.group.position.y + SEAL_ANCHOR_Y);
       projectWorldToScreen(this.tmpWorld, camera, canvas, this.point);
       hud.projectTo(this.point.x, this.point.y, this.point.visible);
+      // Crack lines follow the construct's hp (<75/50/25% reveal 1/2/3).
+      hud.setSealDamage(construct.damagePercent);
     }
 
     // Damage numbers: poll hp deltas on the current construct (see header).
@@ -926,6 +961,22 @@ export class ArenaScreen implements Screen {
     chip.textContent = 'One hand found. Fist moves ready.';
     root.appendChild(chip);
     this.hintChipEl = chip;
+  }
+
+  /** First-run parchment chip: fades in at arrival, out after 6 seconds. */
+  private buildFirstRunChip(root: HTMLElement): void {
+    const chip = document.createElement('div');
+    chip.className = 'fb-hint-chip fb-hint-chip--firstrun';
+    chip.textContent =
+      'Punch at the screen. Palm pushes wave fire. D shows why a move did not fire.';
+    root.appendChild(chip);
+    this.firstRunChipEl = chip;
+    // Next frame so the initial opacity: 0 commits and the fade-in runs.
+    requestAnimationFrame(() => chip.classList.add('is-on'));
+    this.firstRunTimer = setTimeout(() => {
+      chip.classList.remove('is-on');
+      this.firstRunTimer = null;
+    }, FIRST_RUN_HINT_MS);
   }
 
   /** Mirror the TrackingLoss state onto the overlay DOM, once per frame. */

@@ -29,9 +29,11 @@ import {
 import { EMPOWER_MULTIPLIER, type MoveEvent, type MoveName } from '../src/gestures/moves';
 import {
   approach,
-  crackStageFor,
+  DAMAGE_NUMBER_JITTER_DEG,
   DAMAGE_NUMBER_SECONDS,
   DamageNumberLedger,
+  damageNumberRotationDeg,
+  sealCrackLevel,
   sideBiasFromYaw,
 } from '../src/ui/hud';
 import type { LandmarkFrame, PoseFrame } from '../src/tracking/types';
@@ -341,6 +343,31 @@ describe('projectile hits', () => {
     combat.update(FIXED_TIMESTEP);
     expect(construct.hp).toBeCloseTo(92, 6);
     expect(p.onImpact).toHaveBeenCalledTimes(1);
+
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('fires deps.onImpact with the hit position and damage on a jab hit', async () => {
+    const { physics, manager } = await setup();
+    const construct = manager.spawn(FAR_ANCHOR, 1);
+    const effects = makeEffects();
+    const onImpact = vi.fn();
+    const combat = new CombatSystem({ manager, effects, onImpact });
+
+    effects.projectiles.push(makeProjectile('jab-blast', CHEST));
+    combat.update(FIXED_TIMESTEP);
+
+    expect(construct.hp).toBeCloseTo(92, 6);
+    expect(onImpact).toHaveBeenCalledTimes(1);
+    const [position, damage] = onImpact.mock.calls[0] as [THREE.Vector3, number];
+    expect(position).toBeInstanceOf(THREE.Vector3);
+    expect(position.distanceTo(CHEST)).toBeLessThan(1);
+    expect(damage).toBeCloseTo(DAMAGE_TABLE['jab-blast'].damage, 6);
+
+    // Consumed projectile: no second kick.
+    combat.update(FIXED_TIMESTEP);
+    expect(onImpact).toHaveBeenCalledTimes(1);
 
     manager.dispose();
     physics.dispose();
@@ -765,16 +792,28 @@ describe('kill flow', () => {
 // ---------------------------------------------------------------------------
 
 describe('HUD pure logic', () => {
-  it('maps damage percent to crack stages 0..4', () => {
-    expect(crackStageFor(-1)).toBe(0);
-    expect(crackStageFor(0)).toBe(0);
-    expect(crackStageFor(0.1)).toBe(0);
-    expect(crackStageFor(0.2)).toBe(1);
-    expect(crackStageFor(0.5)).toBe(2);
-    expect(crackStageFor(0.79)).toBe(3);
-    expect(crackStageFor(0.8)).toBe(4);
-    expect(crackStageFor(1)).toBe(4);
-    expect(crackStageFor(Number.NaN)).toBe(0);
+  it('maps the damage fraction to seal crack levels 0..3 (<75/50/25% hp)', () => {
+    expect(sealCrackLevel(-1)).toBe(0);
+    expect(sealCrackLevel(0)).toBe(0);
+    expect(sealCrackLevel(0.25)).toBe(0); // exactly 75% hp: still pristine
+    expect(sealCrackLevel(0.26)).toBe(1); // below 75% hp: first crack
+    expect(sealCrackLevel(0.5)).toBe(1);
+    expect(sealCrackLevel(0.51)).toBe(2); // below 50% hp: second crack
+    expect(sealCrackLevel(0.75)).toBe(2);
+    expect(sealCrackLevel(0.76)).toBe(3); // below 25% hp: third crack
+    expect(sealCrackLevel(1)).toBe(3);
+    expect(sealCrackLevel(Number.NaN)).toBe(0);
+  });
+
+  it('damage number rotation jitter is deterministic and bounded', () => {
+    for (let seq = 0; seq < 40; seq++) {
+      const rot = damageNumberRotationDeg(seq);
+      expect(rot).toBe(damageNumberRotationDeg(seq)); // deterministic
+      expect(Math.abs(rot)).toBeLessThanOrEqual(DAMAGE_NUMBER_JITTER_DEG);
+      expect(Number.isInteger(rot)).toBe(true);
+    }
+    // Consecutive spawns never share an angle.
+    expect(damageNumberRotationDeg(1)).not.toBe(damageNumberRotationDeg(2));
   });
 
   it('approach converges smoothly toward the target', () => {
