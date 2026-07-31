@@ -57,29 +57,48 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
  * Fixed screenshot poses for the Phase-0 capture harness (tools/shots.ts,
  * `npm run shots`). Deterministic: a locked rig skips travel, parallax,
  * breathing and shake so before/after screenshots are pixel-comparable.
- * 1 = gameplay POV, 2 = three-quarter side across the lane, 3 = low hero
- * close-up on the construct.
+ * 1 = player POV at the starting station, 2 = elevated three-quarter over
+ * the courtyard (spirit gate near, bridge and colonnade beyond), 3 = low
+ * hero shot along the coal channel toward the bridge and terrace.
  */
 export const SHOT_POSES: Readonly<
   Record<number, { position: [number, number, number]; look: [number, number, number] }>
 > = {
   1: { position: [0, 1.5, 0.6], look: [0, 1.1, -6] },
-  2: { position: [4.2, 2.2, -2.5], look: [0, 1.2, -5] },
-  3: { position: [-1.6, 0.9, -3.8], look: [0, 1.4, -6] },
+  2: { position: [5.5, 8.0, -19.0], look: [-2.5, 0.3, -1.5] },
+  3: { position: [-5.2, 0.9, -10.6], look: [-3.2, 2.0, -19.5] },
 };
 const X_AXIS = new THREE.Vector3(1, 0, 0);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const TWO_PI = Math.PI * 2;
 
+/** Named easing curves the travel system supports (Phase 5 authored paths). */
+export type TravelEasing = 'easeInOutCubic' | 'easeOutQuint' | 'easeInOutSine';
+
 export interface TravelOptions {
-  /** Travel time in seconds, clamped to [2, 3]. Default 2.5. */
+  /** Travel time in seconds, clamped to [2, 4]. Default 2.5. */
   durationSec?: number;
-  /** How far in front of the target anchor the camera settles. Default 5.5. */
+  /** How far in front of the target anchor the camera settles. Default 5.5.
+   *  Ignored when endPosition is given. */
   viewDistance?: number;
-  /** Camera eye height at arrival. Default 1.5. */
+  /** Camera eye height at arrival. Default 1.5. Ignored with endPosition. */
   eyeHeight?: number;
-  /** Sideways bow of the spline midpoints, meters. Default 2. */
+  /** Sideways bow of the spline midpoints, meters. Default 2. Ignored when
+   *  controlPoints are given. */
   lateralSwing?: number;
+  /**
+   * Authored interior spline control points, world space, in travel order.
+   * The rig prepends its current base position and appends the end position.
+   * When omitted the default alternating lateral swing is used.
+   */
+  controlPoints?: THREE.Vector3[];
+  /**
+   * Authored settle position (the arrival station's camera pose). When
+   * omitted the pose is derived from viewDistance along the approach.
+   */
+  endPosition?: THREE.Vector3;
+  /** Easing curve for the travel. Default easeInOutCubic. */
+  easing?: TravelEasing;
 }
 
 interface TravelState {
@@ -89,6 +108,7 @@ interface TravelState {
   toLook: THREE.Vector3;
   duration: number;
   elapsed: number;
+  ease: (t: number) => number;
   resolve: () => void;
 }
 
@@ -103,6 +123,20 @@ interface ShakeState {
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
+
+function easeOutQuint(t: number): number {
+  return 1 - Math.pow(1 - t, 5);
+}
+
+function easeInOutSine(t: number): number {
+  return -(Math.cos(Math.PI * t) - 1) / 2;
+}
+
+const EASINGS: Readonly<Record<TravelEasing, (t: number) => number>> = {
+  easeInOutCubic,
+  easeOutQuint,
+  easeInOutSine,
+};
 
 /** Small deterministic PRNG for shake phases (same one arena.ts uses). */
 function mulberry32(seed: number): () => number {
@@ -273,10 +307,11 @@ export class CameraRig {
    */
   travelTo(targetAnchor: THREE.Vector3, opts: TravelOptions = {}): Promise<void> {
     if (this.shotLocked) return Promise.resolve();
-    const duration = THREE.MathUtils.clamp(opts.durationSec ?? 2.5, 2, 3);
+    const duration = THREE.MathUtils.clamp(opts.durationSec ?? 2.5, 2, 4);
     const viewDistance = opts.viewDistance ?? 5.5;
     const eyeHeight = opts.eyeHeight ?? 1.5;
     const swing = opts.lateralSwing ?? 2;
+    const ease = EASINGS[opts.easing ?? 'easeInOutCubic'];
 
     const prev = this.travel;
     if (prev !== null) {
@@ -286,14 +321,20 @@ export class CameraRig {
 
     const toLook = targetAnchor.clone();
 
-    // Viewing position: viewDistance in front of the anchor, on the side we
-    // approach from, at eye height.
-    const approach = this.tmpA.copy(this.basePos).sub(targetAnchor);
-    approach.y = 0;
-    if (approach.lengthSq() < 1e-6) approach.set(0, 0, 1);
-    approach.normalize();
-    const endPos = targetAnchor.clone().addScaledVector(approach, viewDistance);
-    endPos.y = eyeHeight;
+    // Settle position: authored (Phase 5 station pose) when provided,
+    // otherwise derived viewDistance in front of the anchor along the
+    // approach, at eye height.
+    let endPos: THREE.Vector3;
+    if (opts.endPosition) {
+      endPos = opts.endPosition.clone();
+    } else {
+      const approach = this.tmpA.copy(this.basePos).sub(targetAnchor);
+      approach.y = 0;
+      if (approach.lengthSq() < 1e-6) approach.set(0, 0, 1);
+      approach.normalize();
+      endPos = targetAnchor.clone().addScaledVector(approach, viewDistance);
+      endPos.y = eyeHeight;
+    }
 
     const start = this.basePos.clone();
     if (start.distanceTo(endPos) < 1e-3) {
@@ -301,29 +342,39 @@ export class CameraRig {
       return Promise.resolve();
     }
 
-    // Lateral swing alternates sides on successive travels so back-to-back
-    // kills sweep past the flanking columns and braziers on both sides.
-    // Swing of 2 m keeps the camera inside the column line at x = +/-3.4.
-    const along = this.tmpB.copy(endPos).sub(start);
-    along.y = 0;
-    if (along.lengthSq() < 1e-6) along.set(0, 0, -1);
-    along.normalize();
-    const sideSign = this.travelCount % 2 === 0 ? 1 : -1;
+    // Interior spline points: authored recipe when provided, otherwise the
+    // default alternating lateral swing so back-to-back kills sweep past
+    // scenery on both sides.
+    let interior: THREE.Vector3[];
+    if (opts.controlPoints && opts.controlPoints.length > 0) {
+      interior = opts.controlPoints.map((p) => p.clone());
+    } else {
+      const along = this.tmpB.copy(endPos).sub(start);
+      along.y = 0;
+      if (along.lengthSq() < 1e-6) along.set(0, 0, -1);
+      along.normalize();
+      const sideSign = this.travelCount % 2 === 0 ? 1 : -1;
+      const side = this.tmpC.set(-along.z, 0, along.x).multiplyScalar(sideSign);
+
+      const p1 = start
+        .clone()
+        .lerp(endPos, 1 / 3)
+        .addScaledVector(side, swing);
+      p1.y += 0.35;
+      const p2 = start
+        .clone()
+        .lerp(endPos, 2 / 3)
+        .addScaledVector(side, swing * 0.55);
+      p2.y += 0.2;
+      interior = [p1, p2];
+    }
     this.travelCount++;
-    const side = this.tmpC.set(-along.z, 0, along.x).multiplyScalar(sideSign);
 
-    const p1 = start
-      .clone()
-      .lerp(endPos, 1 / 3)
-      .addScaledVector(side, swing);
-    p1.y += 0.35;
-    const p2 = start
-      .clone()
-      .lerp(endPos, 2 / 3)
-      .addScaledVector(side, swing * 0.55);
-    p2.y += 0.2;
-
-    const curve = new THREE.CatmullRomCurve3([start, p1, p2, endPos], false, 'centripetal');
+    const curve = new THREE.CatmullRomCurve3(
+      [start, ...interior, endPos],
+      false,
+      'centripetal',
+    );
 
     return new Promise<void>((resolve) => {
       this.travel = {
@@ -333,6 +384,7 @@ export class CameraRig {
         toLook,
         duration,
         elapsed: 0,
+        ease,
         resolve,
       };
     });
@@ -373,7 +425,7 @@ export class CameraRig {
     if (travel !== null) {
       travel.elapsed += step;
       const u = Math.min(travel.elapsed / travel.duration, 1);
-      const e = easeInOutCubic(u);
+      const e = travel.ease(u);
       travel.curve.getPoint(e, this.basePos);
       this.baseLook.lerpVectors(travel.fromLook, travel.toLook, e);
       if (u >= 1) {

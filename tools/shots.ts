@@ -25,6 +25,8 @@ const OUT_DIR = new URL('../docs/screens/', import.meta.url).pathname.replace(
 const FIXTURE = process.argv[2] ?? 'idle-rest';
 const SUFFIX = process.env.SHOT_SUFFIX ? `-${process.env.SHOT_SUFFIX}` : '';
 const SHOTS = [1, 2, 3];
+/** SHOT_BARE=1 drops gloves/PIP/HUD for clean environment hero shots. */
+const BARE = process.env.SHOT_BARE === '1' ? '&bare=1' : '';
 
 async function serverUp(): Promise<boolean> {
   try {
@@ -60,7 +62,7 @@ async function main(): Promise<void> {
         if (m.type() === 'error') console.error(`[shot-${n}] console.error:`, m.text());
       });
       page.on('pageerror', (e) => console.error(`[shot-${n}] pageerror:`, String(e)));
-      const url = `${BASE}/?screen=arena&replay=${FIXTURE}&shot=${n}`;
+      const url = `${BASE}/?screen=arena&replay=${FIXTURE}&shot=${n}${BARE}`;
       await page.goto(url);
       const path = `${OUT_DIR}shot-${n}${SUFFIX}.png`;
       try {

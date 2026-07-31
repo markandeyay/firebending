@@ -1,9 +1,10 @@
-// Headless director-chain checks (T052): the kill -> killWindow -> travel ->
-// next-construct loop, the difficulty ramp, the lane re-base (environment
-// illusion), and the Phase 5 exit criterion: the full loop driven end to end
-// by REAL replay input (jab-right fixture -> FilteredSource -> MoveEngine ->
-// real MoveEffects projectiles -> CombatSystem -> Director). Real rapier
-// physics throughout; the camera rig is a manual-resolve fake.
+// Headless director-chain checks (T052 / Phase 5): the kill -> killWindow ->
+// travel -> next-construct loop over the courtyard STATIONS, the difficulty
+// ramp, station cycling, spawn-before-travel, the no-repeat path-style rule,
+// and the exit criterion: the full loop driven end to end by REAL replay
+// input (jab-right fixture -> FilteredSource -> MoveEngine -> real
+// MoveEffects projectiles -> CombatSystem -> Director). Real rapier physics
+// throughout; the camera rig is a manual-resolve fake.
 
 import { describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
@@ -16,6 +17,7 @@ import {
 import {
   CombatSystem,
   PLAYER_WORLD_POSITION,
+  type CameraPoseProvider,
   type EffectsProvider,
   type ProjectileEffectLike,
 } from '../src/game/combat';
@@ -25,13 +27,10 @@ import {
   Director,
   KILL_WINDOW_SEC,
   lobIntervalFor,
-  REBASE_TRIGGER_Z,
-  RECENTER_Z,
-  TRAVEL_VIEW_DISTANCE,
   type DirectorRig,
   type DirectorTravelOptions,
 } from '../src/game/director';
-import { nextArenaAnchor } from '../src/game/killTravel';
+import { STATION_COUNT, stationFor } from '../src/game/killTravel';
 import { FireSystem } from '../src/vfx/fire';
 import { MoveEffects } from '../src/vfx/moveEffects';
 import { MoveEngine } from '../src/gestures/moves';
@@ -53,9 +52,12 @@ class FakeRig implements DirectorRig {
     opts: DirectorTravelOptions | undefined;
   }> = [];
   private pending: (() => void) | null = null;
+  /** Optional probe run synchronously inside travelTo (spawn-before-travel). */
+  onTravel: (() => void) | null = null;
 
   travelTo(anchor: THREE.Vector3, opts?: DirectorTravelOptions): Promise<void> {
     this.calls.push({ anchor: anchor.clone(), opts });
+    this.onTravel?.();
     return new Promise<void>((resolve) => {
       this.pending = resolve;
     });
@@ -120,11 +122,10 @@ interface World {
   rig: FakeRig;
   hud: FakeHud;
   director: Director;
-  arenaShift: ReturnType<typeof vi.fn>;
   onKillWindow: ReturnType<typeof vi.fn>;
 }
 
-async function setup(): Promise<World> {
+async function setup(cameraPose?: CameraPoseProvider): Promise<World> {
   const physics = await createPhysicsWorld();
   const parent = new THREE.Group();
   const manager = new ConstructManager(physics, parent);
@@ -132,24 +133,27 @@ async function setup(): Promise<World> {
   const combat = new CombatSystem({ manager, effects });
   const rig = new FakeRig();
   const hud = makeHud();
-  const arenaShift = vi.fn();
   const onKillWindow = vi.fn();
   const director = new Director({
     manager,
     combat,
     rig,
     hud,
-    arenaShift,
     onKillWindow,
+    ...(cameraPose ? { cameraPose } : {}),
   });
-  return { physics, manager, combat, effects, rig, hud, director, arenaShift, onKillWindow };
+  return { physics, manager, combat, effects, rig, hud, director, onKillWindow };
 }
 
 /** Kill the director's current construct through the combat projectile path. */
 function killActive(w: World): void {
   const c = w.director.currentConstruct;
   if (!c) throw new Error('no current construct to kill');
-  const chest = new THREE.Vector3(c.group.position.x, 1.25, c.group.position.z);
+  const chest = new THREE.Vector3(
+    c.group.position.x,
+    c.group.position.y + 1.25,
+    c.group.position.z,
+  );
   let guard = 0;
   while (c.isAlive && guard++ < 20) {
     w.effects.projectiles = [makeProjectile('twin-cannon', chest)];
@@ -229,21 +233,26 @@ describe('Director chain', () => {
       expect(w.rig.calls).toHaveLength(0);
 
       // Window elapses: travel begins and construct 1 already waits at
-      // anchor 1 (spawned DURING the travel).
+      // station 1's anchor (spawned BEFORE the travel).
       w.director.update(KILL_WINDOW_SEC * 0.5 + 0.01);
       expect(w.director.state).toBe('traveling');
       expect(w.rig.calls).toHaveLength(1);
-      const anchor1 = nextArenaAnchor(1).position;
-      expect(w.rig.calls[0]?.anchor.x).toBeCloseTo(anchor1.x);
-      expect(w.rig.calls[0]?.anchor.z).toBeCloseTo(anchor1.z);
+      const st1 = stationFor(1);
+      expect(w.rig.calls[0]?.anchor.x).toBeCloseTo(st1.anchor.x);
+      expect(w.rig.calls[0]?.anchor.z).toBeCloseTo(st1.anchor.z);
+      // The authored travel recipe rides along.
+      expect(w.rig.calls[0]?.opts?.durationSec).toBeGreaterThanOrEqual(2);
+      expect(w.rig.calls[0]?.opts?.durationSec).toBeLessThanOrEqual(4);
+      expect(w.rig.calls[0]?.opts?.endPosition?.distanceTo(st1.cameraPos)).toBeLessThan(1e-6);
       const c1 = w.director.currentConstruct;
       if (!c1) throw new Error('no construct 1');
       expect(c1).not.toBe(c0);
       expect(c1.isAlive).toBe(true);
-      expect(c1.group.position.z).toBeCloseTo(-11);
+      expect(c1.group.position.z).toBeCloseTo(st1.anchor.z);
       expect(c1.maxHp).toBeCloseTo(115); // 15% ramp
       expect(w.hud.attached).toEqual([c0, c1]);
       expect(w.director.constructIndex).toBe(1);
+      expect(w.director.stationIndex).toBe(1);
 
       // Arrival resumes the fight.
       w.rig.arrive();
@@ -284,48 +293,104 @@ describe('Director chain', () => {
     }
   });
 
-  it('re-bases the lane when the next anchor would pass z = -16', async () => {
+  it('cycles the courtyard stations in fixed order, looping past the end', async () => {
     const w = await setup();
     try {
       w.director.start();
-
-      // Kills 0..2 march the chain to -6, -11, -16 with no shift.
-      await killAndTravel(w); // travel to index 1 (z -11)
-      await killAndTravel(w); // travel to index 2 (z -16)
-      expect(w.arenaShift).not.toHaveBeenCalled();
-      expect(w.rig.calls[1]?.anchor.z).toBeCloseTo(-16);
-      expect(w.rig.calls[1]?.opts?.viewDistance).toBeUndefined();
-
-      // Kill 2: index 3's pure anchor sits at z = -21, past the trigger, so
-      // the lane re-bases by exactly RECENTER_Z - (-21) = +15.
-      await killAndTravel(w); // travel to index 3, re-based
-      expect(w.arenaShift).toHaveBeenCalledTimes(1);
-      expect(w.arenaShift).toHaveBeenCalledWith(15);
-      expect(w.director.laneOffsetZ).toBeCloseTo(15);
-      const rebased = w.rig.calls[2];
-      expect(rebased?.anchor.z).toBeCloseTo(RECENTER_Z);
-      expect(rebased?.anchor.x).toBeCloseTo(nextArenaAnchor(3).position.x);
-      // Re-base travels flip viewDistance so the camera settles on the near
-      // side facing forward (see director.ts header).
-      expect(rebased?.opts?.viewDistance).toBeCloseTo(-TRAVEL_VIEW_DISTANCE);
-      const c3 = w.director.currentConstruct;
-      expect(c3?.group.position.z).toBeCloseTo(RECENTER_Z);
-
-      // The next cycle repeats: indices 4, 5 march to -11, -16 unshifted,
-      // then index 6 re-bases again by +15 (running offset 30).
-      await killAndTravel(w); // index 4
-      await killAndTravel(w); // index 5
-      expect(w.arenaShift).toHaveBeenCalledTimes(1);
-      await killAndTravel(w); // index 6, second re-base
-      expect(w.arenaShift).toHaveBeenCalledTimes(2);
-      expect(w.arenaShift).toHaveBeenLastCalledWith(15);
-      expect(w.director.laneOffsetZ).toBeCloseTo(30);
-
-      // Every travel target ever issued stayed inside the playable band.
-      for (const call of w.rig.calls) {
-        expect(call.anchor.z).toBeGreaterThanOrEqual(REBASE_TRIGGER_Z - 1e-6);
-        expect(call.anchor.z).toBeLessThanOrEqual(RECENTER_Z + 1e-6);
+      // 8 kills cross the six-station cycle boundary (index 7 -> station 1).
+      for (let k = 1; k <= 8; k++) {
+        await killAndTravel(w);
+        expect(w.director.constructIndex).toBe(k);
+        expect(w.director.stationIndex).toBe(k % STATION_COUNT);
+        const st = stationFor(k);
+        const c = w.director.currentConstruct;
+        expect(c?.group.position.x).toBeCloseTo(st.anchor.x);
+        expect(c?.group.position.z).toBeCloseTo(st.anchor.z);
+        // Elevated stations (bridge deck) spawn on their local floor.
+        expect(c?.group.position.y).toBeCloseTo(st.floorY);
+        // The travel targeted the same station anchor.
+        const call = w.rig.calls[k - 1];
+        expect(call?.anchor.x).toBeCloseTo(st.anchor.x);
+        expect(call?.anchor.z).toBeCloseTo(st.anchor.z);
       }
+      // Difficulty keeps ramping by KILL index across cycles, not station.
+      expect(w.director.currentConstruct?.maxHp).toBeCloseTo(constructHpFor(8));
+    } finally {
+      w.director.dispose();
+      w.physics.dispose();
+    }
+  }, 20000);
+
+  it('spawns the next construct at its anchor BEFORE the travel starts', async () => {
+    const w = await setup();
+    try {
+      w.director.start();
+      const seen: Array<{ alive: boolean; x: number; z: number }> = [];
+      w.rig.onTravel = () => {
+        const c = w.director.currentConstruct;
+        if (!c) throw new Error('travelTo called with no current construct');
+        seen.push({
+          alive: c.isAlive,
+          x: c.group.position.x,
+          z: c.group.position.z,
+        });
+      };
+      await killAndTravel(w);
+      await killAndTravel(w);
+      expect(seen).toHaveLength(2);
+      seen.forEach((probe, i) => {
+        const st = stationFor(i + 1);
+        expect(probe.alive).toBe(true);
+        expect(probe.x).toBeCloseTo(st.anchor.x);
+        expect(probe.z).toBeCloseTo(st.anchor.z);
+      });
+    } finally {
+      w.director.dispose();
+      w.physics.dispose();
+    }
+  });
+
+  it('never plays the same path style twice in a row across 12 kills', async () => {
+    const w = await setup();
+    try {
+      w.director.start();
+      for (let k = 0; k < 12; k++) {
+        await killAndTravel(w);
+      }
+      const log = w.director.pathStyleLog;
+      expect(log).toHaveLength(12);
+      for (let i = 1; i < log.length; i++) {
+        expect(log[i]).not.toBe(log[i - 1]);
+      }
+      // The six-station cycle exercises all six authored styles.
+      expect(new Set(log).size).toBe(6);
+    } finally {
+      w.director.dispose();
+      w.physics.dispose();
+    }
+  }, 30000);
+
+  it('lobbers target the camera base position from the pose provider', async () => {
+    const eye = new THREE.Vector3(6.4, 2.55, -17.9);
+    const w = await setup({
+      position: () => eye.clone(),
+      quaternion: () => new THREE.Quaternion(),
+    });
+    try {
+      w.director.start();
+      await killAndTravel(w); // -> construct 1
+      killActive(w);
+      w.director.update(KILL_WINDOW_SEC + 0.01); // -> traveling to construct 2
+      const c2 = w.director.currentConstruct;
+      if (!c2) throw new Error('no construct 2');
+      const lobSpy = vi.spyOn(c2, 'startLobbing');
+      w.rig.arrive();
+      await flushMicrotasks();
+      expect(lobSpy).toHaveBeenCalledTimes(1);
+      const [target] = lobSpy.mock.calls[0] ?? [];
+      expect(target?.x).toBeCloseTo(eye.x);
+      expect(target?.y).toBeCloseTo(eye.y);
+      expect(target?.z).toBeCloseTo(eye.z);
     } finally {
       w.director.dispose();
       w.physics.dispose();
@@ -450,7 +515,7 @@ describe('end-to-end replay smoke', () => {
     expect(director.constructIndex).toBe(1);
     const c1 = director.currentConstruct;
     expect(c1?.isAlive).toBe(true);
-    expect(c1?.group.position.z).toBeCloseTo(-11);
+    expect(c1?.group.position.z).toBeCloseTo(stationFor(1).anchor.z);
     expect(hud.attached).toHaveLength(2);
 
     director.dispose();

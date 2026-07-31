@@ -39,12 +39,19 @@
  *   MoveEngine at integration time or by tracking a HUD-side debit). This is
  *   deliberately exposed as a callback so combat stays decoupled.
  *
- * COORDINATES: MoveEvent.aim/origin are normalized screen space (x right,
- * y DOWN, z negative toward the camera). Combat maps them into world space
- * with the documented one-point mapping (Decision Log 03:52): screen -z is
- * world -z (into the scene, toward the constructs), screen y down is world
- * y down, so world = (aim.x, -aim.y, aim.z). The player stands planted at
- * PLAYER_WORLD_POSITION (overridable via deps.playerPosition).
+ * COORDINATES (Phase 5, courtyard stations): MoveEvent.aim/origin are
+ * normalized screen space (x right, y DOWN, z negative toward the camera).
+ * The player is physically planted and never turns, but each station puts
+ * the camera at a different world position/orientation, so the mapping is
+ * CAMERA-RELATIVE: screen -z maps to the camera's forward at the current
+ * station, screen x to camera-right, screen y (down) to camera-down. The
+ * camera base pose (undeflected by parallax/shake) comes from the injected
+ * CameraPoseProvider (deps.cameraPose, wired to CameraRig.basePosition /
+ * baseQuaternion at integration). Without a provider the legacy fixed frame
+ * applies: position PLAYER_WORLD_POSITION (or deps.playerPosition) looking
+ * down world -z, which keeps the original tests' fixed-lane semantics.
+ * Coal defense (wall plane, player zone) is expressed in the same camera
+ * frame; duck detection is screen-space and unaffected.
  */
 
 import * as THREE from 'three';
@@ -253,9 +260,38 @@ export interface ImpactsLike {
   burst(position: THREE.Vector3, normal: THREE.Vector3, strength: number): void;
 }
 
+/**
+ * The rig's undeflected base pose, injected as a provider so combat never
+ * imports the camera rig. Integration wires it to CameraRig.basePosition /
+ * baseQuaternion (both return clones; combat copies into scratch and never
+ * mutates them).
+ */
+export interface CameraPoseProvider {
+  /** Current undeflected camera base position (the planted player's eye). */
+  position(): THREE.Vector3;
+  /** Current undeflected camera base orientation. */
+  quaternion(): THREE.Quaternion;
+}
+
+/** Fixed-frame provider: `position` looking down world -z. */
+export function fixedCameraPose(position: THREE.Vector3): CameraPoseProvider {
+  const pos = position.clone();
+  const quat = new THREE.Quaternion(); // identity: forward is world -z
+  return {
+    position: () => pos,
+    quaternion: () => quat,
+  };
+}
+
 export interface CombatDeps {
   manager: ConstructManager;
   effects: EffectsProvider;
+  /**
+   * Camera base pose provider (Phase 5 stations). Aim mapping, coal wall
+   * blocking and the player hit zone all follow this pose. Defaults to a
+   * fixed pose at deps.playerPosition ?? PLAYER_WORLD_POSITION, forward -z.
+   */
+  cameraPose?: CameraPoseProvider;
   /** Twin Cannon impact freeze, milliseconds. */
   onHitStop?: (ms: number) => void;
   /** Kill slow-mo: time scale and duration in milliseconds. */
@@ -280,24 +316,40 @@ export interface CombatDeps {
 const ORIGIN_SPAN_X = 1.2;
 const ORIGIN_SPAN_Y = 1.0;
 
-/** Map a screen-space aim direction into a normalized world direction. */
-export function screenAimToWorld(aim: Vec3, out = new THREE.Vector3()): THREE.Vector3 {
+const IDENTITY_QUAT = new THREE.Quaternion();
+
+/**
+ * Map a screen-space aim direction into a normalized world direction.
+ * `cameraQuat` is the camera base orientation at the current station: screen
+ * -z maps to that camera's forward. Omitted (identity) it reduces to the
+ * legacy fixed-lane mapping (world -z forward).
+ */
+export function screenAimToWorld(
+  aim: Vec3,
+  cameraQuat: THREE.Quaternion = IDENTITY_QUAT,
+  out = new THREE.Vector3(),
+): THREE.Vector3 {
   out.set(aim.x, -aim.y, aim.z);
   if (out.lengthSq() < 1e-10) out.set(0, 0, -1);
-  return out.normalize();
+  return out.normalize().applyQuaternion(cameraQuat);
 }
 
-/** Map a screen-space wrist origin to a world beam origin near the player. */
+/**
+ * Map a screen-space wrist origin to a world beam origin near the player:
+ * offsets from the screen center run along the camera's right/up axes.
+ */
 export function beamOriginToWorld(
   origin: Vec3,
   playerPos: THREE.Vector3,
+  cameraQuat: THREE.Quaternion = IDENTITY_QUAT,
   out = new THREE.Vector3(),
 ): THREE.Vector3 {
-  return out.set(
-    playerPos.x + (origin.x - 0.5) * ORIGIN_SPAN_X,
-    playerPos.y - (origin.y - 0.5) * ORIGIN_SPAN_Y,
-    playerPos.z,
+  out.set(
+    (origin.x - 0.5) * ORIGIN_SPAN_X,
+    -(origin.y - 0.5) * ORIGIN_SPAN_Y,
+    0,
   );
+  return out.applyQuaternion(cameraQuat).add(playerPos);
 }
 
 // ---------------------------------------------------------------------------
@@ -317,11 +369,17 @@ interface SustainBook {
 // Shared scratch vectors (single threaded; callbacks receive clones).
 const _center = new THREE.Vector3();
 const _dir = new THREE.Vector3();
+const _dirLocal = new THREE.Vector3();
 const _normal = new THREE.Vector3();
 const _hit = new THREE.Vector3();
 const _impulse = new THREE.Vector3();
 const _toC = new THREE.Vector3();
+const _local = new THREE.Vector3();
 const _origin = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _rel = new THREE.Vector3();
+const _invQ = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
 
 export class CombatSystem {
@@ -329,7 +387,10 @@ export class CombatSystem {
   onKill: ((construct: Construct, position: THREE.Vector3) => void) | null = null;
 
   private readonly deps: CombatDeps;
-  private readonly playerPos: THREE.Vector3;
+  private readonly pose: CameraPoseProvider;
+  /** Scratch copies of the provider's pose, refreshed before every use. */
+  private readonly playerPos = new THREE.Vector3();
+  private readonly playerQuat = new THREE.Quaternion();
 
   private clockMs = 0;
   private killCount = 0;
@@ -351,7 +412,9 @@ export class CombatSystem {
 
   constructor(deps: CombatDeps) {
     this.deps = deps;
-    this.playerPos = (deps.playerPosition ?? PLAYER_WORLD_POSITION).clone();
+    this.pose =
+      deps.cameraPose ?? fixedCameraPose(deps.playerPosition ?? PLAYER_WORLD_POSITION);
+    this.refreshPose();
 
     // Combat owns manager.onDeath; downstream listens to combat.onKill.
     deps.manager.onDeath = (construct, position) => {
@@ -389,6 +452,7 @@ export class CombatSystem {
    * LandmarkFrame when available so duck detection sees head-y samples.
    */
   update(dt: number, frame?: LandmarkFrame): void {
+    this.refreshPose();
     if (frame) this.clockMs = Math.max(this.clockMs, frame.t);
     else this.clockMs += dt * 1000;
 
@@ -410,6 +474,7 @@ export class CombatSystem {
    * damage (delegated to applySustainTick).
    */
   handleMoveEvent(e: MoveEvent): void {
+    this.refreshPose();
     this.clockMs = Math.max(this.clockMs, e.t);
     switch (e.kind) {
       case 'trigger':
@@ -444,6 +509,7 @@ export class CombatSystem {
    * damage actually dealt (0 on miss), which tests use directly.
    */
   applySustainTick(e: MoveEvent): number {
+    this.refreshPose();
     const spec = DAMAGE_TABLE[e.move];
     if (!spec.perSecond) return 0;
 
@@ -457,8 +523,8 @@ export class CombatSystem {
     book.lastT = e.t;
     if (dtSec <= 0) return 0;
 
-    const origin = beamOriginToWorld(e.origin, this.playerPos, _origin);
-    const aim = screenAimToWorld(e.aim, _dir);
+    const origin = beamOriginToWorld(e.origin, this.playerPos, this.playerQuat, _origin);
+    const aim = screenAimToWorld(e.aim, this.playerQuat, _dir);
     const target = this.pickBeamTarget(e.move, origin, aim);
     if (!target) return 0;
 
@@ -482,19 +548,23 @@ export class CombatSystem {
    * dead ahead is always inside the arc).
    */
   private whipInstantHit(e: MoveEvent): void {
-    const aim = screenAimToWorld(e.aim, _dir);
+    // Lateral gating happens in the CAMERA frame (screen space is the
+    // player's truth); the impulse is dealt in world space.
+    const aimLocal = screenAimToWorld(e.aim, IDENTITY_QUAT, _dirLocal);
+    const aimWorld = screenAimToWorld(e.aim, this.playerQuat, _dir);
+    _invQ.copy(this.playerQuat).invert();
     for (const construct of this.deps.manager.constructs) {
       if (!construct.isAlive) continue;
       const center = this.chestCenter(construct, _center);
-      _toC.copy(center).sub(this.playerPos);
-      const horizontal = Math.hypot(_toC.x, _toC.z);
+      _local.copy(center).sub(this.playerPos).applyQuaternion(_invQ);
+      const horizontal = Math.hypot(_local.x, _local.z);
       if (horizontal > WHIP_RANGE) continue;
-      if (_toC.z > -0.1) continue; // behind or beside the player: no target
-      if (Math.abs(aim.x) >= WHIP_MIN_LATERAL_AIM) {
-        const side = Math.sign(aim.x);
-        if (_toC.x * side < -WHIP_LATERAL_TOLERANCE) continue;
+      if (_local.z > -0.1) continue; // behind or beside the player: no target
+      if (Math.abs(aimLocal.x) >= WHIP_MIN_LATERAL_AIM) {
+        const side = Math.sign(aimLocal.x);
+        if (_local.x * side < -WHIP_LATERAL_TOLERANCE) continue;
       }
-      this.dealInstantHit(construct, 'fire-whip', e.empowered, aim);
+      this.dealInstantHit(construct, 'fire-whip', e.empowered, aimWorld);
     }
   }
 
@@ -502,8 +572,8 @@ export class CombatSystem {
    * Palm Wave: a wide cone of pushback, short range only (PALM_WAVE_RANGE).
    */
   private palmInstantHit(e: MoveEvent): void {
-    const aim = screenAimToWorld(e.aim, _dir);
-    const origin = beamOriginToWorld(e.origin, this.playerPos, _origin);
+    const aim = screenAimToWorld(e.aim, this.playerQuat, _dir);
+    const origin = beamOriginToWorld(e.origin, this.playerPos, this.playerQuat, _origin);
     for (const construct of this.deps.manager.constructs) {
       if (!construct.isAlive) continue;
       const center = this.chestCenter(construct, _center);
@@ -625,28 +695,38 @@ export class CombatSystem {
 
   private blockCoalsWithWall(): void {
     if (this.deps.effects.wallActiveUntil() === null) return;
-    const wallZ = this.playerPos.z - WALL_PLANE_AHEAD;
+    // The Rising Flame wall stands perpendicular to the CAMERA's flattened
+    // forward, WALL_PLANE_AHEAD meters in front of the player (matching the
+    // camera-relative WallEffect in moveEffects.ts). A coal whose forward
+    // distance has shrunk to the plane, inside the wall's lateral span and
+    // below its top, bursts against it.
+    this.cameraBasis(_fwd, _right);
     for (const construct of this.deps.manager.constructs) {
       const coals = construct.projectiles;
       for (let i = coals.length - 1; i >= 0; i--) {
         const coal = coals[i];
         if (!coal) continue;
         const pos = coal.position;
+        _rel.copy(pos).sub(this.playerPos);
+        const distFront = _rel.dot(_fwd);
         if (
-          pos.z >= wallZ &&
-          Math.abs(pos.x - this.playerPos.x) <= WALL_HALF_WIDTH &&
+          distFront <= WALL_PLANE_AHEAD &&
+          Math.abs(_rel.dot(_right)) <= WALL_HALF_WIDTH &&
           pos.y <= WALL_TOP
         ) {
           coal.mesh.removeFromParent();
           coals.splice(i, 1);
-          this.deps.impacts?.burst(pos.clone(), new THREE.Vector3(0, 0, 1), 0.8);
+          this.deps.impacts?.burst(pos.clone(), _fwd.clone().negate(), 0.8);
         }
       }
     }
   }
 
   private handleCoalArrive(landPos: THREE.Vector3): void {
-    const inPlayerZone = landPos.z > this.playerPos.z + PLAYER_ZONE_Z;
+    this.refreshPose();
+    this.cameraBasis(_fwd, _right);
+    const distFront = _rel.copy(landPos).sub(this.playerPos).dot(_fwd);
+    const inPlayerZone = distFront < -PLAYER_ZONE_Z;
     if (!inPlayerZone) {
       // Fell short: just a small ground burst.
       this.deps.impacts?.burst(landPos.clone(), UP.clone(), 0.4);
@@ -695,8 +775,29 @@ export class CombatSystem {
   // Helpers
   // -------------------------------------------------------------------------
 
+  /** Refresh the scratch pose from the provider (cheap; every entry point). */
+  private refreshPose(): void {
+    this.playerPos.copy(this.pose.position());
+    this.playerQuat.copy(this.pose.quaternion());
+  }
+
+  /** Flattened camera forward and right axes (unit, horizontal). */
+  private cameraBasis(fwd: THREE.Vector3, right: THREE.Vector3): void {
+    fwd.set(0, 0, -1).applyQuaternion(this.playerQuat);
+    fwd.y = 0;
+    if (fwd.lengthSq() < 1e-8) fwd.set(0, 0, -1);
+    fwd.normalize();
+    right.crossVectors(fwd, UP);
+    if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+    right.normalize();
+  }
+
   private chestCenter(construct: Construct, out: THREE.Vector3): THREE.Vector3 {
-    return out.copy(construct.group.position).setY(CHEST_HEIGHT);
+    // CHEST_HEIGHT is measured above the construct's LOCAL floor (stations
+    // on the bridge deck stand elevated).
+    return out
+      .copy(construct.group.position)
+      .setY(construct.group.position.y + CHEST_HEIGHT);
   }
 
   private pickBeamTarget(

@@ -240,6 +240,7 @@ async function bootArenaReplay(
     stats: DEFAULT_CALIBRATION,
     velocityScale: REPLAY_VELOCITY_SCALE,
     ...(Number.isFinite(shotIndex) ? { shot: shotIndex } : {}),
+    ...(params.get('bare') === '1' ? { bare: true } : {}),
   });
 }
 

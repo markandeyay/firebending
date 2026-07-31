@@ -9,7 +9,14 @@ import {
   MAX_PARALLAX_RAD,
   SHAKE_CAP,
 } from '../src/game/cameraRig';
-import { nextArenaAnchor } from '../src/game/killTravel';
+import {
+  STATION_COUNT,
+  STATIONS,
+  stationFor,
+  stationIndexFor,
+  travelRecipeFor,
+  type PathStyle,
+} from '../src/game/killTravel';
 import type { FaceFrame } from '../src/tracking/types';
 
 const DT = 1 / 60;
@@ -153,6 +160,65 @@ describe('CameraRig parallax smoothing', () => {
 });
 
 describe('CameraRig travel', () => {
+  it('clamps authored durations to [2, 4] seconds', async () => {
+    const runTravel = async (durationSec: number): Promise<number> => {
+      const { rig } = makeRig();
+      let done = false;
+      void rig.travelTo(new THREE.Vector3(0, 1.1, -11), { durationSec }).then(() => {
+        done = true;
+      });
+      let simTime = 0;
+      while (!done && simTime < 6) {
+        rig.update(DT);
+        simTime += DT;
+        await Promise.resolve();
+      }
+      expect(done).toBe(true);
+      return simTime;
+    };
+    expect(await runTravel(1)).toBeGreaterThanOrEqual(2); // clamped up
+    const long = await runTravel(3.8); // inside the widened clamp
+    expect(long).toBeGreaterThanOrEqual(3.7);
+    expect(long).toBeLessThanOrEqual(3.95);
+    const capped = await runTravel(9); // clamped down to 4
+    expect(capped).toBeGreaterThanOrEqual(3.9);
+    expect(capped).toBeLessThanOrEqual(4.1);
+  });
+
+  it('follows authored control points, settles at endPosition, honors easing', async () => {
+    const { camera, rig } = makeRig();
+    const waypoint = new THREE.Vector3(4.2, 3.9, -14.6);
+    const endPosition = new THREE.Vector3(6.4, 2.55, -17.9);
+    const anchor = new THREE.Vector3(2.2, 1.1, -12.2);
+    let done = false;
+    void rig
+      .travelTo(anchor, {
+        durationSec: 3,
+        easing: 'easeOutQuint',
+        controlPoints: [new THREE.Vector3(0.8, 3.6, -10.0), waypoint],
+        endPosition,
+      })
+      .then(() => {
+        done = true;
+      });
+    let nearest = Infinity;
+    let simTime = 0;
+    while (!done && simTime < 5) {
+      rig.update(DT);
+      simTime += DT;
+      nearest = Math.min(nearest, camera.position.distanceTo(waypoint));
+      await Promise.resolve();
+    }
+    expect(done).toBe(true);
+    // The spline passes close to the authored waypoint...
+    expect(nearest).toBeLessThan(0.8);
+    // ...and lands exactly on the authored station pose, facing the anchor.
+    expect(rig.basePosition.distanceTo(endPosition)).toBeLessThan(0.01);
+    const forward = camera.getWorldDirection(new THREE.Vector3());
+    const toAnchor = anchor.clone().sub(camera.position).normalize();
+    expect(forward.angleTo(toAnchor)).toBeLessThan(THREE.MathUtils.degToRad(6));
+  });
+
   it('resolves in 2 to 3 seconds at the expected viewing pose, facing the target', async () => {
     const { camera, rig } = makeRig();
     const target = new THREE.Vector3(0, 1.1, -11);
@@ -269,47 +335,86 @@ describe('CameraRig shake', () => {
   });
 });
 
-describe('nextArenaAnchor', () => {
-  it('is deterministic', () => {
-    for (let i = 0; i < 12; i++) {
-      const a = nextArenaAnchor(i);
-      const b = nextArenaAnchor(i);
-      expect(a.position.equals(b.position)).toBe(true);
-      expect(a.facing.equals(b.facing)).toBe(true);
+describe('courtyard stations (killTravel)', () => {
+  it('authors six stations and cycles them deterministically', () => {
+    expect(STATION_COUNT).toBe(6);
+    for (let k = 0; k < 14; k++) {
+      expect(stationIndexFor(k)).toBe(k % 6);
+      expect(stationFor(k)).toBe(STATIONS[k % 6]);
     }
   });
 
-  it('starts at the arena enemy anchor and marches monotonically down -z', () => {
-    const first = nextArenaAnchor(0);
-    expect(first.position.x).toBeCloseTo(0, 5);
-    expect(first.position.y).toBeCloseTo(1.1, 5);
-    expect(first.position.z).toBeCloseTo(-6, 5);
+  it('station 0 matches the arena entry anchor and the rig home pose', () => {
+    const s0 = stationFor(0);
+    expect(s0.anchor.x).toBeCloseTo(0, 5);
+    expect(s0.anchor.y).toBeCloseTo(1.1, 5);
+    expect(s0.anchor.z).toBeCloseTo(-6, 5);
+    expect(s0.cameraPos.x).toBeCloseTo(0, 5);
+    expect(s0.cameraPos.y).toBeCloseTo(1.5, 5);
+    expect(s0.cameraPos.z).toBeCloseTo(0.6, 5);
+  });
 
-    let prevZ = Infinity;
-    for (let i = 0; i < 20; i++) {
-      const anchor = nextArenaAnchor(i);
-      expect(anchor.position.z).toBeLessThan(prevZ);
-      prevZ = anchor.position.z;
-      expect(anchor.position.y).toBeCloseTo(1.1, 5);
+  it('varies viewing distance in [5, 9], angle and elevation across stations', () => {
+    const azimuths: number[] = [];
+    for (const st of STATIONS) {
+      const d = st.cameraPos.clone().sub(st.anchor);
+      const horizontal = Math.hypot(d.x, d.z);
+      expect(horizontal).toBeGreaterThanOrEqual(5);
+      expect(horizontal).toBeLessThanOrEqual(9);
+      azimuths.push(Math.atan2(d.x, d.z));
+      // Anchors stay inside the courtyard floor.
+      expect(Math.abs(st.anchor.x)).toBeLessThan(10);
+      expect(st.anchor.z).toBeLessThan(0);
+      expect(st.anchor.z).toBeGreaterThan(-20);
+      // Facing is unit-length and horizontal.
+      expect(st.facing.length()).toBeCloseTo(1, 5);
+      expect(st.facing.y).toBeCloseTo(0, 5);
     }
-    // Advances ~5 m per kill, continuing past the built arena depth
-    // (director handles the environment illusion there).
-    expect(nextArenaAnchor(5).position.z).toBeCloseTo(-31, 5);
+    // Approach azimuths genuinely differ (radial layout, not a lane).
+    for (let i = 0; i < azimuths.length; i++) {
+      for (let j = i + 1; j < azimuths.length; j++) {
+        const a = azimuths[i] ?? 0;
+        const b = azimuths[j] ?? 0;
+        let diff = Math.abs(a - b) % (Math.PI * 2);
+        if (diff > Math.PI) diff = Math.PI * 2 - diff;
+        expect(diff).toBeGreaterThan(0.15);
+      }
+    }
+    // Elevations vary: floor stations, a raised camera, a raised construct.
+    expect(STATIONS.some((s) => s.floorY > 0.3)).toBe(true);
+    expect(STATIONS.some((s) => s.cameraPos.y > 2.2)).toBe(true);
+    expect(STATIONS.some((s) => s.floorY === 0 && s.cameraPos.y <= 1.6)).toBe(true);
   });
 
-  it('alternates laterally +1.2 / -1.2 after the first anchor', () => {
-    expect(nextArenaAnchor(1).position.x).toBeCloseTo(1.2, 5);
-    expect(nextArenaAnchor(2).position.x).toBeCloseTo(-1.2, 5);
-    expect(nextArenaAnchor(3).position.x).toBeCloseTo(1.2, 5);
-    expect(nextArenaAnchor(4).position.x).toBeCloseTo(-1.2, 5);
+  it('travel recipes are deterministic, in-clamp, and style-distinct per cycle', () => {
+    const styles: PathStyle[] = [];
+    for (let k = 1; k <= 12; k++) {
+      const a = travelRecipeFor(k);
+      const b = travelRecipeFor(k);
+      expect(a.style).toBe(b.style);
+      expect(a.durationSec).toBeGreaterThanOrEqual(2);
+      expect(a.durationSec).toBeLessThanOrEqual(4);
+      expect(a.endPosition.distanceTo(stationFor(k).cameraPos)).toBeLessThan(1e-9);
+      a.controlPoints.forEach((p, i) => {
+        expect(p.distanceTo(b.controlPoints[i] ?? new THREE.Vector3())).toBeLessThan(1e-9);
+      });
+      styles.push(a.style);
+    }
+    // Six distinct styles per cycle; consecutive recipes never repeat.
+    expect(new Set(styles.slice(0, 6)).size).toBe(6);
+    for (let i = 1; i < styles.length; i++) {
+      expect(styles[i]).not.toBe(styles[i - 1]);
+    }
   });
 
-  it('faces back up the lane with unit length', () => {
-    for (let i = 0; i < 8; i++) {
-      const anchor = nextArenaAnchor(i);
-      expect(anchor.facing.length()).toBeCloseTo(1, 5);
-      expect(anchor.facing.z).toBeGreaterThan(0.5); // toward the player side
-      expect(anchor.facing.y).toBeCloseTo(0, 5);
+  it('substitutes a different style when the authored one is banned', () => {
+    for (let k = 1; k <= 6; k++) {
+      const authored = travelRecipeFor(k);
+      const substituted = travelRecipeFor(k, authored.style);
+      expect(substituted.style).not.toBe(authored.style);
+      expect(substituted.durationSec).toBeGreaterThanOrEqual(2);
+      expect(substituted.durationSec).toBeLessThanOrEqual(4);
+      expect(substituted.endPosition.distanceTo(authored.endPosition)).toBeLessThan(1e-9);
     }
   });
 });

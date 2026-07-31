@@ -46,6 +46,14 @@ const DEBRIS_SETTLE_LINVEL2 = 0.01; // |v|^2 below this counts as settled
 const DEBRIS_SETTLE_ANGVEL2 = 0.05;
 const DEBRIS_MAX_SETTLE_SEC = 3.5; // force settle after this long
 const FADE_SEC = 2.0;
+/**
+ * Battle scars (Phase 5): settled debris RESTS in place instead of fading,
+ * so the courtyard accumulates the fight's history. The manager caps the
+ * total debris bodies kept alive at this count and fades the OLDEST resting
+ * construct out whenever the cap is exceeded (each tier 1 kill leaves 5
+ * pieces, so roughly the last four kills stay visible).
+ */
+export const DEBRIS_KEEP_CAP = 24;
 
 // Charring: straw and wood lerp toward charcoal with damage percent.
 const CHAR_TARGET = new THREE.Color(0x171310);
@@ -148,6 +156,13 @@ export interface ConstructOptions {
   onDeath?: (position: THREE.Vector3) => void;
   /** Seed for debris scatter; defaults to a fixed value for determinism. */
   seed?: number;
+  /**
+   * Local ground height under the construct (Phase 5 stations: the bridge
+   * deck sits at +0.5). The base, torso and debris all spawn relative to it.
+   * The integration layer registers matching static colliders so debris can
+   * rest on raised decks; without them it settles on the y = 0 ground.
+   */
+  floorY?: number;
 }
 
 export interface CoalProjectile {
@@ -166,7 +181,7 @@ interface DebrisPiece {
   body: RapierNS.RigidBody;
 }
 
-type ConstructState = 'alive' | 'dying' | 'fading' | 'gone';
+type ConstructState = 'alive' | 'dying' | 'resting' | 'fading' | 'gone';
 
 // Shared scratch objects (single threaded).
 const _q = new THREE.Quaternion();
@@ -231,12 +246,13 @@ export class Construct {
     this.hp = this.maxHp;
     this.onDeathCb = options.onDeath ?? null;
     this.rng = mulberry32(options.seed ?? 0xd0117);
+    const floorY = options.floorY ?? 0;
 
     const { rapier, world } = physics;
 
     this.group = new THREE.Group();
     this.group.name = 'construct';
-    this.group.position.set(anchorPos.x, 0, anchorPos.z);
+    this.group.position.set(anchorPos.x, floorY, anchorPos.z);
     parent.add(this.group);
 
     // --- Materials (cloned per construct so charring stays local) ----------
@@ -352,7 +368,7 @@ export class Construct {
     // --- Physics -----------------------------------------------------------
     // Base: fixed body, no collider needed (visual dome + joint anchor only).
     this.baseBody = world.createRigidBody(
-      rapier.RigidBodyDesc.fixed().setTranslation(anchorPos.x, 0, anchorPos.z),
+      rapier.RigidBodyDesc.fixed().setTranslation(anchorPos.x, floorY, anchorPos.z),
     );
 
     // Torso: ONE dynamic body. Gravity is disabled on it: the weighted-base
@@ -361,7 +377,7 @@ export class Construct {
     // equilibrium (no inverted-pendulum fighting).
     const torsoBody = world.createRigidBody(
       rapier.RigidBodyDesc.dynamic()
-        .setTranslation(anchorPos.x, TORSO_CENTER_Y, anchorPos.z)
+        .setTranslation(anchorPos.x, floorY + TORSO_CENTER_Y, anchorPos.z)
         .setLinearDamping(TORSO_LINEAR_DAMPING)
         .setAngularDamping(TORSO_ANGULAR_DAMPING)
         .setGravityScale(0),
@@ -394,6 +410,16 @@ export class Construct {
 
   get isGone(): boolean {
     return this.state === 'gone';
+  }
+
+  /** Debris has settled and rests in place as a battle scar (Phase 5). */
+  get isResting(): boolean {
+    return this.state === 'resting';
+  }
+
+  /** Fade-out in progress (already counted as leaving, not as kept debris). */
+  get isFading(): boolean {
+    return this.state === 'fading';
   }
 
   get damagePercent(): number {
@@ -602,7 +628,7 @@ export class Construct {
       const r = this.torsoBody.rotation();
       this.torsoGroup.position.set(
         t.x - this.group.position.x,
-        t.y,
+        t.y - this.group.position.y,
         t.z - this.group.position.z,
       );
       this.torsoGroup.quaternion.set(r.x, r.y, r.z, r.w);
@@ -612,7 +638,7 @@ export class Construct {
       const r = piece.body.rotation();
       piece.mesh.position.set(
         t.x - this.group.position.x,
-        t.y,
+        t.y - this.group.position.y,
         t.z - this.group.position.z,
       );
       piece.mesh.quaternion.set(r.x, r.y, r.z, r.w);
@@ -647,7 +673,9 @@ export class Construct {
       }
     }
 
-    // Death sequence: wait for debris to settle, then fade out.
+    // Death sequence: wait for debris to settle, then REST in place as a
+    // battle scar. The manager's DEBRIS_KEEP_CAP decides when a resting
+    // construct finally fades (beginFade), oldest first.
     if (this.state === 'dying') {
       this.deathAge += dt;
       if (!this.settled) {
@@ -665,8 +693,7 @@ export class Construct {
         }
         if (allSlow || this.deathAge >= DEBRIS_MAX_SETTLE_SEC) {
           this.settled = true;
-          this.state = 'fading';
-          this.fadeAge = 0;
+          this.state = 'resting';
         }
       }
     } else if (this.state === 'fading') {
@@ -680,6 +707,18 @@ export class Construct {
         this.dispose();
       }
     }
+  }
+
+  /**
+   * Start the fade-out of a dead construct's remains (the manager calls this
+   * when the debris cap is exceeded, oldest first). Safe to call on a
+   * still-dying construct: it fades from wherever the debris is.
+   */
+  beginFade(): void {
+    if (this.state !== 'resting' && this.state !== 'dying') return;
+    this.settled = true;
+    this.state = 'fading';
+    this.fadeAge = 0;
   }
 
   /** Full cleanup: physics bodies, meshes, geometries, materials. Idempotent. */
@@ -729,10 +768,16 @@ export class ConstructManager {
     this.parent = parent;
   }
 
-  spawn(anchorPos: THREE.Vector3, tier: ConstructTier = 1, hp?: number): Construct {
+  spawn(
+    anchorPos: THREE.Vector3,
+    tier: ConstructTier = 1,
+    hp?: number,
+    floorY?: number,
+  ): Construct {
     const construct: Construct = new Construct(this.physics, this.parent, anchorPos, {
       tier,
       ...(hp !== undefined ? { hp } : {}),
+      ...(floorY !== undefined ? { floorY } : {}),
       seed: 0xd0117 + this.spawnCount * 7919,
       onDeath: (position) => {
         this.onDeath?.(construct, position);
@@ -769,8 +814,35 @@ export class ConstructManager {
       c.syncFromPhysics();
       c.update(dt);
     }
+    this.enforceDebrisCap();
     if (this.list.some((c) => c.isGone)) {
       this.list = this.list.filter((c) => !c.isGone);
+    }
+  }
+
+  /**
+   * Battle-scar budget (Phase 5): dead constructs rest where they fell, but
+   * the total debris bodies kept alive stay near DEBRIS_KEEP_CAP. When the
+   * cap is exceeded, the OLDEST resting construct begins its fade (bodies
+   * are freed when the fade completes, so the overshoot lasts ~2 s at most).
+   */
+  private enforceDebrisCap(): void {
+    // Fading constructs are already on their way out and do not count
+    // toward the kept total (otherwise the cap would cascade every frame
+    // until nothing remained).
+    let pieces = 0;
+    for (const c of this.list) {
+      if (!c.isAlive && !c.isGone && !c.isFading) pieces += c.debris.length;
+    }
+    if (pieces <= DEBRIS_KEEP_CAP) return;
+    // Fade the OLDEST kills first (list order is spawn order); a construct
+    // still settling fades from wherever its debris is.
+    for (const c of this.list) {
+      if (pieces <= DEBRIS_KEEP_CAP) break;
+      if (!c.isAlive && !c.isGone && !c.isFading) {
+        pieces -= c.debris.length;
+        c.beginFade();
+      }
     }
   }
 

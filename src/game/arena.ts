@@ -1,18 +1,31 @@
-// Arena environment: the ember hall. An Edo-period timber training hall: a
-// long lacquered lane flanked by heavy oxblood columns on stone plinths with
-// bracket capitals, tie beams, cloth banners, stone braziers and ribbed paper
-// lanterns, closed off by a low mounded coal bed that is the room's key light.
-// Behind the mid-field plaster walls, far rooflines silhouette into warm fog.
+// Arena environment (Phase 5): the ember courtyard. An Edo-period timber
+// training compound around an open courtyard: a south entry porch with heavy
+// oxblood columns, a colonnade run along the west side, a spirit gate (two
+// heavy posts under a double lintel with a subtle top curve) on the east, a
+// raised stone terrace reached past broad steps in the northeast, a dry coal
+// channel crossing the north half with a short railed timber bridge over it,
+// and a lantern canopy strung over the center. The mounded coal bed on the
+// far north side is still the room's key light, and behind the mid-field
+// plaster walls the far rooflines silhouette into warm fog.
 // All geometry is procedural and deterministic (mulberry32 only).
 //
 // Palette (Section 9): charcoal #1a1512, oxblood #6b1f15, vermilion #8a2f1d,
 // muted antique gold #8a6a2f, parchment #d8c8a8, tatami #b09a6a. Fire is the
 // only saturation. No blue anywhere.
 //
-// Structure (Phase 4): buildArena composes exported builders (buildFloor,
-// buildColumn / buildColumnRow, buildTimberFrame, buildLantern, buildBrazier,
-// buildBannerRun, buildCoalWall, buildBackdrop, buildDustMotes). None of them
-// touch module-level mutable state, so Phase 5 can recompose them freely.
+// LIGHT POLICY (Phase 5, dynamic budget <= 8 total): one directional key
+// (coal wall), the hemisphere whisper, and FOUR relocatable point lights
+// (arena.lights.braziers) that always sit at the ACTIVE combat station
+// (Arena.setActiveStation, called by the screen on travel arrival). Every
+// stone brazier burns emissive-only (glowing ember fill + its flame VFX
+// anchor); none carries its own light. The remaining budget (glove fill +
+// two pooled fire lights) belongs to the VFX layers.
+//
+// Structure: buildArena composes exported deterministic builders (buildFloor,
+// buildColumn / buildColumnRow, buildTimberFrame, buildColonnade,
+// buildGreatGate, buildSteps, buildBridge, buildCoalChannel, buildLantern,
+// buildBrazier, buildBannerRun, buildCoalWall, buildBackdrop,
+// buildDustMotes). None of them touch module-level mutable state.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -22,24 +35,104 @@ export interface ArenaLights {
   key: THREE.DirectionalLight;
   /** Warm hemisphere whisper (ember bounce from below, near-black above). */
   ambient: THREE.HemisphereLight;
-  /** Flickering brazier point lights. */
+  /**
+   * The four RELOCATABLE flickering point lights. They always pool warm
+   * light around the ACTIVE station (setActiveStation); braziers themselves
+   * are emissive-only. See the module header light policy.
+   */
   braziers: THREE.PointLight[];
 }
 
 export interface Arena {
   group: THREE.Group;
-  /** Where the player stands (one end of the lane). */
+  /** Where the player stands (the south porch). */
   playerPosition: THREE.Vector3;
-  /** Where the first construct waits, ~6m down the lane. */
+  /** Where the first construct waits, ~6m into the courtyard. */
   enemyAnchor: THREE.Vector3;
   /** Reserved for the camera rig agent; not populated here. */
   travelSpline?: THREE.CatmullRomCurve3;
   lights: ArenaLights;
   /** Empty groups named "brazier-anchor-N", one per brazier bowl, for flame VFX. */
   brazierAnchors: THREE.Group[];
+  /**
+   * Relocate the four station point lights to combat station `index`
+   * (killTravel.ts station order). Call on travel arrival.
+   */
+  setActiveStation(index: number): void;
   update(dt: number, elapsed: number): void;
   dispose(): void;
 }
+
+/**
+ * Static physics colliders matching the raised courtyard structures, so
+ * debris can rest on them (the integration layer registers these with the
+ * rapier world; headless tests may skip them). [center], [halfExtents].
+ */
+export const COURTYARD_COLLIDERS: ReadonlyArray<{
+  center: [number, number, number];
+  halfExtents: [number, number, number];
+}> = [
+  // Terrace platform (northeast).
+  { center: [6.4, 0.45, -17.0], halfExtents: [3.0, 0.45, 2.4] },
+  // Broad steps down the terrace's south edge.
+  { center: [6.4, 0.3375, -14.35], halfExtents: [2.25, 0.3375, 0.25] },
+  { center: [6.4, 0.225, -13.85], halfExtents: [2.25, 0.225, 0.25] },
+  { center: [6.4, 0.1125, -13.35], halfExtents: [2.25, 0.1125, 0.25] },
+  // Bridge deck over the coal channel.
+  { center: [-3.5, 0.25, -15.0], halfExtents: [0.85, 0.25, 2.1] },
+];
+
+/**
+ * Where the four relocatable point lights sit for each station (index
+ * matches killTravel.ts STATIONS). Authored around each station's framing
+ * braziers and lanterns.
+ */
+export const STATION_LIGHT_SLOTS: ReadonlyArray<
+  ReadonlyArray<[number, number, number]>
+> = [
+  // 0 entry-hall
+  [
+    [-2.6, 1.75, -2.8],
+    [2.6, 1.75, -2.8],
+    [-2.2, 2.6, -5.4],
+    [2.2, 2.6, -5.4],
+  ],
+  // 1 colonnade
+  [
+    [-6.2, 1.75, -9.0],
+    [-6.2, 1.75, -12.0],
+    [-3.6, 2.4, -10.2],
+    [-4.9, 3.2, -8.0],
+  ],
+  // 2 terrace-vantage
+  [
+    [-0.2, 1.9, -11.4],
+    [3.4, 1.8, -13.4],
+    [4.9, 2.7, -16.6],
+    [1.0, 2.6, -13.8],
+  ],
+  // 3 bridge-deck
+  [
+    [-1.6, 1.75, -12.3],
+    [-3.5, 2.0, -14.2],
+    [-3.5, 2.0, -16.2],
+    [-5.6, 1.7, -13.2],
+  ],
+  // 4 great-gate
+  [
+    [6.8, 1.75, -2.6],
+    [6.8, 1.75, -9.4],
+    [4.4, 2.2, -6.0],
+    [7.2, 3.9, -6.0],
+  ],
+  // 5 channel-edge
+  [
+    [-6.6, 1.6, -15.4],
+    [-8.2, 1.8, -18.6],
+    [-4.6, 1.5, -17.0],
+    [-5.8, 2.4, -19.6],
+  ],
+];
 
 // ---------------------------------------------------------------------------
 // Palette
@@ -61,10 +154,10 @@ const BACKDROP_TONE = 0x140c07;
 const EMBER_ORANGE = 0xe8551c;
 const FIRELIGHT = 0xff8a3c;
 
-// Lane geometry. Player stands near z = 0, the lane runs toward negative z.
+// Base geometry. Player stands near z = 0; the courtyard opens toward -z.
+// LANE_LENGTH survives only as the default depth for standalone builders.
 const LANE_LENGTH = 20;
 const COLUMN_X = 3.6;
-const COLUMNS_PER_SIDE = 5;
 const SHAFT_HEIGHT = 4.1;
 /** Top of the bracket capital above the floor (plinth + shaft + bracket). */
 const COLUMN_TOP = 0.44 + SHAFT_HEIGHT + 0.62;
@@ -549,6 +642,251 @@ export function buildTimberFrame(opts: TimberFrameOptions): THREE.Group {
   return group;
 }
 
+export interface ColonnadeOptions {
+  kit: MaterialKit;
+  /** World x of the column line. */
+  x: number;
+  /** Column z stations along the run. */
+  columnZs: number[];
+  shaftHeight?: number;
+  baseRadius?: number;
+}
+
+/**
+ * A single-sided colonnade run: instanced columns along one line under a
+ * merged lintel + slim nuki tie beam, with gold end-cap trim. The west edge
+ * of the courtyard.
+ */
+export function buildColonnade(opts: ColonnadeOptions): THREE.Group {
+  const group = new THREE.Group();
+  group.name = 'colonnade';
+  const zs = opts.columnZs;
+  const first = zs[0] ?? 0;
+  const last = zs[zs.length - 1] ?? -10;
+  const span = Math.abs(last - first) + 1.4;
+  const zMid = (first + last) / 2;
+  const topY = 0.44 + (opts.shaftHeight ?? SHAFT_HEIGHT) + 0.62;
+
+  const positions: Array<[number, number]> = zs.map((z) => [opts.x, z]);
+  group.add(
+    buildColumnRow({
+      kit: opts.kit,
+      positions,
+      ...(opts.shaftHeight !== undefined ? { shaftHeight: opts.shaftHeight } : {}),
+      ...(opts.baseRadius !== undefined ? { baseRadius: opts.baseRadius } : {}),
+    }),
+  );
+
+  const beams = mergedBoxes([
+    // Lintel resting on the bracket capitals.
+    { w: 0.34, h: 0.38, d: span, x: opts.x, y: topY + 0.19, z: zMid },
+    // Slim nuki tie threaded through the shafts above head height.
+    { w: 0.1, h: 0.26, d: span, x: opts.x, y: 3.0, z: zMid },
+  ]);
+  const beamMesh = new THREE.Mesh(beams, opts.kit.beam);
+  beamMesh.name = 'colonnade-beams';
+  beamMesh.castShadow = true;
+  group.add(beamMesh);
+
+  const trims = mergedBoxes([
+    { w: 0.4, h: 0.44, d: 0.12, x: opts.x, y: topY + 0.19, z: zMid + span / 2 },
+    { w: 0.4, h: 0.44, d: 0.12, x: opts.x, y: topY + 0.19, z: zMid - span / 2 },
+  ]);
+  const trimMesh = new THREE.Mesh(trims, opts.kit.trim);
+  trimMesh.name = 'colonnade-trim';
+  group.add(trimMesh);
+  return group;
+}
+
+export interface GreatGateOptions {
+  kit: MaterialKit;
+  /** World x of the gate line (posts share it). */
+  x?: number;
+  /** Center z of the opening. */
+  zCenter?: number;
+  /** Distance between the two post centers along z. */
+  span?: number;
+}
+
+/**
+ * The spirit gate: two heavy lacquered posts on stone plinths carrying a
+ * double lintel; the upper lintel is thicker and rises in a subtle curve
+ * toward its gold-capped ends, with a short center strut between the two.
+ * Torii-inspired massing, original proportions and detailing.
+ */
+export function buildGreatGate(opts: GreatGateOptions): THREE.Group {
+  const kit = opts.kit;
+  const x = opts.x ?? 7.4;
+  const zc = opts.zCenter ?? -6;
+  const span = opts.span ?? 4.8;
+  const group = new THREE.Group();
+  group.name = 'great-gate';
+
+  const postH = 3.9;
+  const postBaseY = 0.34;
+
+  // Posts: heavy tapered lathes, merged into one geometry.
+  const postProfile: THREE.Vector2[] = [
+    new THREE.Vector2(0.42, 0),
+    new THREE.Vector2(0.41, postH * 0.3),
+    new THREE.Vector2(0.38, postH * 0.65),
+    new THREE.Vector2(0.34, postH),
+  ];
+  const postParts: THREE.BufferGeometry[] = [];
+  for (const side of [-1, 1]) {
+    const p = new THREE.LatheGeometry(postProfile, 12);
+    p.translate(x, postBaseY, zc + (side * span) / 2);
+    postParts.push(p);
+  }
+  const postGeo = mergeGeometries(postParts, false) ?? postParts[0] ?? new THREE.BufferGeometry();
+  for (const p of postParts) {
+    if (p !== postGeo) p.dispose();
+  }
+  const posts = new THREE.Mesh(postGeo, kit.lacquer);
+  posts.name = 'gate-posts';
+  posts.castShadow = true;
+  posts.receiveShadow = true;
+  group.add(posts);
+
+  // Stone plinths under the posts.
+  const plinths = mergedBoxes([
+    { w: 1.3, h: 0.34, d: 1.3, x, y: 0.17, z: zc - span / 2 },
+    { w: 1.3, h: 0.34, d: 1.3, x, y: 0.17, z: zc + span / 2 },
+  ]);
+  const plinthMesh = new THREE.Mesh(plinths, kit.stone);
+  plinthMesh.name = 'gate-plinths';
+  group.add(plinthMesh);
+
+  // Lintels: lower straight tie + upper curved beam + center strut.
+  const lowY = postBaseY + postH - 0.72; // ~3.5
+  const upY = postBaseY + postH + 0.14; // ~4.38 at center
+  const upLen = span + 1.8;
+  const segments = 9;
+  const beamBoxes: Array<{ w: number; h: number; d: number; x: number; y: number; z: number }> = [
+    { w: 0.3, h: 0.34, d: span + 0.7, x, y: lowY, z: zc },
+    { w: 0.24, h: upY - lowY - 0.38, d: 0.3, x, y: (upY + lowY) / 2 - 0.02, z: zc },
+  ];
+  for (let i = 0; i < segments; i++) {
+    const t = (i + 0.5) / segments; // 0..1 along the upper lintel
+    const zSeg = zc - upLen / 2 + t * upLen;
+    const lift = 0.34 * Math.pow(2 * t - 1, 2); // subtle rise toward the ends
+    beamBoxes.push({ w: 0.5, h: 0.42, d: upLen / segments + 0.02, x, y: upY + lift, z: zSeg });
+  }
+  const lintels = new THREE.Mesh(mergedBoxes(beamBoxes), kit.beam);
+  lintels.name = 'gate-lintels';
+  lintels.castShadow = true;
+  group.add(lintels);
+
+  // Gold caps on the upper lintel ends.
+  const endLift = 0.34 * Math.pow(2 * (0.5 / segments) - 1, 2);
+  const caps = mergedBoxes([
+    { w: 0.56, h: 0.5, d: 0.2, x, y: upY + endLift, z: zc - upLen / 2 - 0.06 },
+    { w: 0.56, h: 0.5, d: 0.2, x, y: upY + endLift, z: zc + upLen / 2 + 0.06 },
+  ]);
+  const capMesh = new THREE.Mesh(caps, kit.trim);
+  capMesh.name = 'gate-caps';
+  group.add(capMesh);
+  return group;
+}
+
+export interface StepsOptions {
+  kit: MaterialKit;
+  /** Center x of the flight. */
+  x: number;
+  /** z of the TOP edge (the platform lip); steps descend toward +z. */
+  topZ: number;
+  /** Platform height the flight descends from. */
+  topY: number;
+  width?: number;
+  stepCount?: number;
+  rise?: number;
+  run?: number;
+}
+
+/** Broad stone steps descending from a raised platform edge toward +z. */
+export function buildSteps(opts: StepsOptions): THREE.Group {
+  const width = opts.width ?? 4.5;
+  const count = opts.stepCount ?? 3;
+  const rise = opts.rise ?? opts.topY / (count + 1);
+  const run = opts.run ?? 0.5;
+  const boxes: Array<{ w: number; h: number; d: number; x: number; y: number; z: number }> = [];
+  for (let i = 1; i <= count; i++) {
+    const h = Math.max(opts.topY - i * rise, 0.02);
+    boxes.push({
+      w: width,
+      h,
+      d: run,
+      x: opts.x,
+      y: h / 2,
+      z: opts.topZ + (i - 0.5) * run,
+    });
+  }
+  const group = new THREE.Group();
+  group.name = 'steps';
+  const mesh = new THREE.Mesh(mergedBoxes(boxes), opts.kit.stone);
+  mesh.name = 'steps-stone';
+  mesh.receiveShadow = true;
+  group.add(mesh);
+  return group;
+}
+
+export interface BridgeOptions {
+  kit: MaterialKit;
+  /** Center x of the deck. */
+  x: number;
+  zStart: number;
+  zEnd: number;
+  width?: number;
+  deckY?: number;
+}
+
+/**
+ * A short railed timber bridge: raised plank deck on two skirt supports
+ * with end blocks, and lacquered rails (posts, top rail, mid rail) on both
+ * sides. Crosses the dry coal channel.
+ */
+export function buildBridge(opts: BridgeOptions): THREE.Group {
+  const kit = opts.kit;
+  const width = opts.width ?? 1.7;
+  const deckY = opts.deckY ?? 0.5;
+  const zMid = (opts.zStart + opts.zEnd) / 2;
+  const len = Math.abs(opts.zEnd - opts.zStart);
+  const group = new THREE.Group();
+  group.name = 'bridge';
+
+  // Deck + supports + end blocks (dark structural timber).
+  const deck = new THREE.Mesh(
+    mergedBoxes([
+      { w: width, h: 0.12, d: len, x: opts.x, y: deckY - 0.06, z: zMid },
+      { w: width * 0.82, h: deckY - 0.12, d: 0.32, x: opts.x, y: (deckY - 0.12) / 2, z: zMid - len * 0.25 },
+      { w: width * 0.82, h: deckY - 0.12, d: 0.32, x: opts.x, y: (deckY - 0.12) / 2, z: zMid + len * 0.25 },
+      { w: width, h: 0.22, d: 0.5, x: opts.x, y: 0.11, z: opts.zStart + 0.25 },
+      { w: width, h: 0.22, d: 0.5, x: opts.x, y: 0.11, z: opts.zEnd - 0.25 },
+    ]),
+    kit.darkWood,
+  );
+  deck.name = 'bridge-deck';
+  deck.castShadow = true;
+  deck.receiveShadow = true;
+  group.add(deck);
+
+  // Rails: three posts a side, a top rail and a mid rail (oxblood lacquer).
+  const railBoxes: Array<{ w: number; h: number; d: number; x: number; y: number; z: number }> = [];
+  for (const side of [-1, 1]) {
+    const rx = opts.x + (side * (width - 0.12)) / 2;
+    for (const z of [opts.zStart + 0.18, zMid, opts.zEnd - 0.18]) {
+      railBoxes.push({ w: 0.1, h: 1.02, d: 0.1, x: rx, y: deckY + 0.51, z });
+    }
+    railBoxes.push({ w: 0.08, h: 0.08, d: len, x: rx, y: deckY + 1.02, z: zMid });
+    railBoxes.push({ w: 0.06, h: 0.06, d: len - 0.3, x: rx, y: deckY + 0.55, z: zMid });
+  }
+  const rails = new THREE.Mesh(mergedBoxes(railBoxes), kit.lacquer);
+  rails.name = 'bridge-rails';
+  rails.castShadow = true;
+  group.add(rails);
+  return group;
+}
+
 export interface LanternOptions {
   kit?: MaterialKit;
   /** Body radius in meters (paper lanterns run ~0.125..0.23). */
@@ -613,16 +951,24 @@ export interface BrazierOptions {
   kit?: MaterialKit;
   /** Index used for the anchor / light names. */
   index?: number;
+  /**
+   * Attach a point light (default true for standalone use). buildArena
+   * passes false: braziers burn emissive-only and the four relocatable
+   * station lights follow the active station instead (see module header).
+   */
+  light?: boolean;
 }
 
 export interface BrazierBuild {
   group: THREE.Group;
-  light: THREE.PointLight;
+  /** Null when opts.light is false (emissive-only brazier). */
+  light: THREE.PointLight | null;
   /** Empty group at the flame seat, named "brazier-anchor-N". */
   anchor: THREE.Group;
 }
 
-/** Stone brazier: one merged pedestal+bowl mesh, flame anchor, point light. */
+/** Stone brazier: merged pedestal+bowl mesh, glowing ember fill, flame
+ *  anchor, and (optionally) a point light. */
 export function buildBrazier(opts: BrazierOptions = {}): BrazierBuild {
   const kit = opts.kit ?? makeMaterialKit();
   const index = opts.index ?? 0;
@@ -644,10 +990,27 @@ export function buildBrazier(opts: BrazierOptions = {}): BrazierBuild {
   mesh.castShadow = true;
   group.add(mesh);
 
-  const light = new THREE.PointLight(FIRELIGHT, 3.4, 9.5, 2);
-  light.name = `brazier-light-${index}`;
-  light.position.set(0, 1.75, 0);
-  group.add(light);
+  // Glowing ember fill so an unlit brazier still reads as burning.
+  const emberGeo = new THREE.CylinderGeometry(0.44, 0.3, 0.14, 8);
+  emberGeo.translate(0, 1.3, 0);
+  const emberMat = new THREE.MeshStandardMaterial({
+    color: 0x1a0d06,
+    emissive: EMBER_ORANGE,
+    emissiveIntensity: 1.7,
+    roughness: 0.95,
+    flatShading: true,
+  });
+  const embers = new THREE.Mesh(emberGeo, emberMat);
+  embers.name = 'brazier-embers';
+  group.add(embers);
+
+  let light: THREE.PointLight | null = null;
+  if (opts.light !== false) {
+    light = new THREE.PointLight(FIRELIGHT, 3.4, 9.5, 2);
+    light.name = `brazier-light-${index}`;
+    light.position.set(0, 1.75, 0);
+    group.add(light);
+  }
 
   const anchor = new THREE.Group();
   anchor.name = `brazier-anchor-${index}`;
@@ -742,6 +1105,71 @@ export function buildBannerRun(opts: BannerRunOptions): BannerRunBuild {
   return { group, material, uTime };
 }
 
+/**
+ * Shared coal-lump piece (coal wall AND coal channel): three emissive tiers
+ * of instanced dodecahedron lumps (hot core, mid, ash crust). `sample` is
+ * called `count` times with the rng and returns a world position plus a heat
+ * value in [0, 1]; rotation and scale jitter come from the same rng, so the
+ * result is deterministic per seed.
+ */
+function buildCoalLumps(
+  rng: () => number,
+  count: number,
+  sample: (rng: () => number) => { x: number; y: number; z: number; heat: number },
+): { group: THREE.Group; hotMat: THREE.MeshStandardMaterial } {
+  const coalGeo = new THREE.DodecahedronGeometry(0.21, 0);
+  const hotMat = new THREE.MeshStandardMaterial({
+    color: 0x1a0d06,
+    emissive: EMBER_ORANGE,
+    emissiveIntensity: 2.6,
+    roughness: 0.85,
+    flatShading: true,
+  });
+  const midMat = new THREE.MeshStandardMaterial({
+    color: 0x1f120a,
+    emissive: 0xb03a10,
+    emissiveIntensity: 1.0,
+    roughness: 0.9,
+    flatShading: true,
+  });
+  const ashMat = new THREE.MeshStandardMaterial({
+    color: 0x241a12,
+    emissive: 0x481505,
+    emissiveIntensity: 0.4,
+    roughness: 1.0,
+    flatShading: true,
+  });
+
+  const placements: Array<{ tier: 0 | 1 | 2; m: THREE.Matrix4 }> = [];
+  const dummy = new THREE.Object3D();
+  for (let i = 0; i < count; i++) {
+    const s0 = sample(rng);
+    const tier: 0 | 1 | 2 = s0.heat > 0.62 ? 0 : s0.heat > 0.34 ? 1 : 2;
+    dummy.position.set(s0.x, s0.y, s0.z);
+    dummy.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
+    const s = 0.75 + rng() * 0.85;
+    dummy.scale.set(s, s * (0.75 + rng() * 0.4), s);
+    dummy.updateMatrix();
+    placements.push({ tier, m: dummy.matrix.clone() });
+  }
+  const group = new THREE.Group();
+  group.name = 'coal-lumps';
+  const tiers: Array<{ mat: THREE.MeshStandardMaterial; name: string }> = [
+    { mat: hotMat, name: 'coals-hot' },
+    { mat: midMat, name: 'coals-mid' },
+    { mat: ashMat, name: 'coals-ash' },
+  ];
+  tiers.forEach((tier, ti) => {
+    const items = placements.filter((p) => p.tier === ti);
+    const mesh = new THREE.InstancedMesh(coalGeo, tier.mat, Math.max(items.length, 1));
+    mesh.name = tier.name;
+    items.forEach((p, i) => mesh.setMatrixAt(i, p.m));
+    if (items.length === 0) mesh.count = 0;
+    group.add(mesh);
+  });
+  return { group, hotMat };
+}
+
 export interface CoalWallOptions {
   kit: MaterialKit;
   seed?: number;
@@ -781,63 +1209,20 @@ export function buildCoalWall(opts: CoalWallOptions): CoalWallBuild {
   mound.position.set(0, -0.05, wallZ);
   group.add(mound);
 
-  // Coal lumps in three emissive tiers.
-  const coalGeo = new THREE.DodecahedronGeometry(0.21, 0);
-  const hotMat = new THREE.MeshStandardMaterial({
-    color: 0x1a0d06,
-    emissive: EMBER_ORANGE,
-    emissiveIntensity: 2.6,
-    roughness: 0.85,
-    flatShading: true,
-  });
-  const midMat = new THREE.MeshStandardMaterial({
-    color: 0x1f120a,
-    emissive: 0xb03a10,
-    emissiveIntensity: 1.0,
-    roughness: 0.9,
-    flatShading: true,
-  });
-  const ashMat = new THREE.MeshStandardMaterial({
-    color: 0x241a12,
-    emissive: 0x481505,
-    emissiveIntensity: 0.4,
-    roughness: 1.0,
-    flatShading: true,
-  });
-
-  const placements: Array<{ tier: 0 | 1 | 2; m: THREE.Matrix4 }> = [];
-  const dummy = new THREE.Object3D();
-  const total = 84;
-  for (let i = 0; i < total; i++) {
-    const u = rng() * 2 - 1; // -1..1 across the mound
+  // Coal lumps in three emissive tiers (shared piece with the channel).
+  // Hot core low in the mound center, ash crust on top and at the edges.
+  const lumps = buildCoalLumps(rng, 84, (r) => {
+    const u = r() * 2 - 1; // -1..1 across the mound
     const x = u * width * 0.5;
     const crest = 0.9 * Math.sqrt(Math.max(1 - u * u * 0.85, 0.05));
-    const hf = rng(); // 0 floor .. 1 crest
+    const hf = r(); // 0 floor .. 1 crest
     const y = 0.12 + hf * crest;
-    const z = wallZ + (rng() - 0.5) * (1.5 - hf);
-    // Hot core low in the mound center, ash crust on top and at the edges.
-    const heat = (1 - hf) * (1 - Math.abs(u) * 0.6) + rng() * 0.25;
-    const tier: 0 | 1 | 2 = heat > 0.62 ? 0 : heat > 0.34 ? 1 : 2;
-    dummy.position.set(x, y, z);
-    dummy.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
-    const s = 0.75 + rng() * 0.85;
-    dummy.scale.set(s, s * (0.75 + rng() * 0.4), s);
-    dummy.updateMatrix();
-    placements.push({ tier, m: dummy.matrix.clone() });
-  }
-  const tiers: Array<{ mat: THREE.MeshStandardMaterial; name: string }> = [
-    { mat: hotMat, name: 'coals-hot' },
-    { mat: midMat, name: 'coals-mid' },
-    { mat: ashMat, name: 'coals-ash' },
-  ];
-  tiers.forEach((tier, ti) => {
-    const items = placements.filter((p) => p.tier === ti);
-    const mesh = new THREE.InstancedMesh(coalGeo, tier.mat, Math.max(items.length, 1));
-    mesh.name = tier.name;
-    items.forEach((p, i) => mesh.setMatrixAt(i, p.m));
-    if (items.length === 0) mesh.count = 0;
-    group.add(mesh);
+    const z = wallZ + (r() - 0.5) * (1.5 - hf);
+    const heat = (1 - hf) * (1 - Math.abs(u) * 0.6) + r() * 0.25;
+    return { x, y, z, heat };
   });
+  const hotMat = lumps.hotMat;
+  group.add(lumps.group);
 
   // Broad soft under-glow toward the lane: linear vertical falloff with
   // feathered sides (a radial sprite here painted a hard dome arch rim over
@@ -911,6 +1296,89 @@ export function buildCoalWall(opts: CoalWallOptions): CoalWallBuild {
   return { group, update };
 }
 
+export interface CoalChannelOptions {
+  kit: MaterialKit;
+  seed?: number;
+  xStart?: number;
+  xEnd?: number;
+  /** Center z of the channel strip. */
+  z?: number;
+  /** z-extent of the coal bed between the curbs. */
+  width?: number;
+}
+
+export interface CoalChannelBuild {
+  group: THREE.Group;
+  update(dt: number, elapsed: number): void;
+}
+
+/**
+ * The dry coal channel: a curbed east-west strip of banked coals crossing
+ * the courtyard's north half, glowing under the bridge. Reuses the coal-bed
+ * lump piece (buildCoalLumps) plus stone curbs and a soft lying glow plane.
+ */
+export function buildCoalChannel(opts: CoalChannelOptions): CoalChannelBuild {
+  const rng = mulberry32(opts.seed ?? 0xc4a2);
+  const xStart = opts.xStart ?? -9.5;
+  const xEnd = opts.xEnd ?? 2.5;
+  const zC = opts.z ?? -15.0;
+  const width = opts.width ?? 1.6;
+  const len = xEnd - xStart;
+  const xMid = (xStart + xEnd) / 2;
+  const group = new THREE.Group();
+  group.name = 'coal-channel';
+
+  // Stone curbs along both edges plus an east end cap.
+  const curbs = new THREE.Mesh(
+    mergedBoxes([
+      { w: len, h: 0.22, d: 0.3, x: xMid, y: 0.11, z: zC - width / 2 - 0.15 },
+      { w: len, h: 0.22, d: 0.3, x: xMid, y: 0.11, z: zC + width / 2 + 0.15 },
+      { w: 0.3, h: 0.22, d: width + 0.6, x: xEnd + 0.15, y: 0.11, z: zC },
+    ]),
+    opts.kit.stone,
+  );
+  curbs.name = 'channel-curbs';
+  curbs.receiveShadow = true;
+  group.add(curbs);
+
+  // Banked coals: hotter toward the middle of the run and the strip center.
+  const lumps = buildCoalLumps(rng, 46, (r) => {
+    const u = r(); // 0..1 along the run
+    const x = xStart + 0.4 + u * (len - 0.8);
+    const v = r() * 2 - 1; // -1..1 across the strip
+    const y = 0.06 + r() * 0.16;
+    const z = zC + v * width * 0.36;
+    const heat = (1 - Math.abs(v) * 0.5) * (0.55 + 0.45 * Math.sin(u * Math.PI)) + r() * 0.2;
+    return { x, y, z, heat };
+  });
+  const hotMat = lumps.hotMat;
+  group.add(lumps.group);
+
+  // Soft glow lying over the strip.
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: 0xff7828,
+    map: opts.kit.glow,
+    transparent: true,
+    opacity: opts.kit.glow ? 0.32 : 0.12,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    fog: false,
+  });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(len + 1, width + 1.6), glowMat);
+  glow.name = 'channel-glow';
+  glow.rotation.x = -Math.PI / 2;
+  glow.position.set(xMid, 0.34, zC);
+  glow.renderOrder = 9;
+  group.add(glow);
+
+  const update = (_dt: number, elapsed: number): void => {
+    // Breathes out of phase with the coal wall so the two beds read alive.
+    hotMat.emissiveIntensity = 2.4 + 0.5 * Math.sin(elapsed * 1.7 + 1.9);
+    glowMat.opacity = (opts.kit.glow ? 0.32 : 0.12) * (0.8 + 0.2 * Math.sin(elapsed * 1.3));
+  };
+  return { group, update };
+}
+
 export interface BackdropOptions {
   kit: MaterialKit;
   seed?: number;
@@ -926,12 +1394,12 @@ export function buildBackdrop(opts: BackdropOptions): THREE.Group {
   const group = new THREE.Group();
   group.name = 'backdrop';
 
-  // Mid-field plaster walls with subtle tooth.
-  const wallGeo = new THREE.PlaneGeometry(30, 7.5);
+  // Mid-field plaster walls with subtle tooth (courtyard perimeter).
+  const wallGeo = new THREE.PlaneGeometry(34, 7.5);
   for (const side of [-1, 1]) {
     const wall = new THREE.Mesh(wallGeo, kit.plaster);
     wall.name = `plaster-wall-${side < 0 ? 'l' : 'r'}`;
-    wall.position.set(side * 7.4, 3.4, -10.5);
+    wall.position.set(side * 10.8, 3.4, -10.5);
     wall.rotation.y = side < 0 ? Math.PI / 2 : -Math.PI / 2;
     wall.receiveShadow = true;
     group.add(wall);
@@ -939,7 +1407,7 @@ export function buildBackdrop(opts: BackdropOptions): THREE.Group {
   // End wall behind the player so shot reverses never see raw void.
   const endWall = new THREE.Mesh(wallGeo, kit.plaster);
   endWall.name = 'plaster-wall-end';
-  endWall.position.set(0, 3.4, 4.2);
+  endWall.position.set(0, 3.4, 4.6);
   endWall.rotation.y = Math.PI;
   group.add(endWall);
 
@@ -1000,10 +1468,10 @@ export function buildBackdrop(opts: BackdropOptions): THREE.Group {
   };
 
   const seed = opts.seed ?? 0xf09;
-  const near = makeRoofline(seed, 30, 5.2, 0x1d100a, 'roofline-near');
+  const near = makeRoofline(seed, 34, 5.2, 0x1d100a, 'roofline-near');
   near.position.set(0, 2.5, -27);
   near.renderOrder = 1;
-  const far = makeRoofline(seed ^ 0x77, 40, 7.2, 0x2b1810, 'roofline-far');
+  const far = makeRoofline(seed ^ 0x77, 44, 7.2, 0x2b1810, 'roofline-far');
   far.position.set(0, 3.6, -31);
   far.renderOrder = 0;
   group.add(near, far);
@@ -1134,6 +1602,11 @@ export interface DustMotesOptions {
   kit: MaterialKit;
   seed?: number;
   count?: number;
+  /** Horizontal x spread, meters (motes span +/- spreadX / 2). */
+  spreadX?: number;
+  /** z range the motes drift in. */
+  zMin?: number;
+  zMax?: number;
 }
 
 export interface DustMotesBuild {
@@ -1148,12 +1621,15 @@ export interface DustMotesBuild {
 export function buildDustMotes(opts: DustMotesOptions): DustMotesBuild {
   const rng = mulberry32(opts.seed ?? 0xd057);
   const count = opts.count ?? 48;
+  const spreadX = opts.spreadX ?? 4.4;
+  const zMin = opts.zMin ?? -18;
+  const zMax = opts.zMax ?? -3;
   const base = new Float32Array(count * 3);
   const phase = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    base[i * 3] = (rng() - 0.5) * 4.4;
+    base[i * 3] = (rng() - 0.5) * spreadX;
     base[i * 3 + 1] = 0.4 + rng() * 2.8;
-    base[i * 3 + 2] = -3 - rng() * 15;
+    base[i * 3 + 2] = zMax - rng() * (zMax - zMin);
     phase[i] = rng() * Math.PI * 2;
   }
   const geo = new THREE.BufferGeometry();
@@ -1211,82 +1687,134 @@ export function buildArena(scene: THREE.Scene): Arena {
   const kit = makeMaterialKit(0x7a11);
 
   // --- Floor ---------------------------------------------------------------
-  group.add(buildFloor({ kit, seed: 0xf100 }));
+  group.add(buildFloor({ kit, seed: 0xf100, width: 30, length: 34, centerZ: -9.5 }));
 
-  // --- Columns: fewer, larger, Edo timber proportions ----------------------
-  const columnZs: number[] = [];
-  for (let i = 0; i < COLUMNS_PER_SIDE; i++) {
-    columnZs.push(0.4 - (i * (LANE_LENGTH + 1)) / (COLUMNS_PER_SIDE - 1));
+  // --- Entry porch (station 0 framing): two column pairs + timber frame ----
+  const entryZs = [0.4, -3.2];
+  const entryPositions: Array<[number, number]> = [];
+  for (const z of entryZs) {
+    entryPositions.push([-COLUMN_X, z], [COLUMN_X, z]);
   }
-  const columnPositions: Array<[number, number]> = [];
-  for (const z of columnZs) {
-    columnPositions.push([-COLUMN_X, z], [COLUMN_X, z]);
-  }
-  group.add(buildColumnRow({ kit, positions: columnPositions }));
+  group.add(buildColumnRow({ kit, positions: entryPositions }));
+  group.add(buildTimberFrame({ kit, columnZs: entryZs, entryHeader: true }));
 
-  // --- Timber frame: lintels, nuki, cross ties, entry header ---------------
-  group.add(buildTimberFrame({ kit, columnZs, entryHeader: true }));
+  // --- Colonnade run along the west edge (station 1 backdrop) --------------
+  const colonnadeZs = [-3.5, -7, -10.5, -14, -17.5];
+  group.add(buildColonnade({ kit, x: -7.6, columnZs: colonnadeZs }));
 
-  // --- Banners between columns (staggered) ---------------------------------
-  const bannerSlots: Array<{ x: number; z: number; rotY: number }> = [];
-  const bannerGaps: Array<[number, number]> = [
-    [-1, 0],
-    [1, 1],
-    [-1, 2],
-    [1, 3],
-  ];
-  for (const [side, gap] of bannerGaps) {
-    const za = columnZs[gap];
-    const zb = columnZs[gap + 1];
-    if (za === undefined || zb === undefined) continue;
-    bannerSlots.push({
-      x: side * (COLUMN_X - 0.12),
-      z: (za + zb) / 2,
-      rotY: side < 0 ? Math.PI / 2 : -Math.PI / 2,
-    });
-  }
-  const banners = buildBannerRun({ slots: bannerSlots, topY: COLUMN_TOP + 0.1 });
+  // --- Spirit gate on the east edge (station 4) ----------------------------
+  group.add(buildGreatGate({ kit, x: 7.4, zCenter: -6, span: 4.8 }));
+
+  // --- Raised terrace + broad steps, northeast (station 2 vantage) ---------
+  const terrace = new THREE.Group();
+  terrace.name = 'terrace';
+  const terraceBase = new THREE.Mesh(
+    mergedBoxes([
+      { w: 6.0, h: 0.82, d: 4.8, x: 6.4, y: 0.41, z: -17.0 },
+    ]),
+    kit.stone,
+  );
+  terraceBase.name = 'terrace-base';
+  terraceBase.receiveShadow = true;
+  terrace.add(terraceBase);
+  const terraceTop = new THREE.Mesh(
+    mergedBoxes([{ w: 6.0, h: 0.08, d: 4.8, x: 6.4, y: 0.86, z: -17.0 }]),
+    kit.darkWood,
+  );
+  terraceTop.name = 'terrace-top';
+  terraceTop.receiveShadow = true;
+  terrace.add(terraceTop);
+  group.add(terrace);
+  group.add(
+    buildSteps({ kit, x: 6.4, topZ: -14.6, topY: 0.9, width: 4.5, stepCount: 3, rise: 0.225, run: 0.5 }),
+  );
+
+  // --- Dry coal channel + railed bridge (stations 3 and 5) -----------------
+  const channel = buildCoalChannel({ kit, seed: 0xc4a2, xStart: -9.5, xEnd: 2.5, z: -15.0, width: 1.6 });
+  group.add(channel.group);
+  group.add(buildBridge({ kit, x: -3.5, zStart: -12.9, zEnd: -17.1, width: 1.7, deckY: 0.5 }));
+
+  // --- Banners: entry + colonnade run, and a lower pair on the gate --------
+  const banners = buildBannerRun({
+    slots: [
+      { x: -3.48, z: -1.4, rotY: Math.PI / 2 },
+      { x: 3.48, z: -1.4, rotY: -Math.PI / 2 },
+      { x: -7.48, z: -5.25, rotY: Math.PI / 2 },
+      { x: -7.48, z: -15.75, rotY: Math.PI / 2 },
+    ],
+    topY: COLUMN_TOP + 0.1,
+  });
   group.add(banners.group);
+  const gateBanners = buildBannerRun({
+    slots: [
+      { x: 7.32, z: -4.9, rotY: Math.PI / 2 },
+      { x: 7.32, z: -7.1, rotY: Math.PI / 2 },
+    ],
+    topY: 3.3,
+    width: 1.05,
+    height: 1.7,
+  });
+  group.add(gateBanners.group);
 
-  // --- Braziers with flickering point lights -------------------------------
-  const brazierSpots: Array<[number, number]> = [
-    [-2.6, -2.8],
-    [2.6, -6.8],
-    [-2.6, -10.8],
-    [2.6, -14.8],
+  // --- Braziers: emissive-only, one composition per station (light policy:
+  // the four relocatable station lights below follow the ACTIVE station) ----
+  const brazierSpots: Array<[number, number, number]> = [
+    [-2.6, 0, -2.8], // entry west
+    [2.6, 0, -2.8], // entry east
+    [-6.2, 0, -9.0], // colonnade
+    [-6.2, 0, -12.0], // colonnade
+    [6.8, 0, -2.6], // gate flank south
+    [6.8, 0, -9.4], // gate flank north
+    [-1.6, 0, -12.3], // bridge south landing
+    [4.9, 0.9, -16.6], // terrace
   ];
-  const brazierLights: THREE.PointLight[] = [];
   const brazierAnchors: THREE.Group[] = [];
-  const brazierPhases: number[] = [];
-  brazierSpots.forEach(([x, z], i) => {
-    const b = buildBrazier({ kit, index: i });
-    b.group.position.set(x, 0, z);
+  brazierSpots.forEach(([x, y, z], i) => {
+    const b = buildBrazier({ kit, index: i, light: false });
+    b.group.position.set(x, y, z);
     group.add(b.group);
-    brazierLights.push(b.light);
     brazierAnchors.push(b.anchor);
-    brazierPhases.push(rng() * Math.PI * 2);
   });
 
-  // --- Paper lanterns hanging from the frame -------------------------------
-  // [x, z, hangLength, radius]
-  const lanternSpots: Array<[number, number, number, number]> = [
-    [-3.6, -3.2, 0.9, 0.21],
-    [3.6, -7.6, 1.25, 0.16],
-    [-3.6, -12.4, 1.05, 0.225],
-    [3.6, -16.8, 0.85, 0.15],
-    [-1.7, columnZs[1] ?? -5.65, 1.15, 0.19],
-    [1.9, columnZs[2] ?? -10.9, 0.95, 0.135],
-    [-1.1, columnZs[3] ?? -16.15, 1.3, 0.205],
-    [0.8, columnZs[4] ?? -20.6, 1.1, 0.17],
+  // --- Lantern canopy over the courtyard + station lanterns ----------------
+  const rodA = new THREE.CylinderGeometry(0.03, 0.03, 14.6, 6);
+  rodA.rotateZ(Math.PI / 2);
+  rodA.translate(-0.3, 4.55, -8.6);
+  const rodB = new THREE.CylinderGeometry(0.03, 0.03, 10.2, 6);
+  rodB.rotateZ(Math.PI / 2);
+  rodB.translate(-2.5, 4.4, -11.6);
+  const rodGeo = mergeGeometries([rodA, rodB], false) ?? rodA;
+  if (rodGeo !== rodA) rodA.dispose();
+  rodB.dispose();
+  const rods = new THREE.Mesh(rodGeo, kit.darkWood);
+  rods.name = 'canopy-rods';
+  group.add(rods);
+
+  // [x, y, z, hangLength, radius]
+  const lanternSpots: Array<[number, number, number, number, number]> = [
+    // Canopy rod A (z -8.6)
+    [-5.2, 4.55, -8.6, 1.35, 0.21],
+    [-1.8, 4.55, -8.6, 0.9, 0.15],
+    [1.6, 4.55, -8.6, 1.5, 0.19],
+    [5.0, 4.55, -8.6, 1.05, 0.165],
+    // Canopy rod B (z -11.6)
+    [-6.0, 4.4, -11.6, 1.1, 0.14],
+    [-2.7, 4.4, -11.6, 1.6, 0.22],
+    [0.6, 4.4, -11.6, 1.25, 0.18],
+    // Under the gate's lower lintel
+    [7.35, 3.35, -6.0, 0.45, 0.2],
+    // Bridge rail end posts
+    [-2.71, 1.62, -13.08, 0.26, 0.115],
+    [-4.29, 1.62, -16.92, 0.26, 0.115],
   ];
-  lanternSpots.forEach(([x, z, hang, radius], i) => {
+  lanternSpots.forEach(([x, y, z, hang, radius], i) => {
     const lantern = buildLantern({ kit, radius, hangLength: hang, seed: 0x1a2b + i * 977 });
-    lantern.position.set(x, COLUMN_TOP + 0.36, z);
+    lantern.position.set(x, y, z);
     group.add(lantern);
   });
 
   // --- Coal wall (key light source) ----------------------------------------
-  const coalWall = buildCoalWall({ kit, seed: 0xc0a1 });
+  const coalWall = buildCoalWall({ kit, seed: 0xc0a1, width: 14 });
   group.add(coalWall.group);
 
   // --- Backdrop: plaster walls + far roofline silhouettes ------------------
@@ -1315,14 +1843,15 @@ export function buildArena(scene: THREE.Scene): Arena {
     hazePlanes.push(haze);
   }
 
-  // --- Dust motes in the key shaft -----------------------------------------
-  const motes = buildDustMotes({ kit, seed: 0xd057 });
+  // --- Dust motes over the courtyard ---------------------------------------
+  const motes = buildDustMotes({ kit, seed: 0xd057, spreadX: 13, zMin: -19, zMax: -2 });
   group.add(motes.group);
 
   // --- Lighting ------------------------------------------------------------
-  // ONE dominant warm key raking low from the coal wall, brazier point pools
-  // on layered-noise flicker, and only a whisper of warm ambient so unlit
-  // surfaces fall to charcoal instead of gray.
+  // ONE dominant warm key raking low from the coal wall, FOUR relocatable
+  // station point lights on layered-noise flicker (see the module header
+  // light policy), and only a whisper of warm ambient so unlit surfaces
+  // fall to charcoal instead of gray.
   const key = new THREE.DirectionalLight(0xffa050, 2.6);
   key.name = 'coal-wall-key';
   key.position.set(0, 2.6, -22.5);
@@ -1330,10 +1859,10 @@ export function buildArena(scene: THREE.Scene): Arena {
   key.castShadow = true;
   key.shadow.mapSize.set(1024, 1024);
   key.shadow.camera.near = 1;
-  key.shadow.camera.far = 34;
-  key.shadow.camera.left = -7;
-  key.shadow.camera.right = 7;
-  key.shadow.camera.top = 7;
+  key.shadow.camera.far = 36;
+  key.shadow.camera.left = -11;
+  key.shadow.camera.right = 11;
+  key.shadow.camera.top = 8;
   key.shadow.camera.bottom = -3;
   key.shadow.radius = 4;
   key.shadow.bias = -0.0015;
@@ -1344,6 +1873,29 @@ export function buildArena(scene: THREE.Scene): Arena {
   ambient.name = 'ember-ambient';
   group.add(ambient);
 
+  // The four relocatable station lights (start at station 0).
+  const stationLights: THREE.PointLight[] = [];
+  const stationLightPhases: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const light = new THREE.PointLight(FIRELIGHT, 3.4, 9.5, 2);
+    light.name = `station-light-${i}`;
+    group.add(light);
+    stationLights.push(light);
+    stationLightPhases.push(rng() * Math.PI * 2);
+  }
+  const setActiveStation = (index: number): void => {
+    const slots = STATION_LIGHT_SLOTS[
+      ((Math.floor(index) % STATION_LIGHT_SLOTS.length) + STATION_LIGHT_SLOTS.length) %
+        STATION_LIGHT_SLOTS.length
+    ];
+    if (!slots) return;
+    stationLights.forEach((light, i) => {
+      const slot = slots[i];
+      if (slot) light.position.set(slot[0], slot[1], slot[2]);
+    });
+  };
+  setActiveStation(0);
+
   scene.add(group);
 
   // --- Runtime -------------------------------------------------------------
@@ -1353,11 +1905,12 @@ export function buildArena(scene: THREE.Scene): Arena {
   const update = (dt: number, elapsed: number): void => {
     bannerTime += dt;
     banners.uTime.value = bannerTime;
+    gateBanners.uTime.value = bannerTime;
 
-    // Layered sine flicker per brazier: subtle, always positive.
-    for (let i = 0; i < brazierLights.length; i++) {
-      const light = brazierLights[i];
-      const phase = brazierPhases[i];
+    // Layered sine flicker per station light: subtle, always positive.
+    for (let i = 0; i < stationLights.length; i++) {
+      const light = stationLights[i];
+      const phase = stationLightPhases[i];
       if (light === undefined || phase === undefined) continue;
       const n =
         0.82 +
@@ -1367,9 +1920,10 @@ export function buildArena(scene: THREE.Scene): Arena {
       light.intensity = 3.4 * n;
     }
 
-    // The coal wall breathes very slowly.
+    // The coal wall and channel breathe very slowly, out of phase.
     key.intensity = keyBase * (1 + 0.05 * Math.sin(elapsed * 1.7));
     coalWall.update(dt, elapsed);
+    channel.update(dt, elapsed);
 
     // Haze drifts almost imperceptibly.
     for (let i = 0; i < hazePlanes.length; i++) {
@@ -1430,8 +1984,9 @@ export function buildArena(scene: THREE.Scene): Arena {
     group,
     playerPosition: new THREE.Vector3(0, 1.5, 0),
     enemyAnchor: new THREE.Vector3(0, 1.1, -6),
-    lights: { key, ambient, braziers: brazierLights },
+    lights: { key, ambient, braziers: stationLights },
     brazierAnchors,
+    setActiveStation,
     update,
     dispose,
   };

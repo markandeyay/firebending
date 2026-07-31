@@ -30,12 +30,13 @@
  * trigger events (EMPOWERED_HOT_SEC covers the projectile flight time).
  * Documented tradeoff: a frame containing two different hits merges them.
  *
- * ARENA SHIFT (director's lane re-base, see director.ts header): the arena
- * group itself never moves; the action recenters INTO the static arena. The
- * shift only relocates stale world-anchored content, i.e. dead constructs
- * (group position + debris rigid bodies) by +deltaZ so the previous kill
- * ends up behind the player. Scorch decals are deliberately left in place:
- * they read as accumulated battle scars on the same stretch of floor.
+ * COURTYARD (Phase 5, replaced the lane re-base): the arena is a finite
+ * courtyard of six authored stations (killTravel.ts). Nothing shifts
+ * anymore; dead constructs and their debris stay where they fell as battle
+ * scars (the construct manager caps kept debris bodies at ~24 and fades the
+ * oldest). On travel arrival the screen relocates the four station point
+ * lights to the new station (arena.setActiveStation) and combat aims
+ * camera-relative through the rig's base pose (CameraPoseProvider).
  *
  * AUDIO: src/audio/* may be written concurrently, so this module never
  * imports it. AudioHooks is the seam: the orchestrator constructs the real
@@ -57,8 +58,9 @@ import {
   velocityScaleFor,
   type CalibrationStats,
 } from '../gestures/calibrationStats';
-import { buildArena, type Arena } from '../game/arena';
+import { buildArena, COURTYARD_COLLIDERS, type Arena } from '../game/arena';
 import { CameraRig, SHOT_POSES } from '../game/cameraRig';
+import { stationIndexFor } from '../game/killTravel';
 import {
   ConstructManager,
   createPhysicsWorld,
@@ -71,7 +73,7 @@ import {
   CHEST_HEIGHT,
   KILL_SLOWMO_MS,
   KILL_SLOWMO_SCALE,
-  PLAYER_WORLD_POSITION,
+  type CameraPoseProvider,
   type EffectsProvider,
 } from '../game/combat';
 import { configureRenderer } from '../game/renderer';
@@ -146,6 +148,11 @@ export interface ArenaContext {
    * omit it; the panel then draws skeletons over near-black lacquer.
    */
   stream?: MediaStream;
+  /**
+   * Bare environment capture (shots harness &bare=1): skip the gloves, PIP
+   * and HUD so hero shots show only the world.
+   */
+  bare?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +384,15 @@ export class ArenaScreen implements Screen {
       this.physics = null;
       return;
     }
+    // Raised courtyard structures (terrace, steps, bridge deck) get static
+    // colliders so death debris can rest on them as battle scars.
+    for (const solid of COURTYARD_COLLIDERS) {
+      this.physics.world.createCollider(
+        this.physics.rapier.ColliderDesc.cuboid(...solid.halfExtents)
+          .setTranslation(...solid.center)
+          .setFriction(0.9),
+      );
+    }
     this.manager = new ConstructManager(this.physics, scene);
 
     this.fire = new FireSystem(scene);
@@ -387,10 +403,14 @@ export class ArenaScreen implements Screen {
     this.fx = new MoveEffects(scene, this.fire, camera, this.rig);
     this.impacts = new ImpactSystem(scene, this.fire);
 
-    // In-world gloves (Phase 2): the player's hands, always on.
-    this.gloves = new GloveSystem(scene, this.fire, camera);
-    // Webcam PIP mirror panel (Phase 2): C toggles, on by default.
-    this.pip = new WebcamPip(root, context.stream);
+    // In-world gloves (Phase 2): the player's hands, always on, EXCEPT in
+    // bare environment captures (ctx.bare: the shots harness hero angles),
+    // where camera-attached overlays would photobomb the composition.
+    if (!context.bare) {
+      this.gloves = new GloveSystem(scene, this.fire, camera);
+      // Webcam PIP mirror panel (Phase 2): C toggles, on by default.
+      this.pip = new WebcamPip(root, context.stream);
+    }
 
     // --- Gesture engine ----------------------------------------------------
     // Real shoulder width (body pose) preferred over the wrist-span proxy.
@@ -411,21 +431,31 @@ export class ArenaScreen implements Screen {
       },
       wallActiveUntil: () => (fx.activeWall ? fx.activeWall.until : null),
     };
-    this.glow = new EmpowerGlow(root); // under the HUD in paint order
-    this.hud = new HUD(root);
+    if (!context.bare) {
+      this.glow = new EmpowerGlow(root); // under the HUD in paint order
+      this.hud = new HUD(root);
+    }
     const hud = this.hud;
     const engine = this.engine;
+    // Camera-relative combat frame (Phase 5): screen aim maps through the
+    // rig's undeflected base pose at the current station.
+    const rig = this.rig;
+    const cameraPose: CameraPoseProvider = {
+      position: () => rig.basePosition,
+      quaternion: () => rig.baseQuaternion,
+    };
     this.combat = new CombatSystem({
       manager: this.manager,
       effects: effectsProvider,
       impacts: this.impacts,
+      cameraPose,
       onHitStop: (ms) => {
         this.hitStopMs = Math.max(this.hitStopMs, ms);
         this.audio.onHitStop?.(ms);
       },
       onSlowMo: (scale, ms) => this.startSlowMo(scale, ms),
       onPlayerHit: (damage) => {
-        hud.playerHitFlash();
+        hud?.playerHitFlash();
         this.audio.onPlayerHit?.(damage);
       },
       onBreathPenalty: (amount) => engine.spend(amount),
@@ -436,9 +466,8 @@ export class ArenaScreen implements Screen {
       manager: this.manager,
       combat: this.combat,
       rig: this.rig,
-      hud,
-      playerPosition: PLAYER_WORLD_POSITION,
-      arenaShift: (offsetZ) => this.applyArenaShift(offsetZ),
+      ...(hud ? { hud } : {}),
+      cameraPose,
       onKillWindow: (position) => {
         // Section 8: 0.5 s slow-mo with ember burst on every kill.
         this.startSlowMo(KILL_SLOWMO_SCALE, KILL_SLOWMO_MS);
@@ -456,7 +485,12 @@ export class ArenaScreen implements Screen {
         this.audio.onKill?.(position);
       },
       onTravelStart: (index) => this.audio.onTravelStart?.(index),
-      onTravelEnd: (index) => this.audio.onTravelEnd?.(index),
+      onTravelEnd: (index) => {
+        // Light policy: the four station point lights relocate to the
+        // ACTIVE station on arrival (all braziers burn emissive-only).
+        this.arena?.setActiveStation(stationIndexFor(index));
+        this.audio.onTravelEnd?.(index);
+      },
     });
     this.director.start();
 
@@ -655,24 +689,6 @@ export class ArenaScreen implements Screen {
     this.audio.onSlowMo?.(scale, ms);
   }
 
-  /**
-   * Director lane re-base: shift dead constructs' visuals AND physics bodies
-   * by +offsetZ so the previous kill relocates behind the player. Alive
-   * constructs are skipped (the new one already spawned re-based). See the
-   * module header for why the arena group itself stays put.
-   */
-  private applyArenaShift(offsetZ: number): void {
-    if (!this.manager || !this.physics) return;
-    for (const construct of this.manager.constructs) {
-      if (construct.isAlive) continue;
-      construct.group.position.z += offsetZ;
-      for (const piece of construct.debris) {
-        const t = piece.body.translation();
-        piece.body.setTranslation({ x: t.x, y: t.y, z: t.z + offsetZ }, false);
-      }
-    }
-  }
-
   private tick(): void {
     // Screenshot-harness stability signal: after 30 rendered frames the
     // scene is warmed (lights settled, first particles alive) and
@@ -792,11 +808,12 @@ export class ArenaScreen implements Screen {
 
     const construct = director.currentConstruct;
 
-    // Seal above the construct.
+    // Seal above the construct (anchored to its LOCAL floor height: bridge
+    // stations stand raised).
     if (construct) {
       this.tmpWorld
         .copy(construct.group.position)
-        .setY(SEAL_ANCHOR_Y);
+        .setY(construct.group.position.y + SEAL_ANCHOR_Y);
       projectWorldToScreen(this.tmpWorld, camera, canvas, this.point);
       hud.projectTo(this.point.x, this.point.y, this.point.visible);
     }
@@ -817,7 +834,9 @@ export class ArenaScreen implements Screen {
       this.dmgAcc >= DAMAGE_FLUSH_IMMEDIATE ||
       (this.dmgTimer >= DAMAGE_FLUSH_SEC && this.dmgAcc >= DAMAGE_FLUSH_MIN);
     if (flush && construct) {
-      this.tmpWorld.copy(construct.group.position).setY(CHEST_HEIGHT);
+      this.tmpWorld
+        .copy(construct.group.position)
+        .setY(construct.group.position.y + CHEST_HEIGHT);
       projectWorldToScreen(this.tmpWorld, camera, canvas, this.point);
       if (this.point.visible) {
         hud.damageNumber(this.point.x, this.point.y, this.dmgAcc, {

@@ -177,6 +177,144 @@ describe('screen-to-world mapping', () => {
     expect(origin.y).toBeCloseTo(PLAYER_WORLD_POSITION.y, 6);
     expect(origin.z).toBeCloseTo(PLAYER_WORLD_POSITION.z, 6);
   });
+
+  it('rotates screen aim into the camera frame when a quaternion is given', () => {
+    // Camera yawed -90 degrees: its forward (-z screen) is world +x.
+    const quat = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 1, 0),
+      -Math.PI / 2,
+    );
+    const forward = screenAimToWorld({ x: 0, y: 0, z: -1 }, quat);
+    expect(forward.x).toBeCloseTo(1, 6);
+    expect(forward.z).toBeCloseTo(0, 6);
+    // Screen-right maps to the camera's right (world +z here).
+    const rightward = screenAimToWorld({ x: 1, y: 0, z: 0 }, quat);
+    expect(rightward.z).toBeCloseTo(1, 6);
+    // Wrist offsets run along the camera's axes too.
+    const origin = beamOriginToWorld(
+      { x: 1.0, y: 0.5, z: 0 },
+      new THREE.Vector3(2, 1.4, -8),
+      quat,
+    );
+    expect(origin.x).toBeCloseTo(2, 6);
+    expect(origin.z).toBeCloseTo(-8 + 0.6, 6); // half of ORIGIN_SPAN_X along +z
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Camera-relative combat frame (Phase 5 stations)
+// ---------------------------------------------------------------------------
+
+describe('camera-relative combat frame', () => {
+  // The station camera stands at (2, 1.4, -8) looking along world +x.
+  const EYE = new THREE.Vector3(2, 1.4, -8);
+  const QUAT = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 1, 0),
+    -Math.PI / 2,
+  );
+  const provider = {
+    position: () => EYE.clone(),
+    quaternion: () => QUAT.clone(),
+  };
+
+  it('sustained beams aimed at screen center hit the construct down the camera forward', async () => {
+    const { physics, manager } = await setup();
+    // 6 m in FRONT of the rotated camera: along +x.
+    const construct = manager.spawn(new THREE.Vector3(8, 0, -8), 1);
+    const effects = makeEffects();
+    const combat = new CombatSystem({ manager, effects, cameraPose: provider });
+
+    combat.handleMoveEvent(ev({ move: 'fire-stream', kind: 'sustain-start', t: 1000 }));
+    for (let i = 1; i <= 10; i++) {
+      combat.handleMoveEvent(ev({ move: 'fire-stream', kind: 'sustain-tick', t: 1000 + i * 100 }));
+    }
+    expect(construct.hp).toBeCloseTo(100 - 14, 4);
+
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('a construct down world -z is NOT hit when the camera faces +x', async () => {
+    const { physics, manager } = await setup();
+    const construct = manager.spawn(new THREE.Vector3(2, 0, -14), 1); // behind the frame
+    const effects = makeEffects();
+    const combat = new CombatSystem({ manager, effects, cameraPose: provider });
+
+    combat.handleMoveEvent(ev({ move: 'fire-stream', kind: 'sustain-start', t: 0 }));
+    for (let i = 1; i <= 10; i++) {
+      combat.handleMoveEvent(ev({ move: 'fire-stream', kind: 'sustain-tick', t: i * 100 }));
+    }
+    expect(construct.hp).toBe(100);
+
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('fire-whip and palm-wave work in the rotated frame at close range', async () => {
+    const { physics, manager } = await setup();
+    const near = manager.spawn(new THREE.Vector3(4.5, 0, -8), 1); // 2.5 m ahead
+    const effects = makeEffects();
+    const combat = new CombatSystem({ manager, effects, cameraPose: provider });
+
+    combat.handleMoveEvent(ev({ move: 'palm-wave', t: 100 }));
+    combat.handleMoveEvent(ev({ move: 'fire-whip', t: 200, aim: { x: 1, y: 0, z: 0 } }));
+    expect(near.hp).toBeCloseTo(100 - 6 - 16, 6);
+
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('coal defense follows the camera frame: wall blocks, otherwise the player is hit', async () => {
+    const { physics, manager } = await setup();
+    const construct = manager.spawn(new THREE.Vector3(8, 0, -8), 2);
+    const effects = makeEffects();
+    const onPlayerHit = vi.fn();
+    const combat = new CombatSystem({
+      manager,
+      effects,
+      onPlayerHit,
+      cameraPose: provider,
+    });
+
+    // No wall: the coal arcs to the eye position and hits the player.
+    construct.startLobbing(EYE, 1.0);
+    const dt = FIXED_TIMESTEP;
+    for (let t = 0; t < 2.6; t += dt) {
+      combat.update(dt);
+      manager.update(dt);
+    }
+    expect(onPlayerHit).toHaveBeenCalledTimes(1);
+
+    // Wall up: the next coal bursts against the camera-relative plane.
+    onPlayerHit.mockClear();
+    effects.wallUntil = Number.POSITIVE_INFINITY;
+    construct.startLobbing(EYE, 1.0);
+    for (let t = 0; t < 2.6; t += dt) {
+      combat.update(dt);
+      manager.update(dt);
+      if (construct.projectiles.length > 0) construct.stopLobbing();
+    }
+    expect(onPlayerHit).not.toHaveBeenCalled();
+    expect(construct.projectiles.length).toBe(0);
+
+    manager.dispose();
+    physics.dispose();
+  });
+
+  it('hits an elevated construct at its raised chest height (bridge deck)', async () => {
+    const { physics, manager } = await setup();
+    const construct = manager.spawn(new THREE.Vector3(0, 0, -6), 1, undefined, 0.5);
+    const effects = makeEffects();
+    const combat = new CombatSystem({ manager, effects });
+
+    // Chest sits at floorY + 1.25.
+    effects.projectiles.push(makeProjectile('jab-blast', new THREE.Vector3(0, 1.75, -6)));
+    combat.update(FIXED_TIMESTEP);
+    expect(construct.hp).toBeCloseTo(92, 6);
+
+    manager.dispose();
+    physics.dispose();
+  });
 });
 
 // ---------------------------------------------------------------------------

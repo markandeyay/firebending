@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import {
   ConstructManager,
   createPhysicsWorld,
+  DEBRIS_KEEP_CAP,
   DEFAULT_HP,
   FIXED_TIMESTEP,
   type CoalProjectile,
@@ -240,15 +241,49 @@ describe('Construct', () => {
       expect(piece.mesh.position.distanceTo(prev)).toBeLessThan(0.02);
     });
 
-    // Fade completes and the manager drops the construct.
+    // Battle scars (Phase 5): settled debris RESTS in place instead of
+    // fading; the construct stays alive in the manager list.
     run(manager, 3.0);
+    expect(construct.isResting).toBe(true);
+    expect(manager.constructs.length).toBe(1);
+    expect(root.children).toContain(construct.group);
+    expect(manager.activeConstruct).toBeNull();
+
+    // An explicit beginFade (the manager's cap path) runs the old fade-out.
+    construct.beginFade();
+    run(manager, 2.5);
     expect(manager.constructs.length).toBe(0);
     expect(root.children).not.toContain(construct.group);
     expect(construct.isGone).toBe(true);
-    expect(manager.activeConstruct).toBeNull();
     manager.dispose();
     physics.dispose();
   });
+
+  it('caps kept debris near DEBRIS_KEEP_CAP, fading the oldest kill first', async () => {
+    const physics = await makeWorld();
+    const { manager } = makeManager(physics);
+    // Five tier 1 kills leave 5 debris pieces each = 25 > 24.
+    const constructs = [];
+    for (let i = 0; i < 5; i++) {
+      const c = manager.spawn(new THREE.Vector3(i * 2 - 4, 1.1, -6), 1, 10);
+      c.takeHit(10, new THREE.Vector3(0, 0, -6), new THREE.Vector3(i * 2 - 4, 1.4, -5.7));
+      constructs.push(c);
+    }
+    // Let everything settle; the cap then fades exactly the OLDEST one.
+    run(manager, 4.0);
+    const first = constructs[0];
+    expect(first).toBeDefined();
+    run(manager, 2.5); // fade completes
+    expect(first?.isGone).toBe(true);
+    let pieces = 0;
+    for (const c of manager.constructs) pieces += c.debris.length;
+    expect(pieces).toBeLessThanOrEqual(DEBRIS_KEEP_CAP);
+    // The younger four remain as resting battle scars.
+    expect(manager.constructs.length).toBe(4);
+    for (const c of manager.constructs) expect(c.isResting).toBe(true);
+    manager.dispose();
+    physics.dispose();
+  }, 20000);
 
   it('activeConstruct returns the first live construct', async () => {
     const physics = await makeWorld();
