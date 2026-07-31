@@ -57,6 +57,8 @@ import { DEFAULT_PROFILE, thresholdsFrom } from '../src/gestures/profile';
 import type { MotionProfile, MotionThresholds } from '../src/gestures/profile';
 import { palmScore, palmScore2D } from '../src/gestures/poses';
 import type { Handedness } from '../src/gestures/poses';
+import { RATE_GATE_FPS, TARGET_CAPTURE_FPS } from '../src/studio/captureRate';
+import type { CaptureHealth } from '../src/studio/captureRate';
 import { detectReps } from '../src/studio/peaks';
 import type { SignalSample } from '../src/studio/peaks';
 import { primarySignalValue, takeDef } from '../src/studio/takes';
@@ -379,6 +381,18 @@ export interface TakeAnalysis {
   takeIndex: number;
   starred: boolean;
   status: string;
+  /** Measured landmark capture rate of the take (frames/duration). */
+  fps: number;
+  /** Mean/min instantaneous fps when the export carries them (newer
+   *  studio builds); absent on pre-gate exports. */
+  fpsMean?: number;
+  fpsMin?: number;
+  /**
+   * Phase 1 capture hard gate: the take measured under TARGET_CAPTURE_FPS
+   * (30). Every downstream number derived from such a take is invalid for
+   * tuning; the report banner names these takes.
+   */
+  lowFps: boolean;
   kind: TakeKind;
   move?: MoveName;
   /** Original move name when the 7-move fold remapped the slot. */
@@ -449,6 +463,13 @@ export interface DrillAnalysis {
   thresholds: MotionThresholds;
   /** True when at least one take ran on AUTO-PEAK rep windows. */
   autoPeakUsed: boolean;
+  /**
+   * Takes (id#index) measured under TARGET_CAPTURE_FPS: the Phase 1
+   * capture hard gate. Their numbers are invalid for tuning.
+   */
+  lowFpsTakes: string[];
+  /** The export's capture-health summary; null on pre-gate exports. */
+  captureHealth: CaptureHealth | null;
   /** Human-readable provenance of the noise pool used for proposals. */
   noiseProvenance: string;
   takes: TakeAnalysis[];
@@ -547,6 +568,10 @@ export function analyzeTake(
     takeIndex: take.takeIndex,
     starred: take.starred,
     status: take.status,
+    fps: take.fps,
+    ...(take.fpsMean !== undefined ? { fpsMean: take.fpsMean } : {}),
+    ...(take.fpsMin !== undefined ? { fpsMin: take.fpsMin } : {}),
+    lowFps: take.fps < TARGET_CAPTURE_FPS,
     kind: exp.kind,
     hasPose,
     repsUsed: reps.length,
@@ -985,6 +1010,10 @@ export function analyzeExport(exp: StudioExport, sourcePath: string): DrillAnaly
     profileSource: profile !== null ? 'export' : 'default',
     thresholds,
     autoPeakUsed: takes.some((t) => t.autoReps),
+    lowFpsTakes: takes
+      .filter((t) => t.lowFps)
+      .map((t) => `${t.id}#${t.takeIndex}`),
+    captureHealth: exp.captureHealth ?? null,
     noiseProvenance: provenance,
     takes,
     moveSummary,
@@ -1009,6 +1038,33 @@ function syntheticBanner(a: DrillAnalysis): string {
     '> from a synthesized export (pipeline test fixtures). None of the numbers',
     '> below may be used to tune thresholds. Record real drills in the studio',
     '> and re-run `npm run analyze`.',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Phase 1 capture hard gate banner: any take under TARGET_CAPTURE_FPS (30)
+ * invalidates every number derived from it. Analysis still runs so the
+ * failure is visible, but the banner names the invalid takes at the top.
+ */
+function lowFpsBanner(a: DrillAnalysis): string {
+  if (a.lowFpsTakes.length === 0) return '';
+  const lows = a.takes.filter((t) => t.lowFps);
+  return [
+    '',
+    `> **CAPTURE RATE UNDER ${TARGET_CAPTURE_FPS} FPS - PHASE 1 HARD GATE.** The`,
+    '> takes listed below were captured under the required 30 fps landmark',
+    '> rate (a 120 ms jab spans under 2 samples at 14 fps). Per the hard',
+    '> gate, EVERY downstream number derived from these takes (rep windows,',
+    '> hit rates, SNR, threshold proposals) is INVALID for tuning. The',
+    '> analysis still runs so the failure stays visible, but do not apply',
+    `> anything based on them. Takes at or above ${TARGET_CAPTURE_FPS} fps are unaffected.`,
+    '>',
+    ...lows.map(
+      (t) =>
+        `> - ${t.id}#${t.takeIndex}: ${fmt(t.fps, 1)} fps` +
+        (t.fpsMin !== undefined ? ` (min ${fmt(t.fpsMin, 1)})` : ''),
+    ),
     '',
   ].join('\n');
 }
@@ -1044,6 +1100,14 @@ export function buildReport(a: DrillAnalysis): string {
       `risingUpVel ${fmt(a.thresholds.risingUpVel)}, whipSwingVx ${fmt(a.thresholds.whipSwingVx)} ` +
       `(capture-time thresholds are stored per take in the export)`,
   );
+  if (a.captureHealth !== null) {
+    L.push(
+      `- Capture health: min ${fmt(a.captureHealth.minFps, 1)} fps, ` +
+        `median ${fmt(a.captureHealth.medianFps, 1)} fps, ` +
+        `${a.captureHealth.takesUnderGate} take(s) under the ${RATE_GATE_FPS} fps studio gate`,
+    );
+  }
+  L.push(lowFpsBanner(a));
   L.push(syntheticBanner(a));
   L.push(autoPeakBanner(a));
 
@@ -1053,16 +1117,20 @@ export function buildReport(a: DrillAnalysis): string {
     'fire-stream: palm is no longer a classified pose on the critical path.',
     '',
   );
-  L.push('| take | maps to | status | pose | reps used | rep source | fired in-rep | misses | false positives |');
-  L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+  L.push('| take | maps to | status | pose | capture fps | reps used | rep source | fired in-rep | misses | false positives |');
+  L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const t of a.takes) {
     const firedInRep = t.reps.reduce((s, r) => s + r.fired, 0);
     const misses = t.reps.filter((r) => r.miss).length;
     const mapped = t.move
       ? `${t.move}${t.mappedFrom !== undefined ? ` (was ${t.mappedFrom})` : ''}`
       : t.kind;
+    const fpsCell =
+      `${fmt(t.fps, 1)}` +
+      (t.fpsMin !== undefined ? ` (min ${fmt(t.fpsMin, 1)})` : '') +
+      (t.lowFps ? ' **LOW FPS**' : '');
     L.push(
-      `| ${t.id}#${t.takeIndex} | ${mapped} | ${t.status} | ${t.hasPose ? 'yes' : 'no'} | ` +
+      `| ${t.id}#${t.takeIndex} | ${mapped} | ${t.status} | ${t.hasPose ? 'yes' : 'no'} | ${fpsCell} | ` +
         `${t.kind === 'positive' ? t.repsUsed : '-'} | ` +
         `${t.kind === 'positive' ? (t.autoReps ? '**AUTO-PEAK**' : 'confirmed') : '-'} | ` +
         `${t.kind === 'positive' ? firedInRep : '-'} | ` +
@@ -1268,6 +1336,13 @@ export function buildReport(a: DrillAnalysis): string {
 export function summarize(a: DrillAnalysis): string {
   const L: string[] = [];
   if (a.synthetic) L.push('*** SYNTHETIC INPUT - numbers unusable for tuning ***');
+  if (a.lowFpsTakes.length > 0) {
+    L.push(
+      `*** CAPTURE RATE HARD GATE: ${a.lowFpsTakes.length} take(s) under ` +
+        `${TARGET_CAPTURE_FPS} fps: ${a.lowFpsTakes.join(', ')}`,
+    );
+    L.push('*** Every number derived from those takes is INVALID for tuning.');
+  }
   if (a.autoPeakUsed) {
     L.push('*** AUTO-PEAK REP WINDOWS IN USE: zero confirmed markers found on');
     L.push('*** one or more takes; windows are machine-detected, not reviewed.');

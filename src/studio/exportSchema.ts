@@ -14,6 +14,9 @@
 
 import type { HandFrame, PoseFrame } from '../tracking/types';
 import type { MotionProfile, MotionThresholds } from '../gestures/profile';
+import type { CaptureHealth } from './captureRate';
+
+export type { CaptureHealth };
 
 // ---------------------------------------------------------------------------
 // Take identity
@@ -141,6 +144,16 @@ export interface StudioTakeExport {
   status: TakeStatus;
   /** Achieved capture rate, frames/sec, over the untrimmed take. */
   fps: number;
+  /**
+   * Mean of the INSTANTANEOUS landmark rates (1000/gap per frame pair)
+   * over the untrimmed take. Additive optional field (version stays 1,
+   * same pattern as meta.synthetic): takes recorded before the capture
+   * hard gate lack it and must load fine.
+   */
+  fpsMean?: number;
+  /** Minimum instantaneous landmark fps over the untrimmed take (the
+   *  worst single frame gap). Additive optional field, see fpsMean. */
+  fpsMin?: number;
   /** Kept range [startMs, endMs], video ms. Frames outside are discarded. */
   trimmedRange: [number, number];
   /** The derived motion thresholds active when the take was captured. */
@@ -181,4 +194,11 @@ export interface StudioExport {
   exportedAt: string;
   meta: StudioExportMeta;
   takes: StudioTakeExport[];
+  /**
+   * Capture-rate health summary over the exported takes' measured fps
+   * (src/studio/captureRate.ts). Additive optional field (version stays
+   * 1): exports written before the capture hard gate lack it and the
+   * analyze tool must treat its absence as "unknown", not "healthy".
+   */
+  captureHealth?: CaptureHealth;
 }

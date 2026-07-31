@@ -6,6 +6,7 @@
  */
 
 import type { MotionProfile, MotionThresholds } from '../gestures/profile';
+import { captureHealthOf } from './captureRate';
 import { trimByTime } from './clock';
 import type {
   StudioExport,
@@ -40,6 +41,14 @@ export interface StoredTake {
   status: TakeStatus;
   recordedAt: string;
   fps: number;
+  /**
+   * Mean/min instantaneous landmark fps over the take
+   * (src/studio/captureRate.ts takeFpsStats). Optional for back-compat:
+   * takes persisted before the capture hard gate lack them and must load
+   * from IndexedDB unchanged.
+   */
+  fpsMean?: number;
+  fpsMin?: number;
   durationMs: number;
   cameraWidth: number;
   cameraHeight: number;
@@ -83,6 +92,11 @@ export function buildTakeExport(stored: StoredTake): StudioTakeExport {
     starred: stored.starred,
     status: stored.status,
     fps: stored.fps,
+    // Back-compat: old stored takes lack the instantaneous-fps stats; the
+    // keys are omitted (not set to undefined) so old and new exports both
+    // JSON round-trip cleanly.
+    ...(stored.fpsMean !== undefined ? { fpsMean: stored.fpsMean } : {}),
+    ...(stored.fpsMin !== undefined ? { fpsMin: stored.fpsMin } : {}),
     trimmedRange: [start, end],
     thresholds: stored.thresholds,
     frameClockOffset: stored.frameClockOffset,
@@ -152,6 +166,7 @@ export function buildExport(opts: BuildExportOptions): StudioExport {
       motionProfile: opts.motionProfile,
     },
     takes,
+    captureHealth: captureHealthOf(takes.map((t) => t.fps)),
   };
 }
 

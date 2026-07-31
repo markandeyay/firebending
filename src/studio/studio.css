@@ -332,6 +332,97 @@ body {
   color: var(--fb-parchment-dim);
 }
 
+/* Live capture-rate chip, under the mode chip. Good = muted gold; low =
+   the same warm danger tones as the redo/danger chrome. No neon. */
+.st-rate-chip {
+  position: absolute;
+  top: 44px;
+  right: 14px;
+  padding: 0.28rem 0.75rem;
+  background: rgba(13, 10, 8, 0.75);
+  border: 1px solid rgba(168, 133, 60, 0.4);
+  border-radius: 5px;
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  color: var(--fb-gold);
+  white-space: nowrap;
+}
+
+.st-rate-chip.is-low {
+  color: #e0a08a;
+  border-color: rgba(138, 47, 29, 0.85);
+  background: rgba(43, 15, 9, 0.82);
+}
+
+/* Capture hard-gate banner over the stage: parchment and ink, warm danger
+   border, firelight-legal. Shown while idle/recording under the gate. */
+.st-rate-banner {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  max-width: min(560px, 86%);
+  padding: 0.75rem 1.1rem;
+  background: var(--fb-parchment);
+  color: var(--fb-charcoal);
+  border: 2px solid rgba(138, 47, 29, 0.85);
+  border-radius: 6px;
+  box-shadow:
+    inset 0 0 22px rgba(107, 31, 21, 0.12),
+    0 4px 14px rgba(0, 0, 0, 0.55);
+  text-align: center;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.st-rate-banner.is-visible {
+  display: block;
+}
+
+.st-rate-banner-head {
+  font-family: var(--fb-font-display);
+  font-size: 0.94rem;
+  letter-spacing: 0.05em;
+  line-height: 1.5;
+  color: var(--fb-oxblood);
+}
+
+.st-rate-banner-fix {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: rgba(26, 21, 18, 0.8);
+}
+
+/* LOW FPS badge, styled like the small status chips. */
+.st-lowfps-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.08rem 0.4rem;
+  border: 1px solid rgba(138, 47, 29, 0.8);
+  border-radius: 4px;
+  background: rgba(138, 47, 29, 0.16);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #e0a08a;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Measured capture rate in the review controls row. */
+.st-fps-note {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: var(--fb-parchment-dim);
+  white-space: nowrap;
+}
+
+.st-fps-note.is-low {
+  color: #e0a08a;
+}
+
 /* Countdown numeral. */
 .st-count {
   position: absolute;

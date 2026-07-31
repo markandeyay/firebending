@@ -304,3 +304,77 @@ describe('drill analyze pipeline on a synthesized export', () => {
     expect(summary).toContain('NOT auto-applied');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Capture-rate hard gate (Phase 1): fps stamping and the LOW FPS banner
+// ---------------------------------------------------------------------------
+
+describe('capture-rate hard gate in analyze', () => {
+  it('stamps each take with its measured fps; 30 fps takes pass clean', () => {
+    const { analysis } = buildAnalysis();
+    for (const t of analysis.takes) {
+      expect(t.fps).toBe(30);
+      expect(t.lowFps).toBe(false);
+    }
+    expect(analysis.lowFpsTakes).toEqual([]);
+    // Fixture-built exports predate captureHealth: absence must be null,
+    // never treated as healthy-by-default.
+    expect(analysis.captureHealth).toBeNull();
+    const report = buildReport(analysis);
+    expect(report).toContain('capture fps');
+    expect(report).not.toContain('CAPTURE RATE UNDER 30 FPS');
+    expect(summarize(analysis)).not.toContain('CAPTURE RATE HARD GATE');
+  });
+
+  it('names low-fps takes in a top banner and keeps analyzing them', () => {
+    const takes = [
+      makeTake('jab-right-x5', 'jab-right', JAB_REPS),
+      makeTake('fire-whip-right-x3', 'fire-whip', []),
+    ];
+    // Simulate a ~14 fps capture on the jab take (the real failure mode
+    // that motivated the gate) with per-take instantaneous stats.
+    const jab = takes[0];
+    if (!jab) throw new Error('missing take');
+    jab.fps = 14.2;
+    jab.fpsMean = 14.5;
+    jab.fpsMin = 9.8;
+    const exp = makeExport(takes);
+    const analysis = analyzeExport(exp, 'synthetic://lowfps-test');
+
+    const jabA = analysis.takes.find((t) => t.id === 'jab-right-x5');
+    expect(jabA?.lowFps).toBe(true);
+    expect(jabA?.fpsMin).toBeCloseTo(9.8, 9);
+    const whipA = analysis.takes.find((t) => t.id === 'fire-whip-right-x3');
+    expect(whipA?.lowFps).toBe(false);
+    expect(analysis.lowFpsTakes).toEqual(['jab-right-x5#1']);
+
+    // Analysis still runs on the low take: numbers print, banner names it.
+    expect(jabA?.reps.length).toBe(2);
+
+    const report = buildReport(analysis);
+    const bannerAt = report.indexOf('CAPTURE RATE UNDER 30 FPS - PHASE 1 HARD GATE');
+    expect(bannerAt).toBeGreaterThan(-1);
+    // Prominent: the banner sits above every section of the report.
+    expect(bannerAt).toBeLessThan(report.indexOf('## Takes'));
+    expect(report).toContain('jab-right-x5#1: 14.2 fps (min 9.8)');
+    expect(report).toContain('INVALID for tuning');
+    expect(report).toContain('**LOW FPS**');
+
+    const summary = summarize(analysis);
+    expect(summary).toContain('CAPTURE RATE HARD GATE');
+    expect(summary).toContain('jab-right-x5#1');
+  });
+
+  it('reports the export captureHealth line when present', () => {
+    const takes = [makeTake('jab-right-x5', 'jab-right', JAB_REPS)];
+    const exp = makeExport(takes);
+    exp.captureHealth = { minFps: 30, medianFps: 30, takesUnderGate: 0 };
+    const analysis = analyzeExport(exp, 'synthetic://health-test');
+    expect(analysis.captureHealth).toEqual({
+      minFps: 30,
+      medianFps: 30,
+      takesUnderGate: 0,
+    });
+    expect(buildReport(analysis)).toContain('Capture health: min 30.0 fps');
+  });
+});

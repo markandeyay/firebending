@@ -25,6 +25,12 @@ import {
   thresholdsFrom,
   type MotionThresholds,
 } from '../gestures/profile';
+import {
+  RATE_GATE_FPS,
+  RollingRateMeter,
+  classifyRate,
+  takeFpsStats,
+} from './captureRate';
 import { frameClockOffset, nearestFrameIndex, videoTimeOf } from './clock';
 import { detectReps, type SignalSample } from './peaks';
 import { SignalTracker, handPresent } from './signals';
@@ -78,6 +84,9 @@ export class StudioApp {
   private cameraW = 640;
   private cameraH = 480;
   private cameraReady = false;
+  /** Rolling landmark-frame arrival rate (last 60 arrivals). */
+  private readonly rateMeter = new RollingRateMeter();
+  private lastRateRenderMs = 0;
 
   // Mode
   private mode: Mode = 'idle';
@@ -131,6 +140,9 @@ export class StudioApp {
   private recTimeEl!: HTMLElement;
   private recRepsEl!: HTMLElement;
   private modeChipEl!: HTMLElement;
+  private rateChipEl!: HTMLElement;
+  private rateBannerEl!: HTMLElement;
+  private rateBannerHeadEl!: HTMLElement;
   private countEl: HTMLElement | null = null;
   private recordBtn!: HTMLButtonElement;
   private controlsEl!: HTMLElement;
@@ -213,6 +225,18 @@ export class StudioApp {
     this.recChipEl.append(dot, this.recTimeEl, this.recRepsEl);
     this.modeChipEl = el('div', 'st-mode-chip');
     this.modeChipEl.textContent = 'LIVE';
+    // Live capture-rate chip (Phase 1 hard gate): actual landmark-frame
+    // arrival rate, updated ~2Hz from the rolling meter.
+    this.rateChipEl = el('div', 'st-rate-chip');
+    this.rateChipEl.textContent = 'capture -- fps';
+    // Low-rate banner over the stage. Recording is never blocked, but the
+    // take gets stamped and badged (see finalizeRecording).
+    this.rateBannerEl = el('div', 'st-rate-banner');
+    this.rateBannerHeadEl = el('div', 'st-rate-banner-head');
+    const rateFix = el('div', 'st-rate-banner-fix');
+    rateFix.textContent =
+      'Close other heavy apps, brighten the room so the camera can use a short exposure, or give the tracker a few seconds to finish warming up.';
+    this.rateBannerEl.append(this.rateBannerHeadEl, rateFix);
     this.recordBtn = el('button', 'st-record-btn') as HTMLButtonElement;
     this.recordBtn.title = 'Record (space)';
     this.recordBtn.addEventListener('click', () => this.toggleRecord());
@@ -225,6 +249,8 @@ export class StudioApp {
       this.stageMsgEl,
       this.recChipEl,
       this.modeChipEl,
+      this.rateChipEl,
+      this.rateBannerEl,
       this.recordBtn,
       recHint,
     );
@@ -343,6 +369,7 @@ export class StudioApp {
   private onFrame(frame: LandmarkFrame): void {
     this.latestFrame = frame;
     this.latestFramePerf = performance.now();
+    this.rateMeter.push(this.latestFramePerf);
     const signals = this.tracker.update(frame);
 
     if (this.mode !== 'recording') return;
@@ -408,6 +435,36 @@ export class StudioApp {
     }
   }
 
+  /**
+   * Capture-rate chip + hard-gate banner (~2Hz from the main loop). The
+   * banner shows only while idle or recording: those are the modes where a
+   * slow capture is actively producing (or about to produce) invalid data.
+   */
+  private renderRate(nowMs: number): void {
+    const fps = this.cameraReady ? this.rateMeter.fpsAt(nowMs) : null;
+    if (fps === null) {
+      this.rateChipEl.textContent = 'capture -- fps';
+      this.rateChipEl.classList.remove('is-low');
+      this.rateBannerEl.classList.remove('is-visible');
+      return;
+    }
+    const low = classifyRate(fps) === 'warn';
+    this.rateChipEl.textContent = `capture ${fps.toFixed(1)} fps`;
+    this.rateChipEl.classList.toggle('is-low', low);
+    const gateActive = this.mode === 'idle' || this.mode === 'recording';
+    if (low && gateActive) {
+      this.rateBannerHeadEl.textContent = `Capture is running at ${fps.toFixed(1)} fps. 30 is required for usable data.`;
+      this.rateBannerEl.classList.add('is-visible');
+    } else {
+      this.rateBannerEl.classList.remove('is-visible');
+    }
+  }
+
+  /** True when a take measured under the capture gate. */
+  private static isLowFps(take: StoredTake): boolean {
+    return take.fps < RATE_GATE_FPS;
+  }
+
   // -------------------------------------------------------------------------
   // Take selection and board
   // -------------------------------------------------------------------------
@@ -461,6 +518,12 @@ export class StudioApp {
       nameEl.append(n, f);
       const st = el('span', 'st-take-status');
       st.textContent = status.label;
+      // Capture hard gate: any take in the slot measured under the gate.
+      if (slot.some((t) => StudioApp.isLowFps(t))) {
+        const low = el('span', 'st-lowfps-badge');
+        low.textContent = 'LOW FPS';
+        st.append(low);
+      }
       row.append(dotEl, nameEl, st);
       row.addEventListener('click', () => this.selectTake(def.id));
       this.takeListEl.appendChild(row);
@@ -670,6 +733,9 @@ export class StudioApp {
       confirmed: null,
       manual: false,
     }));
+    // Phase 1 hard gate: stamp the take with its measured capture stats
+    // (overall fps plus mean/min instantaneous fps over the frame gaps).
+    const fpsStats = takeFpsStats(this.recFrames.map((f) => f.t));
     const stored: StoredTake = {
       key,
       id,
@@ -678,6 +744,8 @@ export class StudioApp {
       status: 'recorded',
       recordedAt: new Date().toISOString(),
       fps: durationMs > 0 ? (this.recFrames.length / durationMs) * 1000 : 0,
+      fpsMean: fpsStats.meanFps,
+      fpsMin: fpsStats.minFps,
       durationMs,
       cameraWidth: this.cameraW,
       cameraHeight: this.cameraH,
@@ -913,16 +981,35 @@ export class StudioApp {
     }
 
     btn(stored.starred ? 'Starred best' : 'Star best', () => this.starTake(stored), 'st-btn--gold', stored.starred);
-    btn(
+    const lowFps = StudioApp.isLowFps(stored);
+    const confirmBtn = btn(
       stored.status === 'confirmed' ? 'Confirmed' : 'Confirm take',
       () => this.setStatus(stored, 'confirmed'),
       'st-btn--gold',
       stored.status === 'confirmed',
     );
+    // Confirming a low-fps take stays allowed (the user may want to test),
+    // but the button carries the warning.
+    if (lowFps) {
+      confirmBtn.title = `This take measured ${stored.fps.toFixed(1)} fps, under the ${RATE_GATE_FPS} fps gate. Its numbers are not usable for tuning.`;
+    }
     btn('Needs redo', () => this.setStatus(stored, 'needs-redo'), '', stored.status === 'needs-redo');
     btn('Re-record', () => this.startCountdown());
     btn('Delete', () => this.confirmDelete(stored), 'st-btn--danger');
     btn('Download webm', () => this.downloadWebm(stored));
+
+    // The take's measured capture rate: the proof number for a real take.
+    const fpsNote = el('span', 'st-fps-note');
+    if (lowFps) fpsNote.classList.add('is-low');
+    fpsNote.textContent =
+      `capture ${stored.fps.toFixed(1)} fps` +
+      (stored.fpsMin !== undefined ? `, min ${stored.fpsMin.toFixed(1)}` : '');
+    if (lowFps) {
+      const badge = el('span', 'st-lowfps-badge');
+      badge.textContent = 'LOW FPS';
+      fpsNote.append(badge);
+    }
+    this.controlsEl.appendChild(fpsNote);
 
     const repCount = el('span', 'st-rep-count');
     const confirmed = stored.reps.filter((r) => r.confirmed === true).length;
@@ -1214,6 +1301,12 @@ export class StudioApp {
 
     // Instruction-card animation.
     this.stick.render(now);
+
+    // Capture-rate chip + gate banner, ~2Hz.
+    if (now - this.lastRateRenderMs > 500) {
+      this.lastRateRenderMs = now;
+      this.renderRate(now);
+    }
 
     if (this.mode === 'review') {
       const stored = this.currentTake();
