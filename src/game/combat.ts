@@ -253,15 +253,15 @@ export interface ImpactsLike {
 
 /**
  * The rig's undeflected base pose, injected as a provider so combat never
- * imports the camera rig. Integration wires it to CameraRig.basePosition /
- * baseQuaternion (both return clones; combat copies into scratch and never
- * mutates them).
+ * imports the camera rig. Integration wires it to CameraRig.basePositionRef /
+ * baseQuaternionRef (allocation-free views; combat copies into scratch every
+ * frame and never mutates them).
  */
 export interface CameraPoseProvider {
   /** Current undeflected camera base position (the planted player's eye). */
-  position(): THREE.Vector3;
+  position(): Readonly<THREE.Vector3>;
   /** Current undeflected camera base orientation. */
-  quaternion(): THREE.Quaternion;
+  quaternion(): Readonly<THREE.Quaternion>;
 }
 
 /** Fixed-frame provider: `position` looking down world -z. */
@@ -394,6 +394,8 @@ export class CombatSystem {
   private killCount = 0;
 
   private readonly projectileBook = new Map<ProjectileEffectLike, ProjectileBook>();
+  /** Scratch set for the per-frame projectile sweep (GC audit: reused). */
+  private readonly seenProjectiles = new Set<ProjectileEffectLike>();
   private readonly pendingEmpower = new Map<MoveName, number>();
   private readonly sustainBook = new Map<string, SustainBook>();
   private readonly wiredConstructs = new WeakSet<Construct>();
@@ -594,7 +596,9 @@ export class CombatSystem {
 
   private sweepEffectProjectiles(): void {
     const list = this.deps.effects.projectiles;
-    const seen = new Set<ProjectileEffectLike>();
+    // Reused across frames (GC audit): cleared, never reallocated.
+    const seen = this.seenProjectiles;
+    seen.clear();
     for (const p of list) {
       seen.add(p);
       let book = this.projectileBook.get(p);
@@ -608,8 +612,9 @@ export class CombatSystem {
       }
       book.prev.copy(p.position);
     }
-    // Forget projectiles the effects layer has despawned.
-    for (const key of [...this.projectileBook.keys()]) {
+    // Forget projectiles the effects layer has despawned. Deleting during
+    // Map iteration is spec-safe; no snapshot array is allocated.
+    for (const key of this.projectileBook.keys()) {
       if (!seen.has(key)) this.projectileBook.delete(key);
     }
   }

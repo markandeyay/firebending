@@ -467,6 +467,8 @@ function makeAssets(): GloveAssets {
 const ZERO_AIM: Vec3 = { x: 0, y: 0, z: 0 };
 /** Scratch wrist point with the rest-drop bias applied (no allocation). */
 const _wristDropped: Vec3 = { x: 0, y: 0, z: 0 };
+/** Reused screenToWorld output (GC audit: no per-frame vector allocation). */
+const _mapped = { origin: new THREE.Vector3(), direction: new THREE.Vector3() };
 const _camQuat = new THREE.Quaternion();
 const _target = new THREE.Vector3();
 const _vel = new THREE.Vector3();
@@ -566,7 +568,7 @@ class GloveRig {
     _wristDropped.x = wristScreen.x;
     _wristDropped.y = wristScreen.y + GLOVE_REST_DROP;
     _wristDropped.z = wristScreen.z;
-    const mapped = screenToWorld(_wristDropped, ZERO_AIM, camera);
+    const mapped = screenToWorld(_wristDropped, ZERO_AIM, camera, _mapped);
     _target.copy(mapped.origin);
     camera.getWorldQuaternion(_camQuat);
 

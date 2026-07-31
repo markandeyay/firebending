@@ -102,12 +102,15 @@ const _up = new THREE.Vector3();
 /**
  * Map a screen-space gesture (origin: normalized, x right / y DOWN; aim:
  * normalized screen velocity, -z toward camera) into world space. See the
- * module header for the full contract. Returns freshly allocated vectors.
+ * module header for the full contract. Returns freshly allocated vectors,
+ * UNLESS `out` is provided: per-frame callers (the glove rig) pass a reused
+ * MappedEvent so the hot path allocates nothing.
  */
 export function screenToWorld(
   origin: Vec3,
   aim: Vec3,
   camera: THREE.PerspectiveCamera,
+  out?: MappedEvent,
 ): { origin: THREE.Vector3; direction: THREE.Vector3 } {
   camera.updateWorldMatrix(true, false);
   camera.getWorldPosition(_camPos);
@@ -122,7 +125,7 @@ export function screenToWorld(
   const ndcX = origin.x * 2 - 1; // screen x right -> NDC x right
   const ndcY = 1 - origin.y * 2; // screen y DOWN -> NDC y up
 
-  const worldOrigin = new THREE.Vector3()
+  const worldOrigin = (out ? out.origin : new THREE.Vector3())
     .copy(_camPos)
     .addScaledVector(_fwd, REACH_PLANE_DISTANCE)
     .addScaledVector(_right, ndcX * halfW)
@@ -130,13 +133,14 @@ export function screenToWorld(
 
   // Axis map: screen x -> camera right, screen y (down) -> camera-down,
   // screen -z (toward camera) -> camera-forward (into the scene).
-  const worldDir = new THREE.Vector3()
+  const worldDir = (out ? out.direction.set(0, 0, 0) : new THREE.Vector3())
     .addScaledVector(_right, aim.x)
     .addScaledVector(_up, -aim.y)
     .addScaledVector(_fwd, -aim.z);
   if (worldDir.lengthSq() < 1e-8) worldDir.copy(_fwd);
   worldDir.normalize();
 
+  if (out) return out;
   return { origin: worldOrigin, direction: worldDir };
 }
 
@@ -904,6 +908,11 @@ export class MoveEffects {
       return { until: this.chargeUntil };
     }
     return null;
+  }
+
+  /** Allocation-free charge check for per-frame callers (GC audit). */
+  get chargeIsActive(): boolean {
+    return this.chargeUntil !== null && this.clock < this.chargeUntil;
   }
 
   /** Number of live effects in the registry (bounded; for tests/debug). */

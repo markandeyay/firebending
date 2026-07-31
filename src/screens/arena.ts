@@ -489,8 +489,10 @@ export class ArenaScreen implements Screen {
     // rig's undeflected base pose at the current station.
     const rig = this.rig;
     const cameraPose: CameraPoseProvider = {
-      position: () => rig.basePosition,
-      quaternion: () => rig.baseQuaternion,
+      // Allocation-free refs (GC audit): combat copies into scratch each
+      // frame, so the cloning getters would cost two heap objects per tick.
+      position: () => rig.basePositionRef,
+      quaternion: () => rig.baseQuaternionRef,
     };
     this.combat = new CombatSystem({
       manager: this.manager,
@@ -893,12 +895,12 @@ export class ArenaScreen implements Screen {
       this.gloves?.update(
         dt,
         this.latestFrame,
-        this.fx !== null && this.fx.chargeActive !== null,
+        this.fx !== null && this.fx.chargeIsActive,
       );
       this.pollCoals();
 
       // Breath Charge empowerment glow follows the exposed charge window.
-      this.glow?.update(this.fx !== null && this.fx.chargeActive !== null, rawDt);
+      this.glow?.update(this.fx !== null && this.fx.chargeIsActive, rawDt);
 
       // Director pacing on wall-clock time.
       this.director?.update(rawDt);

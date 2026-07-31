@@ -203,6 +203,19 @@ export class CameraRig {
     return this.baseQuat.clone();
   }
 
+  /**
+   * Allocation-free views of the base pose for per-frame readers (the combat
+   * CameraPoseProvider copies these into scratch every frame; the cloning
+   * getters above cost two heap objects per call). Callers MUST NOT mutate.
+   */
+  get basePositionRef(): Readonly<THREE.Vector3> {
+    return this.basePos;
+  }
+
+  get baseQuaternionRef(): Readonly<THREE.Quaternion> {
+    return this.baseQuat;
+  }
+
   get isTraveling(): boolean {
     return this.travel !== null;
   }

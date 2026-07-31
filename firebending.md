@@ -257,6 +257,8 @@ Format: `[timestamp] agent | tasks touched | result | next`
 
 [2026-07-31 night] orchestrator | FINAL P2+P4+P5+P6 merged (P6 committed separately); P1b elbow-only rule validated on drill data (stream 0->40%, jabs capture-limited at 14fps) | fire rebuilt on blackbody temp ramp + curl noise + soft particles + sub-frame emission + density-driven flicker + shimmer + landing embers, half-res pass kept for worst-case fill (no measurable saving at vsync, honest); constructs rebuilt (straw/rope/iron/stone, burn-dissolve damage, 6 station variants, staged captures); adaptive score all-procedural (Tone.js rejected ~150kB for 5% use), zero bundled audio without verified license, ATTRIBUTIONS.md lists HUMAN-fetchable candidates; title = woodblock card, 5 iterations | one merge commit for the entangled arena.ts cluster (deviation from commit-per-task, logged) | 624 tests
 
+[2026-07-31 late] orchestrator | FINAL P3+P7+P8 done; v1.0.0 | P3: PBR audit applied, SSAO measured+cut (broken/invisible), contact blobs shipped, weathering, tone curve + corner CA, palette 48/48 clean; P7: p50 16.60/p95 17.8/max 18.6ms all systems live PASS, GC fixes (gloves screenToWorld out-param, combat Set/clone reuse, chargeActive boolean), ladder proof stands, ML worst-case 42.1ms/frame documented as no-subject detector path; P8: LAUNCH.md + README per S17, hero-station-1..6 | remaining HUMAN items in LAUNCH.md section 5; GIFs: existing three kept, fresh captures queued as HUMAN (visuals changed this round) | 624 tests, ~270kB gz JS
+
 ### 16.3 Decision log
 Format: `[timestamp] decision | reason | affected sections`
 
