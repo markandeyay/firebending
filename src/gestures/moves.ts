@@ -273,6 +273,45 @@ export const Z_TOWARD_SECONDARY_MIN = 1.0;
 
 /** Hold duration after a thrust that upgrades it to a sustained move. */
 export const EXTEND_HOLD_MS = 350;
+
+// VANISHED-HAND ELBOW-ONLY THRUSTS (2026-07-31 drill review). The user's
+// recorded drills (fixtures/recorded/firebending-drill-2026-07-31.json)
+// show the hand tracker LOSING the hand during fast motion: both hands are
+// null through all 11 jab AUTO-PEAK windows, so the wrist-speed/bbox-growth
+// secondaries read zero exactly when a thrust happens. The disappearance
+// itself is the fast-motion signature. Rule: when body pose is FRESH and a
+// side's hand WAS tracked within HAND_VANISH_WINDOW_MS but is currently
+// absent, a sufficiently violent elbow extension registers a thrust on the
+// elbow PRIMARY alone, aimed along the forearm with the pose wrist as the
+// origin. Resolution uses the signals that survive a vanished hand: elbow
+// RE-FLEX resolves to the discrete jab, the elbow staying extended past
+// EXTEND_HOLD_MS resolves to Fire Stream.
+
+/**
+ * How recently the vanished hand must have been tracked. In the drill data,
+ * 105 vanish episodes measured with this window keep each episode tied to
+ * the motion that destroyed tracking; jab-take elbow peaks arriving later
+ * than this after hand loss (e.g. jab-right rep 1: last track ~6100 ms,
+ * elbow peak 6452..6669 ms) are indistinguishable from between-rep arm
+ * motion and stay excluded on purpose.
+ */
+export const HAND_VANISH_WINDOW_MS = 300;
+
+/**
+ * Elbow-extension angular velocity floor for the vanished-hand path,
+ * DERIVED FROM THE DRILL DATA as the max-margin separator over all 105
+ * vanish episodes (hand absent, tracked within HAND_VANISH_WINDOW_MS):
+ * non-thrust episodes peak at 3.93 rad/s (the fire-whip-left arm re-raise,
+ * the loudest arm motion that must NOT fire), the quietest separable
+ * thrust measures 4.66 rad/s (the fire-stream take's second thrust);
+ * midpoint 4.29, margin 0.37. The user's jab/twin vanish-context elbow
+ * peaks (max 2.74 rad/s at ~14 fps pose sampling) sit BELOW the whip
+ * noise, so NO value fires them without cross-firing on arm raises: this
+ * path deliberately recovers only unambiguous elbow spikes. Applied as
+ * max(elbowExtendVel, ELBOW_VANISH_VEL) so a calibrated profile can only
+ * raise it further.
+ */
+export const ELBOW_VANISH_VEL = 4.29;
 /** Fallback aim: straight at the enemy (screen -z is toward the camera). */
 export const AIM_FORWARD: Vec3 = { x: 0, y: 0, z: -1 };
 
@@ -391,9 +430,17 @@ export const LOCKOUT_MS: Readonly<Record<MoveName, number>> = {
 interface ThrustRecord {
   /** Time the spike condition was first observed. */
   tSpike: number;
-  /** Windowed velocity captured at the peak of the spike (the punch vector). */
+  /**
+   * The punch vector. Hand-tracked thrusts: the windowed velocity captured
+   * at the peak of the spike (fed through thrustAim at emission).
+   * Elbow-only thrusts: the FINAL forearm aim itself, captured at the peak
+   * elbow extension (used verbatim at emission).
+   */
   aimVel: Vec3;
+  /** Peak signal of the spike: wrist speed (hand path) or rad/s (elbow path). */
   peakSpeed: number;
+  /** True for a vanished-hand elbow-only thrust (see HAND_VANISH_WINDOW_MS). */
+  elbowOnly: boolean;
 }
 
 const ZERO_SPEED: HandSpeed = {
@@ -435,6 +482,8 @@ class HandState {
   gripStaticMs = 0;
   whipArmed = false;
   jabCooldownUntil = -Infinity;
+  /** Frame time when this hand was last tracked; survives tracking loss. */
+  lastPresentT = -Infinity;
 
   resetTracking(): void {
     this.window = [];
@@ -447,12 +496,14 @@ class HandState {
     this.wrist = null;
     this.speed = ZERO_SPEED;
     this.growth = 0;
-    this.thrust = null;
+    // A hand-tracked thrust dies with its hand; an ELBOW-ONLY thrust is
+    // pose-driven and must survive the very tracking loss that defines it.
+    if (this.thrust !== null && !this.thrust.elbowOnly) this.thrust = null;
     this.gripStaticMs = 0;
     this.whipArmed = false;
-    // jabCooldownUntil survives tracking loss on purpose. Elbow tracking
-    // (elbowVel / prevElbowAngle / lastPoseSampleT) also survives: it is
-    // pose-driven and independent of hand-landmark presence.
+    // jabCooldownUntil and lastPresentT survive tracking loss on purpose.
+    // Elbow tracking (elbowVel / prevElbowAngle / lastPoseSampleT) also
+    // survives: it is pose-driven and independent of hand-landmark presence.
   }
 }
 
@@ -462,6 +513,8 @@ interface SustainState {
   costPerSec: number;
   aim: Vec3;
   lastOrigin: Vec3;
+  /** Started by a vanished-hand elbow-only thrust: pose-driven lifecycle. */
+  elbowOnly: boolean;
 }
 
 interface EmitRequest {
@@ -691,8 +744,8 @@ export class MoveEngine {
       this.updateElbow(this.right, pose, 'right');
     }
 
-    this.updateHand(this.left, frame.left, dtSec);
-    this.updateHand(this.right, frame.right, dtSec);
+    this.updateHand(this.left, frame.left, t, dtSec);
+    this.updateHand(this.right, frame.right, t, dtSec);
 
     // Breath regenerates whenever no sustained move is active (Section 7).
     if (!this.sustain) {
@@ -754,7 +807,7 @@ export class MoveEngine {
     s.lastPoseSampleT = pose.t;
   }
 
-  private updateHand(s: HandState, raw: HandFrame | null, dtSec: number): void {
+  private updateHand(s: HandState, raw: HandFrame | null, t: number, dtSec: number): void {
     const present =
       raw !== null && raw.confidence >= CONFIDENCE_FLOOR && raw.landmarks.length >= 21;
     if (!present || raw === null) {
@@ -763,6 +816,7 @@ export class MoveEngine {
     }
 
     s.present = true;
+    s.lastPresentT = t;
     s.window.push(raw);
     if (s.window.length > AIM_WINDOW_FRAMES) s.window.shift();
     s.wrist = lm(raw, LM.WRIST);
@@ -1063,8 +1117,71 @@ export class MoveEngine {
 
   private evalThrust(events: MoveEvent[], t: number, hand: Handedness): void {
     const s = this.handState(hand);
-    if (!s.present || s.scores === null || s.wrist === null) return;
+    if (s.present && s.scores !== null && s.wrist !== null) {
+      this.registerHandThrust(t, s);
+    } else {
+      // Hand absent: the vanished-hand elbow-only path (see the
+      // HAND_VANISH_WINDOW_MS / ELBOW_VANISH_VEL notes above).
+      this.registerVanishThrust(t, s, hand);
+    }
 
+    const th = s.thrust;
+    if (th === null) return;
+
+    // Resolution needs an origin: the tracked wrist, or for a vanished
+    // hand the pose wrist of the same side.
+    const origin = s.wrist ?? this.poseWristOf(hand);
+    if (origin === null) return; // pose lost too: keep the thrust pending
+
+    // Retract within the hold window resolves to the discrete move. The
+    // retract signal is windowed bbox shrink (the on-screen hand getting
+    // smaller as it pulls back) or, pose fresh, a fast elbow RE-FLEX; a
+    // vanished hand reads growth 0, so the elbow re-flex is what resolves
+    // an elbow-only thrust.
+    if (this.isRetract(s)) {
+      s.thrust = null;
+      // Guard against double-fire when the hand reappears: the resolved
+      // elbow-only thrust consumes the hand's motion for the standard
+      // window, so the reacquisition spike cannot re-register it.
+      if (th.elbowOnly) this.consumeThrust(s, t);
+      this.emitJab(events, t, hand, s, th, origin);
+      return;
+    }
+
+    // Held extended past the window resolves to Fire Stream, the only
+    // sustained move since the 7-move simplification. For an elbow-only
+    // thrust "held" means the elbow stayed extended: no re-flex arrived.
+    if (t - th.tSpike >= EXTEND_HOLD_MS) {
+      s.thrust = null;
+      if (th.elbowOnly) this.consumeThrust(s, t);
+      const aim = th.elbowOnly ? th.aimVel : this.thrustAim(hand, th.aimVel);
+      const emitted = this.emit(events, t, {
+        move: 'fire-stream',
+        hand,
+        kind: 'sustain-start',
+        aim,
+        origin,
+        completedAt: th.tSpike + EXTEND_HOLD_MS,
+        cost: 0,
+        minBreath: STREAM_COST_PER_SEC * SUSTAIN_MIN_SEC,
+        cooldownMs: 0,
+        lockoutMs: 0,
+      });
+      if (emitted) {
+        this.sustain = {
+          move: 'fire-stream',
+          hand,
+          costPerSec: STREAM_COST_PER_SEC,
+          aim,
+          lastOrigin: origin,
+          elbowOnly: th.elbowOnly,
+        };
+      }
+    }
+  }
+
+  /** Hand-tracked spike registration plus near-miss tracing. */
+  private registerHandThrust(t: number, s: HandState): void {
     // Priority note: the whip (evaluated earlier) claims lateral swings and
     // the two-hand moves consume joint motions, so a thrust reaching this
     // point is a genuine one-arm event. Since the 7-move simplification
@@ -1079,9 +1196,12 @@ export class MoveEngine {
           tSpike: t,
           aimVel: s.speed.velocity,
           peakSpeed: s.speed.speed,
+          elbowOnly: false,
         };
-      } else if (s.speed.speed > s.thrust.peakSpeed) {
-        // Track the peak of the spike: that is the punch vector.
+      } else if (!s.thrust.elbowOnly && s.speed.speed > s.thrust.peakSpeed) {
+        // Track the peak of the spike: that is the punch vector. A pending
+        // ELBOW-ONLY thrust is left untouched (its peak is in rad/s): the
+        // reappeared hand resolves it instead of re-registering it.
         s.thrust.peakSpeed = s.speed.speed;
         s.thrust.aimVel = s.speed.velocity;
       }
@@ -1124,46 +1244,40 @@ export class MoveEngine {
         this.recordNearMiss(t, move, 'growth', s.growth, this.th.spikeGrowth);
       }
     }
+  }
 
-    const th = s.thrust;
-    if (th === null) return;
-
-    // Retract within the hold window resolves to the discrete move. The
-    // retract signal is windowed bbox SHRINK (the on-screen hand getting
-    // smaller as it pulls back), not +z velocity; when pose is fresh a fast
-    // elbow RE-FLEX (the arm folding back) also counts as retract.
-    if (this.isRetract(s)) {
-      s.thrust = null;
-      this.emitJab(events, t, hand, s, th);
+  /**
+   * Vanished-hand elbow-only registration: pose fresh, the hand tracked
+   * within HAND_VANISH_WINDOW_MS but currently absent (the disappearance IS
+   * the fast-motion signature on the drill data), and the elbow extension
+   * crossing the data-derived vanish floor. Aim comes from the forearm,
+   * captured at the peak extension velocity.
+   */
+  private registerVanishThrust(t: number, s: HandState, hand: Handedness): void {
+    if (t < s.suppressThrustUntil) return;
+    if (!this.poseFresh) return;
+    if (t - s.lastPresentT > HAND_VANISH_WINDOW_MS) return;
+    const threshold = Math.max(this.th.elbowExtendVel, ELBOW_VANISH_VEL);
+    if (s.elbowVel < threshold) {
+      if (
+        this.debugEnabled &&
+        s.thrust === null &&
+        s.elbowVel >= NEAR_MISS_FRACTION * threshold
+      ) {
+        this.recordNearMiss(t, 'jab-blast', 'elbowVel', s.elbowVel, threshold);
+      }
       return;
     }
-
-    // Held extended past the window resolves to Fire Stream, the only
-    // sustained move since the 7-move simplification.
-    if (t - th.tSpike >= EXTEND_HOLD_MS) {
-      s.thrust = null;
-      const aim = this.thrustAim(hand, th.aimVel);
-      const emitted = this.emit(events, t, {
-        move: 'fire-stream',
-        hand,
-        kind: 'sustain-start',
-        aim,
-        origin: s.wrist,
-        completedAt: th.tSpike + EXTEND_HOLD_MS,
-        cost: 0,
-        minBreath: STREAM_COST_PER_SEC * SUSTAIN_MIN_SEC,
-        cooldownMs: 0,
-        lockoutMs: 0,
-      });
-      if (emitted) {
-        this.sustain = {
-          move: 'fire-stream',
-          hand,
-          costPerSec: STREAM_COST_PER_SEC,
-          aim,
-          lastOrigin: s.wrist,
-        };
-      }
+    if (s.thrust === null) {
+      s.thrust = {
+        tSpike: t,
+        aimVel: this.forearmAim(hand),
+        peakSpeed: s.elbowVel,
+        elbowOnly: true,
+      };
+    } else if (s.thrust.elbowOnly && s.elbowVel > s.thrust.peakSpeed) {
+      s.thrust.peakSpeed = s.elbowVel;
+      s.thrust.aimVel = this.forearmAim(hand);
     }
   }
 
@@ -1172,7 +1286,8 @@ export class MoveEngine {
     t: number,
     hand: Handedness,
     s: HandState,
-    th: ThrustRecord
+    th: ThrustRecord,
+    origin: Vec3,
   ): void {
     if (t < s.jabCooldownUntil) return; // per-hand cooldown, thrust already consumed
 
@@ -1191,8 +1306,9 @@ export class MoveEngine {
       move,
       hand,
       kind: 'trigger',
-      aim: this.thrustAim(hand, th.aimVel),
-      origin: s.wrist as Vec3,
+      // Elbow-only thrusts carry their final forearm aim in the record.
+      aim: th.elbowOnly ? th.aimVel : this.thrustAim(hand, th.aimVel),
+      origin,
       completedAt: t,
       cost: 0,
       cooldownMs: 0,
@@ -1216,15 +1332,27 @@ export class MoveEngine {
 
     this.breathValue -= su.costPerSec * dtSec;
     if (s.wrist !== null) su.lastOrigin = s.wrist;
+    else if (su.elbowOnly) {
+      // Vanished hand: the pose wrist keeps the origin moving with the arm.
+      const pw = this.poseWristOf(su.hand);
+      if (pw !== null) su.lastOrigin = pw;
+    }
 
     // Pose-agnostic since the 7-move simplification: the stream ends when
     // the hand is lost, the arm retracts, or Breath runs out; finger curl
     // never ends it. Windowed bbox shrink (or, pose fresh, a fast elbow
     // re-flex): robust against noise over a long hold (the retract
     // threshold sits well above the measured hold-noise floor); a real
-    // retract crosses it within ~2 frames.
+    // retract crosses it within ~2 frames. An ELBOW-ONLY stream is
+    // pose-driven instead: it survives the vanished hand and ends on the
+    // elbow re-flex, Breath exhaustion, or pose going stale.
     const retracting = s.present && this.isRetract(s);
-    const ended = this.breathValue <= 0 || !s.present || retracting;
+    const ended = su.elbowOnly
+      ? this.breathValue <= 0 ||
+        !this.poseFresh ||
+        s.elbowVel <= -this.th.elbowExtendVel ||
+        retracting
+      : this.breathValue <= 0 || !s.present || retracting;
 
     if (ended) {
       this.breathValue = Math.max(0, this.breathValue);
@@ -1375,6 +1503,49 @@ export class MoveEngine {
   private consumeThrust(s: HandState, t: number): void {
     s.thrust = null;
     s.suppressThrustUntil = t + THRUST_CONSUME_MS;
+  }
+
+  /** The pose wrist for a side, or null when no pose has been seen. */
+  private poseWristOf(hand: Handedness): Vec3 | null {
+    const pose = this.latestPose;
+    if (pose === null) return null;
+    return hand === 'left' ? pose.left.wrist : pose.right.wrist;
+  }
+
+  /**
+   * Aim for a vanished-hand elbow-only thrust: the FOREARM direction.
+   * pose.world (metric, mirrored consistently with player space: x right,
+   * y down, z negative toward the camera) gives a true 3D elbow -> wrist
+   * direction. Screen joints carry no usable depth, so the fallback blends
+   * the planar screen forearm with the forward fallback at the standard
+   * AIM_FOREARM_WEIGHT / AIM_VELOCITY_WEIGHT split; no pose at all (cannot
+   * happen while poseFresh, kept for safety) aims straight ahead.
+   */
+  private forearmAim(hand: Handedness): Vec3 {
+    const pose = this.latestPose;
+    if (pose === null) return AIM_FORWARD;
+    const world = pose.world;
+    if (world) {
+      const arm = hand === 'left' ? world.left : world.right;
+      const dir = normalize({
+        x: arm.wrist.x - arm.elbow.x,
+        y: arm.wrist.y - arm.elbow.y,
+        z: arm.wrist.z - arm.elbow.z,
+      });
+      if (dir.x !== 0 || dir.y !== 0 || dir.z !== 0) return dir;
+    }
+    const arm = hand === 'left' ? pose.left : pose.right;
+    const dx = arm.wrist.x - arm.elbow.x;
+    const dy = arm.wrist.y - arm.elbow.y;
+    const planarLen = Math.hypot(dx, dy);
+    if (planarLen < 1e-6) return AIM_FORWARD;
+    const blended = normalize({
+      x: AIM_FOREARM_WEIGHT * (dx / planarLen),
+      y: AIM_FOREARM_WEIGHT * (dy / planarLen),
+      z: AIM_VELOCITY_WEIGHT * AIM_FORWARD.z,
+    });
+    if (blended.x === 0 && blended.y === 0 && blended.z === 0) return AIM_FORWARD;
+    return blended;
   }
 
   private midOrigin(): Vec3 {

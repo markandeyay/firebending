@@ -13,7 +13,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { MoveEngine, POSE_FRESH_MS } from '../src/gestures/moves';
+import {
+  ELBOW_VANISH_VEL,
+  HAND_VANISH_WINDOW_MS,
+  MoveEngine,
+  POSE_FRESH_MS,
+} from '../src/gestures/moves';
 import type { MoveEvent } from '../src/gestures/moves';
 import { placePose } from '../fixtures/lib';
 import type {
@@ -242,6 +247,141 @@ describe('interpolated pose frames (worker path)', () => {
     });
     const jabs = events.filter((e) => e.move === 'jab-blast');
     expect(jabs).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vanished-hand elbow-only thrusts (2026-07-31 drill review): the tracker
+// loses the hand during fast thrusts, so a hand tracked within
+// HAND_VANISH_WINDOW_MS that is currently null may fire on the elbow
+// PRIMARY alone at the data-derived ELBOW_VANISH_VEL floor. Aim comes from
+// the forearm, origin from the pose wrist; retract resolution is the elbow
+// re-flex, extend resolution is the hold timer.
+// ---------------------------------------------------------------------------
+
+describe('vanished-hand elbow-only thrusts', () => {
+  /** Elbow ramp rates in rad per POSE SAMPLE (samples every 2 frames, 66 ms). */
+  const FAST_STEP = 0.35; // ~5.3 rad/s: above the 4.29 vanish floor
+  const RAISE_STEP = 0.257; // ~3.9 rad/s: the whip arm-re-raise regime
+
+  interface VanishOpts {
+    presentAt: (frame: number) => boolean;
+    angleAt: (sampleIndex: number) => number;
+    frames: number;
+  }
+
+  function runVanish(opts: VanishOpts): { events: MoveEvent[]; engine: MoveEngine } {
+    const engine = new MoveEngine();
+    const events: MoveEvent[] = [];
+    let heldPose: PoseFrame | null = null;
+    for (let i = 0; i < opts.frames; i++) {
+      const t = i * DT_MS;
+      if (i % 2 === 0) heldPose = poseSample(t, opts.angleAt(i / 2));
+      const frame: LandmarkFrame = {
+        t,
+        left: null,
+        right: opts.presentAt(i) ? fistAt(0.55, 0.58, 0.16) : null,
+        face: null,
+        pose: heldPose,
+      };
+      events.push(...engine.update(frame));
+    }
+    return { events, engine };
+  }
+
+  /** Guard hold, fast extension over samples 5..7, fast re-flex after 8. */
+  const punchThenReflex = (s: number): number => {
+    if (s < 5) return GUARD_ANGLE;
+    if (s <= 8) return GUARD_ANGLE + FAST_STEP * (s - 5 + 1);
+    return Math.max(GUARD_ANGLE, GUARD_ANGLE + FAST_STEP * 4 - FAST_STEP * (s - 8));
+  };
+
+  it('sanity: the fast ramp crosses the vanish floor, the raise ramp does not', () => {
+    expect(FAST_STEP / 0.066).toBeGreaterThan(ELBOW_VANISH_VEL);
+    expect(RAISE_STEP / 0.066).toBeLessThan(ELBOW_VANISH_VEL);
+    expect(RAISE_STEP / 0.066).toBeGreaterThan(3.6); // above the plain elbow gate
+  });
+
+  it('hand vanishes mid-punch: elbow spike + re-flex fires exactly one jab from the pose wrist', () => {
+    const { events } = runVanish({
+      presentAt: (i) => i < 10, // tracked through the wind-up, lost at the punch
+      angleAt: punchThenReflex,
+      frames: 24,
+    });
+    const jabs = events.filter((e) => e.move === 'jab-blast');
+    expect(jabs).toHaveLength(1);
+    expect(events).toHaveLength(1);
+    const jab = jabs[0];
+    if (!jab) throw new Error('no jab');
+    expect(jab.kind).toBe('trigger');
+    expect(jab.hand).toBe('right');
+    // Origin is the POSE wrist (screenArm right), not a hand landmark.
+    expect(jab.origin.x).toBeCloseTo(0.7, 5);
+    expect(jab.origin.y).toBeCloseTo(0.55, 5);
+    // Aim is the normalized forearm direction.
+    expect(Math.hypot(jab.aim.x, jab.aim.y, jab.aim.z)).toBeCloseTo(1, 5);
+  });
+
+  it('does not double-fire when the hand reappears with a reacquisition spike', () => {
+    const { events } = runVanish({
+      // Lost during the punch, reacquired right after the re-flex.
+      presentAt: (i) => i < 10 || i >= 18,
+      angleAt: punchThenReflex,
+      frames: 30,
+    });
+    expect(events.filter((e) => e.move === 'jab-blast')).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it('the whip arm-re-raise regime (~3.9 rad/s) stays silent: the data-derived floor rejects it', () => {
+    const raise = (s: number): number =>
+      s < 5 ? GUARD_ANGLE : GUARD_ANGLE + RAISE_STEP * Math.min(4, s - 4);
+    const { events } = runVanish({
+      presentAt: (i) => i < 10,
+      angleAt: raise,
+      frames: 24,
+    });
+    expect(events).toEqual([]);
+  });
+
+  it('a hand gone longer than HAND_VANISH_WINDOW_MS cannot fire', () => {
+    // Hand tracked only for the first 3 frames; the elbow spike starts at
+    // sample 8 (t = 528 ms), far beyond the vanish window.
+    const lateSpike = (s: number): number => {
+      if (s < 8) return GUARD_ANGLE;
+      if (s <= 11) return GUARD_ANGLE + FAST_STEP * (s - 8 + 1);
+      return Math.max(GUARD_ANGLE, GUARD_ANGLE + FAST_STEP * 4 - FAST_STEP * (s - 11));
+    };
+    const { events } = runVanish({
+      presentAt: (i) => i < 3,
+      angleAt: lateSpike,
+      frames: 30,
+    });
+    expect(16 * DT_MS - 2 * DT_MS).toBeGreaterThan(HAND_VANISH_WINDOW_MS); // sanity
+    expect(events).toEqual([]);
+  });
+
+  it('elbow staying extended resolves to a fire-stream sustain, ended by the re-flex', () => {
+    // Extend over samples 5..8, HOLD the extended angle (no re-flex) well
+    // past EXTEND_HOLD_MS, then fold back fast.
+    const extendHoldReflex = (s: number): number => {
+      if (s < 5) return GUARD_ANGLE;
+      if (s <= 8) return GUARD_ANGLE + FAST_STEP * (s - 5 + 1);
+      if (s <= 20) return GUARD_ANGLE + FAST_STEP * 4; // held extended
+      return Math.max(GUARD_ANGLE, GUARD_ANGLE + FAST_STEP * 4 - FAST_STEP * (s - 20));
+    };
+    const { events } = runVanish({
+      presentAt: (i) => i < 10,
+      angleAt: extendHoldReflex,
+      frames: 50,
+    });
+    for (const e of events) expect(e.move).toBe('fire-stream');
+    const first = events[0];
+    const last = events[events.length - 1];
+    if (!first || !last) throw new Error('no sustain events');
+    expect(first.kind).toBe('sustain-start');
+    expect(last.kind).toBe('sustain-end');
+    expect(events.filter((e) => e.kind === 'sustain-tick').length).toBeGreaterThan(3);
   });
 });
 

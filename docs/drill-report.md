@@ -22,7 +22,7 @@ fire-stream: palm is no longer a classified pose on the critical path.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | alt-jab-combo-x3#1 | cross-combo | confirmed | yes | 6 | **AUTO-PEAK** | 0 | 6 | - |
 | breath-charge-x3#1 | breath-charge | confirmed | yes | 6 | **AUTO-PEAK** | 1 | 5 | - |
-| fire-stream-4s-x2#1 | fire-stream | confirmed | yes | 2 | **AUTO-PEAK** | 0 | 2 | - |
+| fire-stream-4s-x2#1 | fire-stream | confirmed | yes | 2 | **AUTO-PEAK** | 2 | 1 | - |
 | fire-whip-left-x3#1 | fire-whip | confirmed | yes | 3 | **AUTO-PEAK** | 0 | 3 | - |
 | fire-whip-right-x3#1 | fire-whip | confirmed | yes | 2 | **AUTO-PEAK** | 0 | 2 | - |
 | flame-fan-4s-x2#1 | fire-stream (was flame-fan) | confirmed | yes | 3 | **AUTO-PEAK** | 0 | 3 | - |
@@ -41,7 +41,7 @@ Trigger / sustain-start events per move across each whole take
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | alt-jab-combo-x3#1 | 0 | 0 | 0 <- | 0 | 0 | 0 | 0 |
 | breath-charge-x3#1 | 0 | 0 | 0 | 0 | 0 | 0 | 2 (1 out-of-rep) <- |
-| fire-stream-4s-x2#1 | 0 | 0 <- | 0 | 0 | 0 | 0 | 0 |
+| fire-stream-4s-x2#1 | 0 | 2 (0 out-of-rep) <- | 0 | 0 | 0 | 0 | 0 |
 | fire-whip-left-x3#1 | 0 | 0 | 0 | 0 | 0 | 0 <- | 0 |
 | fire-whip-right-x3#1 | 0 | 0 | 0 | 0 | 0 | 0 <- | 0 |
 | flame-fan-4s-x2#1 | 0 | 0 <- | 0 | 0 | 0 | 0 | 0 |
@@ -61,7 +61,7 @@ background noise).
 | move | takes | reps (auto) | fired in-rep | hit rate | misses | FP (other takes, out-of-rep) | cross-fires (other takes, in-rep) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | jab-blast | jab-left-x5#1, jab-right-x5#1 | 11 (11 auto) | 0 | 0% | 11 | 0 | 0 |
-| fire-stream | fire-stream-4s-x2#1, flame-fan-4s-x2#1 | 5 (5 auto) | 0 | 0% | 5 | 0 | 0 |
+| fire-stream | fire-stream-4s-x2#1, flame-fan-4s-x2#1 | 5 (5 auto) | 2 | 40% | 4 | 0 | 0 |
 | cross-combo | alt-jab-combo-x3#1 | 6 (6 auto) | 0 | 0% | 6 | 0 | 0 |
 | twin-cannon | twin-cannon-x3#1 | 6 (6 auto) | 0 | 0% | 6 | 0 | 0 |
 | rising-flame | rising-flame-x3#1 | 3 (3 auto) | 0 | 0% | 3 | 0 | 0 |
@@ -155,13 +155,6 @@ background noise).
 | elbowVel | 1.292 | 3.600 | 2.308 |
 | wristSpeed | 0.557 | 0.900 | 0.343 |
 | bboxGrowth | 0.442 | 1.350 | 0.908 |
-
-### fire-stream-4s-x2#1 rep 2 (10503..10770 ms, AUTO-PEAK window)
-
-| blocking signal | rep max | threshold | short by |
-| --- | --- | --- | --- |
-| wristSpeed | 0.000 | 0.900 | 0.900 |
-| bboxGrowth | 0.000 | 1.350 | 1.350 |
 
 ### fire-whip-left-x3#1 rep 1 (1554..1821 ms, AUTO-PEAK window)
 
@@ -336,7 +329,7 @@ Engine near-miss records in the window:
 
 | failed condition | best value | threshold | occurrences |
 | --- | --- | --- | --- |
-| elbowVel | 2.149 | 3.600 | 1 |
+| elbowVel | 2.149 | 4.290 | 4 |
 
 ### twin-cannon-x3#1 rep 2 (6277..6743 ms, AUTO-PEAK window)
 
@@ -350,7 +343,7 @@ Engine near-miss records in the window:
 
 | failed condition | best value | threshold | occurrences |
 | --- | --- | --- | --- |
-| elbowVel | 2.742 | 3.600 | 5 |
+| elbowVel | 2.742 | 3.600 | 8 |
 
 ### twin-cannon-x3#1 rep 3 (10343..10809 ms, AUTO-PEAK window)
 
@@ -380,7 +373,7 @@ Engine near-miss records in the window:
 
 | failed condition | best value | threshold | occurrences |
 | --- | --- | --- | --- |
-| elbowVel | 2.264 | 3.600 | 1 |
+| elbowVel | 2.264 | 3.600 | 4 |
 
 ### twin-cannon-x3#1 rep 6 (15026..15826 ms, AUTO-PEAK window)
 
@@ -461,81 +454,91 @@ orchestrator applies them once the user's recorded data supports them).
 
 ## Applied tuning changes (2026-07-31 review, hand-applied after this run)
 
-One threshold change was justified by the recorded data and applied; every
-other proposal was rejected, with the evidence below. The moveset itself was
-simplified to 7 moves in the same review (palm removed from the critical
-path; see src/gestures/moves.ts header), which is a structural change, not a
-threshold change.
+Two data-justified changes were applied; every other proposal was rejected
+with the evidence below. The moveset itself was simplified to 7 moves in the
+same review (palm removed from the critical path; see src/gestures/moves.ts
+header), a structural change, not a threshold change.
 
 ### APPLIED: breath-charge chamber fist enter 0.75 -> 0.63
 
 - Before: the chamber used the standard pose hysteresis enter level 0.75.
 - After: a dedicated chamber hysteresis (BREATH_FIST_ENTER = 0.63, exit
   0.55) in src/gestures/moves.ts.
-- Evidence (breath-charge-x3#1): 196 chamber-hold fist scores across the
-  recorded cycles measure p5 0.632 / median 0.711 / min 0.572, with
-  frame-to-frame jitter p90 0.022. The user's whole sustained chamber
-  distribution sat BELOW the old 0.75 enter, so the 4-frame debounce never
-  latched on most holds (per-rep fist maxima 0.682..0.803; two windows
-  blocked outright by 0.03 and 0.07). Enter = recorded p5; exit 0.55 stays
-  below the recorded minimum so an entered chamber survives the hold.
-- Validation by replay: before the change 1 of the 2 tracker-visible
-  chamber holds fired; after it BOTH fire (triggers at 2379 ms and
-  10095 ms). The per-window hit rate reads 1/6 because the AUTO-PEAK
-  windows for this take sit on the wrist-speed TRANSITION peaks (chamber
-  entry/exit), while charges fire mid-hold between them; the second trigger
-  lands between windows. The player performed 3 cycles; the middle cycle's
-  hands were never tracked at all (hands absent 6145..8878 ms), which no
-  threshold can fix.
-- Note: the recorded noise pool shows relaxed REAL hands also saturate
-  fistScore (noise fist = 1.00), so the fist gate does not separate a
-  chamber from real idle at any level; that separation comes from the hip
-  band, the stillness cap and the 1.0 s hold. The gate is kept because it
-  still rejects open-handed postures and keeps the synthetic negative suite
+- Evidence (breath-charge-x3#1): 196 chamber-hold fist scores measure p5
+  0.632 / median 0.711 / min 0.572, jitter p90 0.022; the user's whole
+  sustained hold sat BELOW the old 0.75 enter so the 4-frame debounce never
+  latched (per-rep fist maxima 0.682..0.803). Enter = recorded p5; exit
+  stays below the recorded minimum.
+- Validation by replay: 1 of 2 -> BOTH tracker-visible chamber holds fire
+  (triggers at 2379 and 10095 ms). The player's third cycle was never
+  tracked at all (hands absent 6145..8878 ms).
+- Note: relaxed REAL hands also saturate fistScore (noise fist = 1.00), so
+  the gate does not separate a chamber from real idle; that separation is
+  the hip band + stillness + the 1.0 s hold. The gate is kept because it
+  rejects open-handed postures and keeps the synthetic negative suite
   meaningful (synthetic rest hands score fist 0.00..0.04).
 
-### REJECTED: elbowExtendVel 3.600 -> 4.592 (the only separator found)
+### APPLIED: vanished-hand elbow-only thrust path (HAND_VANISH_WINDOW_MS 300, ELBOW_VANISH_VEL 4.29)
 
-The max-margin separator sits ABOVE the current threshold because the noise
-pool's loudest elbow values (3.96..4.37 rad/s) are the fire-whip take's arm
-re-raises 950..1150 ms after whip peaks, i.e. real arm extensions that are
-not thrusts. 27 of 28 thrust rep peaks sit below the proposal; applying it
-would make detection strictly worse. The deeper finding: the user's thrust
-elbow peaks (bulk 0.6..2.7 rad/s, median 1.45 at ~14 fps pose sampling)
-sit far below the modeled default (3.6), but no lower value separates them
-from arm-raise noise either; the jab-vs-raise distinction lives in the
-hand-motion secondaries, which this recording cannot tune (next item).
+- Rule: pose fresh AND the hand tracked within 300 ms but currently null
+  (the disappearance is the fast-motion signature: both hands are null in
+  all 11 jab AUTO-PEAK windows) AND elbow extension velocity >=
+  max(elbowExtendVel, ELBOW_VANISH_VEL) registers a thrust; aim = forearm
+  direction, origin = pose wrist; elbow RE-FLEX resolves the jab, the elbow
+  staying extended past EXTEND_HOLD_MS resolves Fire Stream; resolution
+  consumes the thrust so hand reacquisition cannot double-fire.
+- ELBOW_VANISH_VEL derivation (max-margin over the 105 vanish episodes in
+  this export): non-thrust episode elbow max 3.93 rad/s (fire-whip-left arm
+  re-raise), quietest separable thrust 4.66 rad/s (fire-stream second
+  thrust); midpoint 4.29, margin 0.37.
+- Variant decision: variant A (no pre-vanish motion guard) at the 4.29
+  floor. At the plain 3.6 gate the path WOULD cross-fire on the whip
+  re-raise (3.93); the variant-B pre-vanish signature carries no separating
+  power on this data (last-tracked bbox growth is ~0 in most thrust
+  episodes because the hand vanishes at motion onset, while noise episodes
+  reach pre-growth 0.60; toward-camera velocity is not exported at all), so
+  the guard cannot substitute for the higher floor without guessing.
+- Validation by replay: fire-stream 0/5 -> 2/5 in-rep (both elbow-only
+  sustains land inside the second stream rep; the whip takes stay at ZERO
+  fires of any move; every FP and cross-fire column stays 0).
+- Honest limit: jab/cross-combo/twin stay at 0%. Their vanish-context elbow
+  peaks (max 2.74 rad/s at ~14 fps pose sampling) sit BELOW the whip
+  re-raise noise (3.93), and in the jab takes the elbow peak often arrives
+  MORE than 300 ms after hand loss. No window length or threshold recovers
+  them without cross-firing on arm raises: elbow alone cannot tell this
+  user's jab from an arm raise. That needs better capture (higher fps or
+  hand tracking that survives fast motion) or confirmed markers plus real
+  negative takes.
+
+### REJECTED: elbowExtendVel 3.600 -> 4.592 (the general-path separator)
+
+The separator sits ABOVE the current threshold because the full noise
+pool's loudest elbow values are the whip-take arm re-raises; 27 of 28
+thrust rep peaks sit below it. Applying it would make the general fusion
+path strictly worse. (The vanish path above encodes the same separation
+where it is actually valid: the vanish context.)
 
 ### REJECTED (no separation exists): spikeSpeed, spikeGrowth, risingUpVel, whipSwingVx
 
-The recording shows the hand tracker LOSES the hands during virtually every
-fast motion (26 hand-loss events; both hands are null through every jab
-window; the entire fire-whip-right take's |vx| never exceeds 0.055 u/s;
-rising sweeps peak at 0.16 u/s upward). In-window hand-motion peaks are
-therefore near zero while the noise pools contain hand-REACQUISITION
-velocity spikes up to 1.16 u/s (wristSpeed), 1.70 1/s (bboxGrowth) and
-1.16 u/s (swingVx). There is no threshold value that fires on these takes
-without firing on reacquisition glitches: max-margin separation does not
-exist in either direction. HARD RULE honored: no value was guessed. What
-the data actually demands is capture-side work (higher fps / better hand
-tracking through fast motion, or confirmed rep markers plus recorded
-negative takes), not threshold motion.
+The recording shows hand landmarks vanish during fast motion, so in-window
+hand-motion peaks are near zero while the noise pools contain
+hand-reacquisition spikes (1.16 u/s wristSpeed, 1.70 1/s bboxGrowth,
+1.16 u/s swingVx). No threshold value fires on these takes without firing
+on reacquisition glitches. HARD RULE honored: no value was guessed.
 
 ### KEPT: GRIP_ENTER_SCORE 0.78 despite one 0.710 rep
 
 fire-whip-left rep 1 peaked at grip 0.710, below the 0.78 enter. Lowering
-the enter under 0.75 would cross the HaGRID distractor cliff (every
-3-of-4-curl distractor saturates at exactly 0.75; entering above it buys
-0.96 precision, docs/hagrid-report.md). One rep of one take does not
-outweigh the HaGRID evidence; the whip's actual blocker on this recording
-is swingVx (hands untracked mid-lash), not grip.
+under 0.75 would cross the HaGRID distractor cliff (0.96 precision,
+docs/hagrid-report.md); one rep does not outweigh HaGRID. The whip's actual
+blocker on this recording is swingVx (hands untracked mid-lash).
 
 ### Noise floor provenance
 
 The 3 negative takes and 2 palm-strike takes were never recorded. All noise
-floors above therefore come from the between-rep (out-of-rep) spans of the
-10 positive takes plus every frame of the static-palm hold, as labeled
-throughout this report. Rep windows are AUTO-PEAK reconstructions (zero
-markers were confirmed in review); both facts lower the evidentiary weight
-of every number here, which is why only the chamber change (whose evidence
-is a dense, continuous score trace, not a window statistic) was applied.
+floors come from the between-rep (out-of-rep) spans of the 10 positive
+takes plus every frame of the static-palm hold, as labeled throughout. Rep
+windows are AUTO-PEAK reconstructions (zero markers were confirmed in
+review); both facts lower the evidentiary weight of every number here,
+which is why only the two changes above (each backed by dense continuous
+traces, not just window statistics) were applied.
