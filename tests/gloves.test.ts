@@ -10,12 +10,19 @@ import {
   FINGER_SEGMENTS,
   GLOVE_EASE_SEC,
   HAND_SIZE_M,
+  PALM_ASPECT,
+  PALM_WRIST_TAPER,
+  SEGMENT_TAPER,
   followAlpha,
   handBasisQuaternion,
+  jointRadius,
+  makePalmGeometry,
+  palmDimensions,
   presenceStep,
   segmentOrientation,
   segmentRadius,
   shapeLandmarks,
+  thumbRadialSign,
 } from '../src/vfx/gloves';
 import type { HandFrame, Vec3 } from '../src/tracking/types';
 import { HAND_LANDMARK_COUNT, LM } from '../src/tracking/types';
@@ -174,16 +181,147 @@ describe('rig plumbing constants', () => {
     }
   });
 
-  it('tapers finger radius from proximal to distal and thickens the thumb', () => {
-    expect(segmentRadius(0)).toBeGreaterThan(segmentRadius(3));
-    expect(segmentRadius(3)).toBeGreaterThan(segmentRadius(4));
-    expect(segmentRadius(4)).toBeGreaterThan(segmentRadius(5));
-  });
-
   it('followAlpha is 0 at dt=0 and approaches 1 for large dt', () => {
     expect(followAlpha(0)).toBe(0);
     expect(followAlpha(0.008)).toBeGreaterThan(0);
     expect(followAlpha(0.008)).toBeLessThan(followAlpha(0.016));
     expect(followAlpha(5)).toBeCloseTo(1, 6);
+  });
+});
+
+describe('finger taper', () => {
+  it('tapers finger radii proximal 1.0 / middle 0.82 / distal 0.66', () => {
+    // Index finger is segments 3, 4, 5; every finger shares the ratios.
+    for (const base of [3, 6, 9, 12]) {
+      expect(segmentRadius(base + 1) / segmentRadius(base)).toBeCloseTo(0.82, 9);
+      expect(segmentRadius(base + 2) / segmentRadius(base)).toBeCloseTo(0.66, 9);
+    }
+  });
+
+  it('makes the thumb thicker than the fingers and merges its metacarpal into the palm as the thickest wedge', () => {
+    expect(segmentRadius(1)).toBeGreaterThan(segmentRadius(3)); // thumb proximal > finger proximal
+    expect(segmentRadius(2)).toBeGreaterThan(segmentRadius(5)); // thumb distal > finger distal
+    expect(segmentRadius(2)).toBeLessThan(segmentRadius(1)); // thumb still tapers
+    for (let k = 1; k < FINGER_SEGMENTS.length; k++) {
+      expect(segmentRadius(0)).toBeGreaterThan(segmentRadius(k)); // thenar wedge
+    }
+  });
+});
+
+describe('joint-size rule', () => {
+  it('sizes every joint to the SMALLER adjoining segment radius at that joint', () => {
+    // A segment presents its proximal radius at pair[0] and its tapered
+    // SEGMENT_TAPER radius at pair[1]; the joint takes the minimum.
+    for (let lm = 1; lm < HAND_LANDMARK_COUNT; lm++) {
+      const presented: number[] = [];
+      FINGER_SEGMENTS.forEach(([a, b], k) => {
+        if (a === lm) presented.push(segmentRadius(k));
+        if (b === lm) presented.push(segmentRadius(k) * SEGMENT_TAPER);
+      });
+      expect(jointRadius(lm)).toBeCloseTo(Math.min(...presented), 12);
+    }
+  });
+
+  it('matches the knuckle row to finger thickness (MCP joint = proximal radius, no bulging)', () => {
+    expect(jointRadius(LM.INDEX_MCP)).toBeCloseTo(segmentRadius(3), 12);
+    expect(jointRadius(LM.PINKY_MCP)).toBeCloseTo(segmentRadius(12), 12);
+  });
+
+  it('caps fingertips at the narrowed tip radius of the distal frustum', () => {
+    expect(jointRadius(LM.INDEX_TIP)).toBeCloseTo(segmentRadius(5) * SEGMENT_TAPER, 12);
+  });
+
+  it('gives the wrist (no adjoining segment) a zero radius', () => {
+    expect(jointRadius(LM.WRIST)).toBe(0);
+  });
+});
+
+describe('palmDimensions', () => {
+  it('locks the slab to ~3:1 width to thickness and spans wrist to the MCP row', () => {
+    const shape = shapeLandmarks(syntheticHand(vec(0.5, 0.5, 0)));
+    const dims = palmDimensions(shape);
+    expect(dims).not.toBeNull();
+    if (!dims) return;
+    expect(dims.width / dims.thickness).toBeCloseTo(PALM_ASPECT, 9);
+    expect(dims.width).toBeGreaterThan(dims.thickness);
+    const mid = shape[LM.MIDDLE_MCP];
+    if (!mid) throw new Error('missing middle MCP');
+    const up = Math.hypot(mid.x, mid.y, mid.z);
+    expect(dims.height).toBeCloseTo(up * 1.08, 9);
+    // Center: halfway between the wrist origin and the MCP row midpoint.
+    const idx = shape[LM.INDEX_MCP];
+    const pnk = shape[LM.PINKY_MCP];
+    if (!idx || !pnk) throw new Error('missing MCPs');
+    expect(dims.center.x).toBeCloseTo((idx.x + pnk.x) * 0.25, 9);
+    expect(dims.center.y).toBeCloseTo((idx.y + pnk.y) * 0.25, 9);
+    expect(dims.center.z).toBeCloseTo((idx.z + pnk.z) * 0.25, 9);
+  });
+
+  it('returns null on a degenerate (collapsed) hand', () => {
+    const collapsed: Vec3[] = Array.from(
+      { length: HAND_LANDMARK_COUNT },
+      () => vec(0, 0, 0),
+    );
+    expect(palmDimensions(collapsed)).toBeNull();
+  });
+});
+
+describe('thumb offset side', () => {
+  it('puts the thumb off the radial (index) side of the knuckle axis', () => {
+    // The crude synthetic fan puts the wrist in the thumb's column, so
+    // push the thumb chain out past the index side like a real hand.
+    const hand = syntheticHand(vec(0.5, 0.5, 0));
+    for (let i = LM.THUMB_CMC; i <= LM.THUMB_TIP; i++) {
+      const lm = hand.landmarks[i];
+      if (lm) lm.x -= 0.03;
+    }
+    expect(thumbRadialSign(shapeLandmarks(hand))).toBe(-1);
+  });
+
+  it('flips to +1 when the thumb sits past the pinky side (mis-tracked hand)', () => {
+    const hand = syntheticHand(vec(0.5, 0.5, 0));
+    for (let i = LM.THUMB_CMC; i <= LM.THUMB_TIP; i++) {
+      const lm = hand.landmarks[i];
+      if (lm) lm.x += 0.2;
+    }
+    expect(thumbRadialSign(shapeLandmarks(hand))).toBe(1);
+  });
+
+  it('is 0 on degenerate input', () => {
+    const collapsed: Vec3[] = Array.from(
+      { length: HAND_LANDMARK_COUNT },
+      () => vec(0, 0, 0),
+    );
+    expect(thumbRadialSign(collapsed)).toBe(0);
+  });
+});
+
+describe('makePalmGeometry', () => {
+  it('is a unit-normalized slab, wider at the knuckle end than the wrist end', () => {
+    const geo = makePalmGeometry();
+    geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+    expect(bb).not.toBeNull();
+    if (!bb) return;
+    expect(bb.max.x - bb.min.x).toBeCloseTo(1, 5);
+    expect(bb.max.y - bb.min.y).toBeCloseTo(1, 5);
+    expect(bb.max.z - bb.min.z).toBeCloseTo(1, 5);
+    // Taper: silhouette half-width near the knuckle edge (y > 0.35) beats
+    // the half-width near the wrist edge (y < -0.35).
+    const pos = geo.getAttribute('position');
+    let topW = 0;
+    let botW = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const x = Math.abs(pos.getX(i));
+      const y = pos.getY(i);
+      if (y > 0.35) topW = Math.max(topW, x);
+      else if (y < -0.35) botW = Math.max(botW, x);
+    }
+    expect(botW).toBeLessThan(topW);
+    // The wrist end lands near PALM_WRIST_TAPER of the knuckle width
+    // (bevel rounding shifts it slightly).
+    expect(botW / topW).toBeGreaterThan(PALM_WRIST_TAPER - 0.12);
+    expect(botW / topW).toBeLessThan(PALM_WRIST_TAPER + 0.22);
+    geo.dispose();
   });
 });

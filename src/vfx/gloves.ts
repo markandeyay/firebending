@@ -9,11 +9,20 @@
  * gold trim ring at the wrist cuff. No arms, no body; the gloves float and
  * end at the cuff. All light on them is scene firelight.
  *
- * GEOMETRY: primitives only, shared across both hands. Per hand: a palm
- * block (unit box, non-uniformly scaled each frame from the MCP row) with a
- * squashed-sphere mitt bulge and two strap boxes as children, a gold cuff
- * cylinder at the wrist, and 5 fingers x 3 segments as unit cylinders with
- * sphere knuckle caps at every joint. Each finger segment is positioned and
+ * GEOMETRY (anatomical rebuild, Round 3 Phase 5): primitives shared across
+ * both hands. Per hand: a flat TAPERED PALM SLAB (~3:1 width:thickness,
+ * narrower at the wrist, wider at the knuckle end) built once as a
+ * bevel-extruded rounded-trapezoid profile, scaled each frame from the MCP
+ * row and oriented by the hand basis so it spans wrist to knuckles; four
+ * MCP knuckle spheres sized to finger thickness along its leading edge;
+ * 5 fingers x 3 tapered segments as unit cylinders (radii taper
+ * proximal 1.0 / middle 0.82 / distal 0.66) with joint spheres sized to
+ * the SMALLER adjoining segment so silhouettes stay continuous, never
+ * beaded; a thumb whose metacarpal renders as a fat thenar wedge merged
+ * into the palm's radial edge with two visible tapered segments beyond it;
+ * and a wrist cuff band (dark leather cylinder with a muted gold lip
+ * torus) matching the palm's wrist-end width so the hand terminates
+ * cleanly. There is NO mitt sphere. Each finger segment is positioned and
  * oriented from its two endpoint landmarks (mcp-pip, pip-dip, dip-tip;
  * thumb cmc-mcp, mcp-ip, ip-tip) via setFromUnitVectors, so knuckles
  * visibly bend when a finger curls.
@@ -74,7 +83,11 @@ export const GLOVE_SIZE_SCALE = 1.55;
  */
 export const GLOVE_REST_DROP = 0.09;
 /** Base finger segment radius, meters, before GLOVE_SIZE_SCALE. */
-export const GLOVE_FINGER_RADIUS_M = 0.011;
+export const GLOVE_FINGER_RADIUS_M = 0.0085;
+/** Palm slab width : thickness ratio (a hand is ~3x wider than thick). */
+export const PALM_ASPECT = 3;
+/** Palm width at the wrist end as a fraction of the knuckle-end width. */
+export const PALM_WRIST_TAPER = 0.62;
 /** Charge light between the fists: intensity / radius. */
 export const GLOVE_CHARGE_LIGHT_INTENSITY = 2.4;
 export const GLOVE_CHARGE_LIGHT_RADIUS = 3.5;
@@ -115,25 +128,54 @@ export const FINGER_SEGMENTS: ReadonlyArray<readonly [number, number]> = [
   [LM.PINKY_DIP, LM.PINKY_TIP],
 ];
 
-/** Landmark index -> adjoining (thicker) segment index, for joint radii. */
-const JOINT_SEGMENT_INDEX: number[] = (() => {
-  const map: number[] = new Array(21).fill(3);
-  for (let k = FINGER_SEGMENTS.length - 1; k >= 0; k--) {
-    const pair = FINGER_SEGMENTS[k];
-    if (!pair) continue;
-    map[pair[0]] = k;
-    map[pair[1]] = k;
-  }
-  return map;
-})();
+/**
+ * Within-segment frustum taper: every segment cylinder narrows to this
+ * fraction of its base radius at the distal end, so consecutive segments
+ * (proximal 1.0 -> middle 0.82 -> distal 0.66 ~ 0.82^2) meet nearly
+ * flush at the joints and no end-cap annulus rings show at the taper steps.
+ */
+export const SEGMENT_TAPER = 0.82;
 
-/** Segment radius in meters: thumb thicker, distal segments tapered. */
+/**
+ * Segment radius at the PROXIMAL end, meters (the mesh frustum narrows to
+ * SEGMENT_TAPER of this distally). Fingers taper proximal 1.0 /
+ * middle 0.82 / distal 0.66 of the base radius. The thumb is slightly
+ * thicker than the fingers, and its metacarpal (segment 0, cmc-mcp) is a
+ * fat thenar wedge that merges into the palm's radial edge rather than
+ * reading as a finger.
+ */
 export function segmentRadius(segmentIndex: number): number {
   const base = GLOVE_FINGER_RADIUS_M * GLOVE_SIZE_SCALE;
-  if (segmentIndex < 3) return base * 1.25; // thumb
+  if (segmentIndex === 0) return base * 1.5; // thenar wedge, merged into palm
+  if (segmentIndex === 1) return base * 1.15; // thumb proximal
+  if (segmentIndex === 2) return base * 1.15 * 0.78; // thumb distal
   const within = segmentIndex % 3; // 0 proximal, 1 middle, 2 distal
-  return base * (within === 0 ? 1.05 : within === 1 ? 0.95 : 0.85);
+  return base * (within === 0 ? 1 : within === 1 ? 0.82 : 0.66);
 }
+
+/**
+ * Joint sphere radius for a landmark: the SMALLER of the adjoining segment
+ * radii AT THAT JOINT (a segment presents its proximal radius at its base
+ * landmark and its tapered SEGMENT_TAPER radius at its distal landmark),
+ * so a joint fills the bend gap without beading the silhouette and a
+ * fingertip cap matches the narrowed tip of the distal frustum. Landmarks
+ * touching no segment (the wrist) get 0.
+ */
+export function jointRadius(landmark: number): number {
+  let r = Infinity;
+  for (let k = 0; k < FINGER_SEGMENTS.length; k++) {
+    const pair = FINGER_SEGMENTS[k];
+    if (!pair) continue;
+    if (pair[0] === landmark) r = Math.min(r, segmentRadius(k));
+    else if (pair[1] === landmark) r = Math.min(r, segmentRadius(k) * SEGMENT_TAPER);
+  }
+  return Number.isFinite(r) ? r : 0;
+}
+
+/** Precomputed joint radii (hot path). */
+const JOINT_RADIUS: number[] = Array.from({ length: HAND_LANDMARK_COUNT }, (_, lm) =>
+  jointRadius(lm),
+);
 
 // ---------------------------------------------------------------------------
 // Pure math helpers (unit-tested headless)
@@ -229,6 +271,126 @@ export function handBasisQuaternion(
   return out.setFromRotationMatrix(_bMat);
 }
 
+/** Per-frame palm slab dimensions and center, all in shape-landmark space. */
+export interface PalmDims {
+  /** Across the knuckle row, MCP span padded by one proximal radius a side. */
+  width: number;
+  /** Wrist to MCP row along the hand, slightly past the knuckles. */
+  height: number;
+  /** width / PALM_ASPECT: the slab reads flat, ~3:1. */
+  thickness: number;
+  /** Slab center: halfway between the wrist (origin) and the MCP row. */
+  center: Vec3;
+}
+
+/**
+ * Palm slab dimensions from shape landmarks: width from the index-pinky MCP
+ * span plus a proximal finger radius each side, thickness locked to
+ * width / PALM_ASPECT, height wrist->middleMCP (slightly past the knuckle
+ * row so the MCP spheres sit on the leading edge). Pure; writes into `out`
+ * when given. Returns null on degenerate input.
+ */
+export function palmDimensions(shape: readonly Vec3[], out?: PalmDims): PalmDims | null {
+  const idx = shape[LM.INDEX_MCP];
+  const pnk = shape[LM.PINKY_MCP];
+  const mid = shape[LM.MIDDLE_MCP];
+  if (!idx || !pnk || !mid) return null;
+  const span = dist(idx, pnk);
+  const up = Math.sqrt(mid.x * mid.x + mid.y * mid.y + mid.z * mid.z);
+  if (span < 1e-6 || up < 1e-6) return null;
+  const o = out ?? { width: 0, height: 0, thickness: 0, center: { x: 0, y: 0, z: 0 } };
+  o.width = span + 2 * segmentRadius(3);
+  o.thickness = o.width / PALM_ASPECT;
+  o.height = up * 1.08;
+  o.center.x = (idx.x + pnk.x) * 0.25;
+  o.center.y = (idx.y + pnk.y) * 0.25;
+  o.center.z = (idx.z + pnk.z) * 0.25;
+  return o;
+}
+
+/**
+ * Which side of the hand the thumb sits on, as the sign of the thumb MCP's
+ * offset along the indexMCP->pinkyMCP knuckle axis: -1 means the thumb is
+ * off the radial (index) side, +1 the ulnar side, 0 degenerate. A correctly
+ * tracked hand of either chirality always yields -1 because the axis itself
+ * flips with the hand. Rig invariant, exercised by tests.
+ */
+export function thumbRadialSign(shape: readonly Vec3[]): number {
+  const idx = shape[LM.INDEX_MCP];
+  const pnk = shape[LM.PINKY_MCP];
+  const thumb = shape[LM.THUMB_MCP];
+  if (!idx || !pnk || !thumb) return 0;
+  const ax = pnk.x - idx.x;
+  const ay = pnk.y - idx.y;
+  const az = pnk.z - idx.z;
+  const d = thumb.x * ax + thumb.y * ay + thumb.z * az;
+  return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+
+/**
+ * The palm slab geometry: a rounded-trapezoid profile (narrow wrist end,
+ * wide knuckle end, PALM_WRIST_TAPER) bevel-extruded through the palm
+ * normal so every edge is softened, then normalized to a unit 1x1x1 box
+ * centered at the origin (the rig scales it width/height/thickness each
+ * frame). Plain BufferGeometry math; safe headless.
+ */
+export function makePalmGeometry(): THREE.BufferGeometry {
+  const wTop = 0.5;
+  const wBot = 0.5 * PALM_WRIST_TAPER;
+  const corner = 0.13;
+  // Corners CCW from bottom-left: wrist edge at y=-0.5, knuckle edge at +0.5.
+  const pts: Array<[number, number]> = [
+    [-wBot, -0.5],
+    [wBot, -0.5],
+    [wTop, 0.5],
+    [-wTop, 0.5],
+  ];
+  const shape = new THREE.Shape();
+  const n = pts.length;
+  const trim = (from: [number, number], to: [number, number]): [number, number] => {
+    const dx = to[0] - from[0];
+    const dy = to[1] - from[1];
+    const len = Math.sqrt(dx * dx + dy * dy);
+    const t = len > 1e-9 ? corner / len : 0;
+    return [from[0] + dx * t, from[1] + dy * t];
+  };
+  for (let i = 0; i < n; i++) {
+    const p = pts[i]!;
+    const prev = pts[(i + n - 1) % n]!;
+    const next = pts[(i + 1) % n]!;
+    const enter = trim(p, prev);
+    const exit = trim(p, next);
+    if (i === 0) shape.moveTo(enter[0], enter[1]);
+    else shape.lineTo(enter[0], enter[1]);
+    shape.quadraticCurveTo(p[0], p[1], exit[0], exit[1]);
+  }
+  shape.closePath();
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: 0.5,
+    steps: 1,
+    bevelEnabled: true,
+    bevelThickness: 0.18,
+    bevelSize: 0.1,
+    bevelSegments: 2,
+  });
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  if (bb) {
+    geo.translate(
+      -(bb.min.x + bb.max.x) * 0.5,
+      -(bb.min.y + bb.max.y) * 0.5,
+      -(bb.min.z + bb.max.z) * 0.5,
+    );
+    geo.scale(
+      1 / Math.max(bb.max.x - bb.min.x, 1e-6),
+      1 / Math.max(bb.max.y - bb.min.y, 1e-6),
+      1 / Math.max(bb.max.z - bb.min.z, 1e-6),
+    );
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
 /**
  * Presence easing step: ramps 0..1 over GLOVE_EASE_SEC toward 1 when the
  * hand is present, toward 0 when absent. Pure; clamped.
@@ -252,20 +414,26 @@ interface GloveAssets {
   segment: THREE.CylinderGeometry;
   joint: THREE.SphereGeometry;
   box: THREE.BoxGeometry;
-  mitt: THREE.SphereGeometry;
+  palm: THREE.BufferGeometry;
   cuff: THREE.CylinderGeometry;
+  lip: THREE.TorusGeometry;
   glove: THREE.MeshPhysicalMaterial;
   strap: THREE.MeshStandardMaterial;
   gold: THREE.MeshStandardMaterial;
 }
 
 function makeAssets(): GloveAssets {
+  const lip = new THREE.TorusGeometry(1, 0.14, 8, 20);
+  lip.rotateX(Math.PI / 2); // ring around local Y (the hand's up axis)
   return {
-    segment: new THREE.CylinderGeometry(1, 1, 1, 10, 1),
+    // Frustum, larger end at -Y (the proximal landmark): unit base radius
+    // narrowing to SEGMENT_TAPER at the tip end.
+    segment: new THREE.CylinderGeometry(SEGMENT_TAPER, 1, 1, 10, 1),
     joint: new THREE.SphereGeometry(1, 10, 8),
     box: new THREE.BoxGeometry(1, 1, 1),
-    mitt: new THREE.SphereGeometry(1, 14, 10),
-    cuff: new THREE.CylinderGeometry(1, 1.08, 1, 14, 1),
+    palm: makePalmGeometry(),
+    cuff: new THREE.CylinderGeometry(1, 1, 1, 16, 1),
+    lip,
     // Deep red lacquer: oxblood base under a RESTRAINED clearcoat. The
     // first pass (clearcoat 0.9 / ccRoughness 0.25) read as a candy-apple
     // billiard ball under the FP fill; worn lacquer wants a broad soft
@@ -301,6 +469,7 @@ const _camQuat = new THREE.Quaternion();
 const _target = new THREE.Vector3();
 const _vel = new THREE.Vector3();
 const _fillOffset = new THREE.Vector3();
+const _cuffUp = new THREE.Vector3();
 
 class GloveRig {
   readonly group = new THREE.Group();
@@ -312,6 +481,13 @@ class GloveRig {
   private readonly joints: THREE.Mesh[] = [];
   private readonly palm: THREE.Mesh;
   private readonly cuff: THREE.Mesh;
+  private readonly lip: THREE.Mesh;
+  private readonly palmDims: PalmDims = {
+    width: 0,
+    height: 0,
+    thickness: 0,
+    center: { x: 0, y: 0, z: 0 },
+  };
   private posed = false;
   private readonly prevTarget = new THREE.Vector3();
   private hasPrev = false;
@@ -338,39 +514,37 @@ class GloveRig {
       this.group.add(m);
     }
 
-    // Palm block with mitt bulge and two binding straps as children (they
-    // inherit the palm's per-frame scale and basis orientation).
-    this.palm = new THREE.Mesh(assets.box, assets.glove);
+    // Palm: the flat tapered slab (unit geometry, scaled per frame from
+    // palmDimensions and oriented by the hand basis). Two near-black
+    // binding straps wrap it as children; they slightly exceed the slab in
+    // width and thickness so they read as wraps, not decals.
+    this.palm = new THREE.Mesh(assets.palm, assets.glove);
     this.palm.castShadow = false;
-    const mitt = new THREE.Mesh(assets.mitt, assets.glove);
-    mitt.castShadow = false;
-    // Teardrop, not a ball: wider than tall, longest along the fingers so
-    // it swallows the MCP knuckle row and tapers toward the wrist. The
-    // mitt silhouette, not the knuckle spheres, defines the glove; the
-    // straps and palm box must stay INSIDE it (anything poking below the
-    // dome reads as a plate the glove sits on in the POV shots).
-    // Local y is exaggerated (0.92) against the palm's squeezed y scale so
-    // the mitt keeps its absolute height while the palm BOX shrinks fully
-    // inside the dome; poking box corners read as a plate under the glove.
-    mitt.scale.set(0.72, 0.92, 1.3);
-    mitt.position.set(0, 0.17, 0);
-    this.palm.add(mitt);
     const strapA = new THREE.Mesh(assets.box, assets.strap);
     strapA.castShadow = false;
-    strapA.scale.set(0.9, 0.16, 1.2);
-    strapA.position.set(0, 0.16, 0);
+    // Width hugs the TAPERED profile at each band's height (the slab is
+    // narrower low down); only the thickness (z) exceeds, so the bands
+    // read as wraps without sticking out past the palm sides.
+    strapA.scale.set(0.86, 0.16, 1.14);
+    strapA.position.set(0, 0.2, 0);
     this.palm.add(strapA);
     const strapB = new THREE.Mesh(assets.box, assets.strap);
     strapB.castShadow = false;
-    strapB.scale.set(0.82, 0.12, 1.05);
-    strapB.position.set(0, -0.14, 0);
+    strapB.scale.set(0.7, 0.12, 1.1);
+    strapB.position.set(0, -0.16, 0);
     strapB.rotation.z = 0.06;
     this.palm.add(strapB);
     this.group.add(this.palm);
 
-    this.cuff = new THREE.Mesh(assets.cuff, assets.gold);
+    // Wrist cuff: a dark leather band terminating the hand, with a muted
+    // gold lip torus at its open (forearm) end. Sized to the palm's
+    // wrist-end width each frame.
+    this.cuff = new THREE.Mesh(assets.cuff, assets.strap);
     this.cuff.castShadow = false;
     this.group.add(this.cuff);
+    this.lip = new THREE.Mesh(assets.lip, assets.gold);
+    this.lip.castShadow = false;
+    this.group.add(this.lip);
   }
 
   update(hand: HandFrame | null, dt: number, camera: THREE.PerspectiveCamera): void {
@@ -431,37 +605,39 @@ class GloveRig {
       const p = shape[lm];
       if (!mesh || !p) continue;
       mesh.position.set(p.x, p.y, p.z);
-      // Joint sphere just fills the bend gap; anything fatter than the
-      // segment pokes through the mitt and reads as a blackberry cluster
-      // in the POV shots.
-      mesh.scale.setScalar(segmentRadius(JOINT_SEGMENT_INDEX[lm] ?? 3) * 0.92);
+      // Sized to the SMALLER adjoining segment: the joint fills the bend
+      // gap without beading the finger silhouette. The four MCP spheres
+      // double as the knuckle row along the palm's leading edge. The 1.02
+      // keeps the sphere a hair proud of the coincident cylinder surface
+      // (exact equality z-fights as bright rings at every joint).
+      mesh.scale.setScalar((JOINT_RADIUS[lm] ?? 0) * 1.02);
     }
 
-    const idx = shape[LM.INDEX_MCP];
-    const pnk = shape[LM.PINKY_MCP];
-    const mid = shape[LM.MIDDLE_MCP];
-    if (idx && pnk && mid) {
-      const width = Math.max(dist(idx, pnk) * 1.5, 0.05) * GLOVE_SIZE_SCALE;
-      const height = Math.max(Math.sqrt(mid.x * mid.x + mid.y * mid.y + mid.z * mid.z), 0.05);
-      const depth = 0.042 * GLOVE_SIZE_SCALE;
-      this.palm.position.set(
-        (idx.x + pnk.x) * 0.5 * 0.55,
-        (idx.y + pnk.y) * 0.5 * 0.55,
-        (idx.z + pnk.z) * 0.5 * 0.55,
-      );
-      // The box hides inside the mitt (its bottom corners must not poke
-      // out below the dome).
-      this.palm.scale.set(width * 0.7, height * 0.5, depth);
+    const dims = palmDimensions(shape, this.palmDims);
+    if (dims) {
+      // Flat tapered slab from wrist to the MCP row, hand-basis oriented.
+      this.palm.position.set(dims.center.x, dims.center.y, dims.center.z);
+      this.palm.scale.set(dims.width, dims.height, dims.thickness);
       handBasisQuaternion(shape, this.palm.quaternion);
 
-      // Gold cuff: a SHORT trim ring tucked up against the mitt base, a
-      // little above the wrist along the hand's "up" axis. Anything wider,
-      // taller or lower reads as a pedestal the glove sits on (the arena
-      // shots made them look like pots on stands).
-      this.cuff.position.set(mid.x * 0.12, mid.y * 0.12, mid.z * 0.12);
+      // Cuff band terminates the hand at the wrist: an elliptical leather
+      // cylinder matching the palm's wrist-end footprint, hanging just
+      // below the origin along the hand's up axis, with the gold lip torus
+      // at its open end.
+      // Slightly wider than the palm's wrist end and overlapping it upward,
+      // so the heel's rounded corners tuck INSIDE the band (a narrower band
+      // leaves the corners hanging out as dark-edged tabs).
+      const cuffH = 0.02 * GLOVE_SIZE_SCALE;
+      const rx = dims.width * PALM_WRIST_TAPER * 0.5 * 1.12;
+      const rz = dims.thickness * 0.5 * 1.5;
       this.cuff.quaternion.copy(this.palm.quaternion);
-      // Narrower than the mitt and squat: the cuff is trim, not a stand.
-      this.cuff.scale.set(width * 0.22, 0.022, width * 0.22);
+      this.cuff.scale.set(rx, cuffH, rz);
+      _cuffUp.set(0, 1, 0).applyQuaternion(this.palm.quaternion);
+      this.cuff.position.copy(_cuffUp).multiplyScalar(-cuffH * 0.28);
+      // Lip: barely proud of the band (a wide flange reads as a pot base).
+      this.lip.quaternion.copy(this.palm.quaternion);
+      this.lip.scale.set(rx * 0.95, (rx + rz) * 0.5, rz * 0.95);
+      this.lip.position.copy(_cuffUp).multiplyScalar(-cuffH * 0.85);
     }
 
     this.posed = true;
@@ -568,8 +744,9 @@ export class GloveSystem {
     this.assets.segment.dispose();
     this.assets.joint.dispose();
     this.assets.box.dispose();
-    this.assets.mitt.dispose();
+    this.assets.palm.dispose();
     this.assets.cuff.dispose();
+    this.assets.lip.dispose();
     this.assets.glove.dispose();
     this.assets.strap.dispose();
     this.assets.gold.dispose();
