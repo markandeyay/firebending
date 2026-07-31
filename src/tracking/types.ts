@@ -86,6 +86,10 @@ export const POSE_LM = {
   RIGHT_WRIST: 16,
   LEFT_HIP: 23,
   RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
 } as const;
 
 /**
@@ -102,6 +106,19 @@ export interface PoseHead {
   rightEye: Vec3;
   leftEar: Vec3;
   rightEar: Vec3;
+}
+
+/**
+ * One leg of the body pose (Round 3 Phase 3), mirrored screen space. Each
+ * point is present only when the pose model reported it VISIBLE (visibility
+ * >= LEG_VISIBILITY_FLOOR in poseSource.ts, or no visibility scores at all):
+ * a seated player behind a desk typically has no reliable knees or ankles,
+ * and downstream body math (src/tracking/body.ts) must treat every absent
+ * point as fully supported.
+ */
+export interface PoseLeg {
+  knee?: Vec3;
+  ankle?: Vec3;
 }
 
 /** One arm-plus-hip chain of the body pose. */
@@ -148,6 +165,14 @@ export interface PoseFrame {
    * predate the field lack it; absence must be fully supported.
    */
   head?: PoseHead;
+  /**
+   * OPTIONAL legs (knees 25/26, ankles 27/28) in mirrored screen space, for
+   * stance width, knee bend and the standing score (src/tracking/body.ts).
+   * Present only when at least one leg point was visible; fixtures and
+   * recordings that predate the field lack it, and absence (of the field or
+   * of any individual point) must be fully supported.
+   */
+  legs?: { left: PoseLeg; right: PoseLeg };
   /**
    * OPTIONAL: true when this frame was produced by interpolating (or
    * capped-extrapolating) between two real pose SAMPLES rather than by a

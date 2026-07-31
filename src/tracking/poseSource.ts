@@ -34,7 +34,7 @@
  */
 
 import type { PoseLandmarker } from '@mediapipe/tasks-vision';
-import type { FaceFrame, PoseArm, PoseFrame, PoseHead, Vec3 } from './types';
+import type { FaceFrame, PoseArm, PoseFrame, PoseHead, PoseLeg, Vec3 } from './types';
 import { POSE_LM } from './types';
 import { VISION_WASM_URL } from './handSource';
 import type { RawLandmark } from './handSource';
@@ -113,6 +113,45 @@ function headOf(landmarks: readonly RawPoseLandmark[]): PoseHead | undefined {
 }
 
 /**
+ * A knee/ankle landmark below this visibility score is treated as absent
+ * (occluded by a desk, out of frame). A model that reports no visibility
+ * counts as visible, matching the aggregate-confidence convention.
+ */
+export const LEG_VISIBILITY_FLOOR = 0.5;
+
+function legPoint(lm: RawPoseLandmark | undefined): Vec3 | undefined {
+  if (!lm) return undefined;
+  const v = lm.visibility;
+  if (typeof v === 'number' && Number.isFinite(v) && v < LEG_VISIBILITY_FLOOR) {
+    return undefined;
+  }
+  return screenVec(lm);
+}
+
+/**
+ * Knees (25/26) and ankles (27/28) in mirrored player screen space, each
+ * present only when visible (see LEG_VISIBILITY_FLOOR). Returns undefined
+ * when no leg point is visible at all (typical seated desk framing), so old
+ * fixtures and poses without legs stay byte-identical. Pure.
+ */
+function legsOf(
+  landmarks: readonly RawPoseLandmark[],
+): { left: PoseLeg; right: PoseLeg } | undefined {
+  const left: PoseLeg = {};
+  const right: PoseLeg = {};
+  const lk = legPoint(landmarks[POSE_LM.LEFT_KNEE]);
+  const rk = legPoint(landmarks[POSE_LM.RIGHT_KNEE]);
+  const la = legPoint(landmarks[POSE_LM.LEFT_ANKLE]);
+  const ra = legPoint(landmarks[POSE_LM.RIGHT_ANKLE]);
+  if (lk) left.knee = lk;
+  if (la) left.ankle = la;
+  if (rk) right.knee = rk;
+  if (ra) right.ankle = ra;
+  if (!lk && !rk && !la && !ra) return undefined;
+  return { left, right };
+}
+
+/**
  * Extract the game's PoseFrame from raw MediaPipe landmarks: screen joints
  * mirrored into player space (x -> 1 - x), world joints (meters,
  * hip-centered) mirrored by negating x. Confidence is the mean visibility of
@@ -158,6 +197,7 @@ export function extractPoseFrame(
   };
 
   const head = headOf(landmarks);
+  const legs = legsOf(landmarks);
   return {
     t: timestampMs,
     left,
@@ -166,6 +206,7 @@ export function extractPoseFrame(
     confidence,
     wristVisibility,
     ...(head ? { head } : {}),
+    ...(legs ? { legs } : {}),
   };
 }
 
@@ -302,6 +343,22 @@ export function lerpPoseFrames(a: PoseFrame, b: PoseFrame, tMs: number): PoseFra
           right: lerpArm(a.world.right, b.world.right, u),
         }
       : null;
+  // Legs: per-point lerp when both samples carry the point, otherwise the
+  // newer sample's point stands alone (a knee that just became visible has
+  // no older partner to blend with).
+  let legs: PoseFrame['legs'];
+  if (b.legs) {
+    const lerpLeg = (an: PoseLeg | undefined, bn: PoseLeg): PoseLeg => {
+      const out: PoseLeg = {};
+      if (bn.knee) out.knee = an?.knee ? lerpVec(an.knee, bn.knee, u) : bn.knee;
+      if (bn.ankle) out.ankle = an?.ankle ? lerpVec(an.ankle, bn.ankle, u) : bn.ankle;
+      return out;
+    };
+    legs = {
+      left: lerpLeg(a.legs?.left, b.legs.left),
+      right: lerpLeg(a.legs?.right, b.legs.right),
+    };
+  }
   const head =
     a.head && b.head
       ? {
@@ -320,6 +377,7 @@ export function lerpPoseFrames(a: PoseFrame, b: PoseFrame, tMs: number): PoseFra
     confidence: b.confidence,
     ...(b.wristVisibility ? { wristVisibility: b.wristVisibility } : {}),
     ...(head ? { head } : {}),
+    ...(legs ? { legs } : {}),
     interpolated: true,
   };
 }

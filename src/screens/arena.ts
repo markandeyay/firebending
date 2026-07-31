@@ -87,6 +87,7 @@ import { HUD } from '../ui/hud';
 import { EmpowerGlow } from '../ui/empowerGlow';
 import { DegradeLadder } from '../game/degrade';
 import { SingleHandHint, TrackingLoss } from '../game/trackingLoss';
+import { FramingLossWatch } from '../game/framingGate';
 import { handOutline } from '../ui/handOutlines';
 import { DebugHud } from '../ui/debugHud';
 import type { MotionProfile } from '../gestures/profile';
@@ -158,6 +159,15 @@ export interface ArenaContext {
    * only): shows a small parchment hint chip for a few seconds on arrival.
    */
   firstRun?: boolean;
+  /**
+   * Mid-game framing watch (R3 Phase 3): LIVE path only. When body-pose
+   * framing fails continuously for FRAMING_LOSS_SEC the TrackingLoss pause
+   * flow triggers with the PIP silhouette guide and the specific corrective
+   * line; the framing gate must pass again (2 s hold) before the normal
+   * resume countdown runs. Replay paths leave this unset: fixtures are
+   * never framing-gated.
+   */
+  framingGate?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,9 +324,11 @@ export class ArenaScreen implements Screen {
   private readonly ambientHandles: AmbientFlameHandle[] = [];
   private loss: TrackingLoss | null = null;
   private hint: SingleHandHint | null = null;
+  private framingWatch: FramingLossWatch | null = null;
   private sinceFrameSec = 0;
   private lossLayer: HTMLElement | null = null;
   private lossCountEl: HTMLElement | null = null;
+  private lossTextEl: HTMLElement | null = null;
   private hintChipEl: HTMLElement | null = null;
   private firstRunChipEl: HTMLElement | null = null;
   private firstRunTimer: ReturnType<typeof setTimeout> | null = null;
@@ -542,6 +554,9 @@ export class ArenaScreen implements Screen {
     // Tracking-loss pause overlay + single-hand hint chip.
     this.loss = new TrackingLoss();
     this.hint = new SingleHandHint();
+    // Mid-game framing watch: LIVE path only (ctx.framingGate); replay
+    // fixtures must never be framing-gated.
+    this.framingWatch = context.framingGate ? new FramingLossWatch() : null;
     this.buildLossOverlay(root);
     this.buildHintChip(root);
 
@@ -644,10 +659,12 @@ export class ArenaScreen implements Screen {
     this.degrade = null;
     this.loss = null;
     this.hint = null;
+    this.framingWatch = null;
     this.ambientHandles.length = 0;
     this.lossLayer?.remove();
     this.lossLayer = null;
     this.lossCountEl = null;
+    this.lossTextEl = null;
     this.hintChipEl?.remove();
     this.hintChipEl = null;
     if (this.firstRunTimer !== null) {
@@ -743,11 +760,21 @@ export class ArenaScreen implements Screen {
     const latest = this.latestFrame;
     const leftTracked = !stale && latest !== null && latest.left !== null;
     const rightTracked = !stale && latest !== null && latest.right !== null;
+    // Mid-game framing watch (R3 Phase 3, live only): a framing loss forces
+    // the same pause flow; resuming demands the framing gate pass again.
+    if (this.framingWatch && latest !== null && !stale) {
+      this.framingWatch.update(latest, rawDt);
+    }
+    const framingLost = this.framingWatch?.lost ?? false;
+    if (this.framingWatch) {
+      this.pip?.setFramingState(this.framingWatch.gateState);
+    }
     if (this.loss) {
       this.loss.update(
-        leftTracked && rightTracked,
+        leftTracked && rightTracked && !framingLost,
         rawDt,
-        leftTracked || rightTracked,
+        (leftTracked || rightTracked) && !framingLost,
+        framingLost,
       );
       this.syncLossOverlay();
     }
@@ -920,6 +947,7 @@ export class ArenaScreen implements Screen {
     root.appendChild(layer);
     this.lossLayer = layer;
     this.lossCountEl = count;
+    this.lossTextEl = text;
   }
 
   /** Transient bottom-center chip for runtime toggles (P key feedback). */
@@ -983,6 +1011,18 @@ export class ArenaScreen implements Screen {
     if (!loss || !layer) return;
     layer.classList.toggle('is-on', loss.paused);
     layer.classList.toggle('is-counting', loss.state === 'resuming');
+    // Framing loss reuses the pause panel with the SPECIFIC corrective line
+    // (the PIP shows the silhouette guide); hand loss keeps the classic text.
+    const gateState = this.framingWatch?.gateState ?? null;
+    const lossText =
+      gateState !== null
+        ? gateState.top !== null
+          ? gateState.top.text
+          : 'Hold your stance.'
+        : 'Show your hands.';
+    if (this.lossTextEl && this.lossTextEl.textContent !== lossText) {
+      this.lossTextEl.textContent = lossText;
+    }
     const count = this.lossCountEl;
     if (count && loss.state === 'resuming') {
       const digit = String(loss.countdownStep);

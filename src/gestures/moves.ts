@@ -269,6 +269,19 @@ export const TWIN_COST = 40;
 export const TWIN_COOLDOWN_MS = 5000;
 
 export const RISING_LOW_Y = 0.65; // wrists below this line (y grows down) are "low"
+/**
+ * HIP-RELATIVE BANDS (Round 3 Phase 3): when body pose is FRESH, the
+ * "at hips" (Breath Charge) and "low" (Rising Flame) wrist bands anchor to
+ * the player's real hip line instead of the absolute screen constants: a
+ * wrist counts as below the band when wrist.y > hipCenterY - margin (y grows
+ * DOWN, so the margin admits wrists slightly ABOVE the hip line). Pose
+ * absent or stale keeps the absolute constants (BREATH_HIP_Y, RISING_LOW_Y)
+ * exactly as before, which is what every legacy replay fixture runs on.
+ * The rising margin is the looser of the two, mirroring the 0.05 gap
+ * between the absolute constants.
+ */
+export const BREATH_HIP_MARGIN = 0.05;
+export const RISING_LOW_MARGIN = 0.1;
 export const RISING_LOW_HOLD_MS = 150;
 export const RISING_GRACE_MS = 600;
 export const RISING_COST = 25;
@@ -742,18 +755,35 @@ export class MoveEngine {
   // Arming timers (holds that precede triggers)
   // -------------------------------------------------------------------------
 
+  /**
+   * The wrist-y line above which (numerically: below on screen) a wrist
+   * counts as "at the hips" / "low". Pose fresh: the real hip line minus a
+   * small margin (see BREATH_HIP_MARGIN / RISING_LOW_MARGIN); pose absent:
+   * the absolute legacy constant.
+   */
+  private lowBandY(kind: 'breath' | 'rising'): number {
+    const pose = this.latestPose;
+    if (this.poseFresh && pose !== null) {
+      const hipCenterY = (pose.left.hip.y + pose.right.hip.y) / 2;
+      return hipCenterY - (kind === 'breath' ? BREATH_HIP_MARGIN : RISING_LOW_MARGIN);
+    }
+    return kind === 'breath' ? BREATH_HIP_Y : RISING_LOW_Y;
+  }
+
   private updateArmTimers(t: number, dtMs: number): void {
     const L = this.left;
     const R = this.right;
     const both = L.present && R.present && L.wrist !== null && R.wrist !== null;
 
-    // Breath Charge: both fists parked at the hips, roughly static.
+    // Breath Charge: both fists parked at the hips, roughly static. The hip
+    // band is pose-relative when pose is fresh (see lowBandY).
+    const breathY = this.lowBandY('breath');
     const hipCond =
       both &&
       L.fistH.isActive &&
       R.fistH.isActive &&
-      (L.wrist as Vec3).y > BREATH_HIP_Y &&
-      (R.wrist as Vec3).y > BREATH_HIP_Y &&
+      (L.wrist as Vec3).y > breathY &&
+      (R.wrist as Vec3).y > breathY &&
       L.speed.speed < this.th.breathStaticMax &&
       R.speed.speed < this.th.breathStaticMax;
     if (hipCond) {
@@ -777,13 +807,14 @@ export class MoveEngine {
       this.twinHoldMs = 0;
     }
 
-    // Rising Flame: both palms low.
+    // Rising Flame: both palms low (pose-relative band when pose is fresh).
+    const risingY = this.lowBandY('rising');
     const low =
       both &&
       L.palmH.isActive &&
       R.palmH.isActive &&
-      (L.wrist as Vec3).y > RISING_LOW_Y &&
-      (R.wrist as Vec3).y > RISING_LOW_Y;
+      (L.wrist as Vec3).y > risingY &&
+      (R.wrist as Vec3).y > risingY;
     if (low) {
       this.risingLowMs += dtMs;
       if (this.risingLowMs >= RISING_LOW_HOLD_MS) this.risingArmedUntil = t + RISING_GRACE_MS;

@@ -987,6 +987,31 @@
   height: 100%;
 }
 
+/* R3 Phase 3: framing-gate corrective line under the PIP panel. Parchment
+   on lacquer, display serif; hidden while no gate is active. */
+.fb-pip-caption {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 8px;
+  padding: 4px 14px;
+  white-space: nowrap;
+  background: rgba(13, 10, 8, 0.85);
+  border: 1px solid rgba(168, 133, 60, 0.45);
+  border-radius: 4px;
+  font-family: var(--fb-font-display);
+  font-size: 0.95rem;
+  letter-spacing: 0.1em;
+  text-indent: 0.1em;
+  color: var(--fb-parchment, #d8c8a8);
+}
+
+.fb-pip-caption.is-on {
+  display: block;
+}
+
 /* ------------------------------------------------------------------ */
 /* T070: fault overlays and gate upgrades                              */
 /* ------------------------------------------------------------------ */

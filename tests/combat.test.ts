@@ -105,8 +105,9 @@ function faceFrame(tMs: number, headY: number): LandmarkFrame {
   };
 }
 
-/** Body pose whose shoulders sit at torsoY - 0.15 and hips at torsoY + 0.15,
- *  so torsoCenterY(pose) === torsoY exactly. */
+/** Body pose whose shoulders sit at torsoY - 0.15 and hips at torsoY + 0.15;
+ *  with the hip-heavy COM weighting torsoCenterY(pose) === torsoY + 0.03,
+ *  a constant offset that every relative duck threshold absorbs. */
 function bodyPose(tMs: number, torsoY: number): PoseFrame {
   const arm = (m: number) => ({
     shoulder: { x: 0.5 + 0.12 * m, y: torsoY - 0.15, z: 0 },
@@ -688,8 +689,11 @@ function duckOnlyCombat(headBaselineY?: number): CombatSystem {
 }
 
 describe('torso duck detection', () => {
-  it('torsoCenterY is the midpoint of the four shoulder/hip points', () => {
-    expect(torsoCenterY(bodyPose(0, 0.45))).toBeCloseTo(0.45, 10);
+  it('torsoCenterY is the hip-heavy weighted vertical center of mass', () => {
+    // bodyPose: shoulders at torsoY - 0.15, hips at torsoY + 0.15; the R3
+    // Phase 3 weighting (0.4 shoulder / 0.6 hip, src/tracking/body.ts)
+    // lands 0.03 below the old 4-point midpoint.
+    expect(torsoCenterY(bodyPose(0, 0.45))).toBeCloseTo(0.48, 10);
   });
 
   it('ducks on a fast torso drop when pose is present (no face at all)', () => {

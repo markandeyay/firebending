@@ -162,6 +162,9 @@ async function bootGameFlow(
       ...(liveStream !== null ? { stream: liveStream } : {}),
       // First-run hint chip: LIVE flow only (replay loops skip it).
       ...(replayFixture === null ? { firstRun: true } : {}),
+      // Mid-game framing watch (R3 Phase 3): LIVE flow only; replay
+      // fixtures are never framing-gated.
+      ...(replayFixture === null ? { framingGate: true } : {}),
     };
     void manager.show('arena', ctx).then(() => {
       // Brazier crackle bed once the hall is on screen.

@@ -56,6 +56,7 @@
 
 import * as THREE from 'three';
 import type { LandmarkFrame, PoseFrame, Vec3 } from '../tracking/types';
+import { verticalCenterOfMass } from '../tracking/body';
 import { EMPOWER_MULTIPLIER, type MoveEvent, type MoveName } from '../gestures/moves';
 import type { Construct, ConstructManager } from './enemies';
 
@@ -159,19 +160,16 @@ export const DUCK_RECOVER_FRACTION = 0.1;
 export const DUCK_MIN_ABS_FRACTION = 0.15;
 
 /**
- * Torso center y from body pose: the midpoint of the four shoulder/hip
- * points, normalized screen space (y grows DOWN). The PREFERRED duck input:
- * the torso is rigid and cannot fake a duck by nodding, while the head-y
- * fallback (face tracking) can. Pure.
+ * Torso center y from body pose: the weighted vertical center of mass
+ * (src/tracking/body.ts, hip-heavy 0.4 shoulder / 0.6 hip), normalized
+ * screen space (y grows DOWN). The PREFERRED duck input: the torso is rigid
+ * and cannot fake a duck by nodding (head-y fallback can), and the hip
+ * weighting means a bow from the waist (shoulders only dropping) reads
+ * weaker than a real knees-bent duck. Pure; kept as the combat-layer name
+ * for the shared body signal.
  */
 export function torsoCenterY(pose: PoseFrame): number {
-  return (
-    (pose.left.shoulder.y +
-      pose.right.shoulder.y +
-      pose.left.hip.y +
-      pose.right.hip.y) /
-    4
-  );
+  return verticalCenterOfMass(pose);
 }
 
 /**

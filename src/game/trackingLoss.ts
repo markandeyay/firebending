@@ -63,18 +63,27 @@ export class TrackingLoss {
   /**
    * Advance by dt seconds. `bothHandsTracked` gates the resume path;
    * `anyHandTracked` (defaults to the same flag) gates the loss timer so a
-   * single tracked hand never pauses the game.
+   * single tracked hand never pauses the game. `forceLost` (Round 3 Phase 3,
+   * framing gate) drops `playing` into `lost` immediately: the framing
+   * watch runs its own 2 s grace before raising it, so no extra timer here.
+   * The caller keeps `bothHandsTracked` false while forcing, which also
+   * cancels a running countdown through the existing resuming -> lost edge.
    */
   update(
     bothHandsTracked: boolean,
     dt: number,
     anyHandTracked: boolean = bothHandsTracked,
+    forceLost = false,
   ): TrackingLossEvent[] {
     const events: TrackingLossEvent[] = [];
 
     switch (this.current) {
       case 'playing': {
-        if (anyHandTracked) {
+        if (forceLost) {
+          this.current = 'lost';
+          this.untrackedSec = 0;
+          events.push('lost');
+        } else if (anyHandTracked) {
           this.untrackedSec = 0;
         } else {
           this.untrackedSec += dt;

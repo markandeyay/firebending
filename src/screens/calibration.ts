@@ -8,6 +8,15 @@
  * recognized.", and a 2 second window of frames is captured and reduced to
  * CalibrationStats.
  *
+ * FRAMING GATE (R3 Phase 3, live path only): after the stats capture and
+ * BEFORE the motion steps, the ritual holds at a hard framing gate
+ * (src/game/framingGate.ts): whole body framed, head top visible, both
+ * hands tracked, standing, all continuously for 2 s. The webcam PIP panel
+ * (src/ui/pip.ts) is mounted for the whole ritual and shows the silhouette
+ * guide plus the corrective line while the gate runs. A device whose pose
+ * tracker never yields a sample skips the gate after FRAMING_POSE_WAIT_MS.
+ * Replay/test paths (motionSteps unset) skip the gate entirely.
+ *
  * MOTION STEPS (live path only, ctx.motionSteps === true): after the stats
  * capture the ritual continues into two motion-capture steps that build a
  * per-player MotionProfile v2 (src/gestures/profile.ts):
@@ -53,6 +62,8 @@ import {
 } from '../gestures/profile';
 import { handOutline } from '../ui/handOutlines';
 import { HelpPanel } from '../ui/helpPanel';
+import { WebcamPip } from '../ui/pip';
+import { FramingGate } from '../game/framingGate';
 import '../ui/theme.css';
 
 export interface CalibrationContext {
@@ -105,6 +116,13 @@ export const PUNCHES_REQUIRED = 3;
 export const PUSHES_REQUIRED = 2;
 /** A step that detects nothing for this long falls back to DEFAULT_PROFILE. */
 export const STEP_TIMEOUT_MS = 20000;
+/**
+ * Framing step (R3 Phase 3): if NO body pose sample arrives within this long
+ * of entering the step, the device has no working pose tracker and the gate
+ * is skipped (poseless live play stays supported). Once any pose has been
+ * seen the gate is hard: it must hold FRAMING_HOLD_SEC to continue.
+ */
+export const FRAMING_POSE_WAIT_MS = 10000;
 /** How long the "Profile loaded" / fallback notices stay up. */
 export const NOTICE_MS = 2000;
 
@@ -125,6 +143,7 @@ const REST_RIGHT = { x: 0.68, y: 0.55 };
 type Phase =
   | 'waiting'
   | 'capturing'
+  | 'framing' // R3 P3: hard framing gate (live path), before the motion steps
   | 'profile-note' // stored profile found: brief notice, then done
   | 'punches'
   | 'pushes'
@@ -212,6 +231,14 @@ export class CalibrationScreen implements Screen {
   /** Set by the R key: ignore any stored profile this run. */
   private recalibrateRequested = false;
 
+  // Framing gate step (R3 Phase 3, live path only).
+  private pip: WebcamPip | null = null;
+  private framingGate: FramingGate | null = null;
+  private framingStartT = 0;
+  private framingPrevT: number | null = null;
+  private framingSawPose = false;
+  private framingText = '';
+
   private resolveStats: ((stats: CalibrationStats) => void) | null = null;
   private completion: Promise<CalibrationStats>;
 
@@ -250,6 +277,10 @@ export class CalibrationScreen implements Screen {
     this.punchElbows = [];
     this.sawPose = false;
     this.recalibrateRequested = false;
+    this.framingGate = null;
+    this.framingSawPose = false;
+    this.framingPrevT = null;
+    this.framingText = '';
 
     root.classList.add('fb-cal');
 
@@ -282,6 +313,9 @@ export class CalibrationScreen implements Screen {
     this.help = new HelpPanel(root);
 
     if (c.motionSteps) {
+      // Webcam PIP mirror during the ritual (R3 Phase 3): hosts the framing
+      // silhouette guide; frame-driven render (no rAF loop on this screen).
+      this.pip = new WebcamPip(root, c.stream);
       this.buildMeter(root);
       // R during any phase: forget the stored profile and run the steps.
       this.onKeyDown = (e: KeyboardEvent) => {
@@ -306,6 +340,9 @@ export class CalibrationScreen implements Screen {
       this.ownVideo.srcObject = null;
       this.ownVideo = null;
     }
+    this.pip?.dispose();
+    this.pip = null;
+    this.framingGate = null;
     this.ctx = null;
     this.leftHandEl = null;
     this.rightHandEl = null;
@@ -335,6 +372,12 @@ export class CalibrationScreen implements Screen {
   // -------------------------------------------------------------------------
 
   private handleFrame(frame: LandmarkFrame): void {
+    // PIP mirror keeps drawing through every phase (frame-driven; there is
+    // no rAF loop on this screen).
+    if (this.pip) {
+      this.pip.setFrame(frame);
+      this.pip.render();
+    }
     switch (this.phase) {
       case 'done':
         return;
@@ -358,6 +401,10 @@ export class CalibrationScreen implements Screen {
         }
         return;
       }
+      case 'framing':
+        this.followWrists(frame);
+        this.updateFramingStep(frame);
+        return;
       case 'profile-note': {
         this.followWrists(frame);
         if (frame.t >= this.noticeUntilT) {
@@ -390,16 +437,71 @@ export class CalibrationScreen implements Screen {
     this.setText('Bender recognized.');
   }
 
-  /** Stats capture done: complete now, or continue into the motion steps. */
+  /** Stats capture done: complete now, or continue into the framing gate
+   *  and motion steps (live path). */
   private finishCapture(t: number): void {
     this.stats = captureCalibration(this.captured);
     this.captured = [];
 
     if (!this.ctx?.motionSteps) {
+      // Replay/test paths: classic behavior, no framing gate, done now.
       this.complete(null);
       return;
     }
+    this.startFramingStep(t);
+  }
 
+  // -------------------------------------------------------------------------
+  // Framing gate step (R3 Phase 3, live path only)
+  // -------------------------------------------------------------------------
+
+  private startFramingStep(t: number): void {
+    this.phase = 'framing';
+    this.framingGate = new FramingGate();
+    this.framingStartT = t;
+    this.framingPrevT = null;
+    this.framingSawPose = false;
+    this.framingText = '';
+    this.setText('Frame your whole body.');
+  }
+
+  /**
+   * One frame of the framing gate: the requirements must hold continuously
+   * for FRAMING_HOLD_SEC (framingGate.ts) before the ritual continues. The
+   * prompt line always shows the gate's TOP corrective text. A device whose
+   * pose tracker never produces a sample (FRAMING_POSE_WAIT_MS) skips the
+   * gate so poseless play is never trapped.
+   */
+  private updateFramingStep(frame: LandmarkFrame): void {
+    const t = frame.t;
+    const dtSec =
+      this.framingPrevT !== null && t > this.framingPrevT
+        ? (t - this.framingPrevT) / 1000
+        : 0;
+    this.framingPrevT = t;
+    if (frame.pose) this.framingSawPose = true;
+
+    if (!this.framingSawPose) {
+      if (t - this.framingStartT >= FRAMING_POSE_WAIT_MS) this.passFraming(t);
+      return;
+    }
+
+    const gate = this.framingGate;
+    if (!gate) return;
+    const state = gate.update(frame, dtSec);
+    this.pip?.setFramingState(state);
+    const text = state.top !== null ? state.top.text : 'Hold your stance.';
+    if (text !== this.framingText) {
+      this.framingText = text;
+      this.setText(text);
+    }
+    if (state.passed) this.passFraming(t);
+  }
+
+  /** Framing gate passed (or skipped): continue into the motion steps. */
+  private passFraming(t: number): void {
+    this.pip?.setFramingState(null);
+    this.framingGate = null;
     const stored = this.recalibrateRequested ? null : loadProfile();
     if (stored) {
       // Fast reload path: keep the stored profile, offer R to redo.
