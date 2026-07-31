@@ -452,8 +452,10 @@ function makeAssets(): GloveAssets {
     }),
     gold: new THREE.MeshStandardMaterial({
       color: GLOVE_CUFF_COLOR,
-      metalness: 0.6,
-      roughness: 0.45,
+      // Gilded cuff trim: matches the arena's antique-gold fittings
+      // (PBR audit: metal 0.7, worn-satin roughness).
+      metalness: 0.7,
+      roughness: 0.4,
     }),
   };
 }

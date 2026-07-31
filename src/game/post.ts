@@ -4,7 +4,8 @@
  *
  *   FireScenePass (scene -> full-res HDR + depth, fire particles -> HALF-RES
  *   target, depth-aware upsample + heat-shimmer composite)
- *     -> UnrealBloomPass -> grade ShaderPass (tonemap+grain+vignette)
+ *     -> UnrealBloomPass -> grade ShaderPass (edge chromatic aberration +
+ *        tonemap + LUT-style tone curve + grain + vignette)
  *
  * - HALF-RES FIRE (perf mandate): additive fire is fill-rate bound on the
  *   Intel iGPU target; rendering the three particle meshes into a half-res
@@ -51,6 +52,8 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+import { SAOPass } from 'three/addons/postprocessing/SAOPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { FIRE_PASS_LAYER, type FireSystem } from '../vfx/fire';
 
 // --- Tunables (screenshot-tuned; see docs/screens/station-*.png) -----------
@@ -72,10 +75,43 @@ export const POST_VIGNETTE_STRENGTH = 0.32;
 /** Vignette start radius in UV distance from center (soft ramp to corner). */
 export const POST_VIGNETTE_START = 0.52;
 /**
+ * LUT-style tone curve in the grade pass (Final P3): slight warm lift-crush
+ * in the shadows plus a highlight rolloff toward parchment. Display-space,
+ * a handful of ALU ops, no LUT texture. Toggleable.
+ */
+export const POST_TONE_CURVE = true;
+/** Tone curve strength (0..1 scales every term). */
+export const POST_TONE_CURVE_AMOUNT = 1.0;
+/**
+ * Chromatic aberration at frame EDGES only (Final P3): radial R/B split,
+ * quadratic falloff so the center stays untouched. Toggleable.
+ */
+export const POST_CHROMATIC_ABERRATION = true;
+/** Max R/B split at the frame corners, in pixels. */
+export const POST_CA_MAX_PX = 1.5;
+/**
  * Depth of field: measured OVER budget on the target hardware (see module
  * header). Kept as a constant so the decision is explicit and revisitable.
  */
 export const POST_DOF = false;
+/**
+ * Screen-space AO: deliberately OFF (Final P3 decision, measured on the
+ * Intel iGPU target at 1280x720, both passes at HALF resolution):
+ *   - SAOPass  (saoScale 6, kernel 24): median 16.6 ms / p95 17.9, but the
+ *     depth-extent estimator saturated in the long-hall station-1 framing
+ *     and rendered the entire frame black. Not tunable across all six
+ *     station cameras; rejected on correctness.
+ *   - SSAOPass (kernel 16, radius 0.5..1.1): median 16.7 ms / p95 18.0 and
+ *     draw calls 152 -> 284 (the normal-override scene re-render), for an
+ *     effect that is nearly invisible under this art direction (warm fog,
+ *     deep authored shadows, flat-shaded low-poly). All headroom, no read.
+ * Section 2 rule 5: cut. Grounding comes from baked-style contact
+ * darkening instead (arena.ts: instanced blob AO discs under braziers /
+ * columns / gate posts / bridge, wall-base + traffic darkening baked into
+ * the floor overlays; enemies.ts: blob disc under each construct base).
+ * The wiring below stays so the decision is one constant flip to revisit.
+ */
+export const POST_AO: 'sao' | 'ssao' | 'off' = 'off';
 /**
  * Fire particle pass scale relative to the framebuffer (perf mandate:
  * half resolution, composited with a depth-aware upsample).
@@ -321,6 +357,9 @@ const GradeShader = {
     uGrain: { value: POST_GRAIN_AMOUNT },
     uVigStrength: { value: POST_VIGNETTE_STRENGTH },
     uVigStart: { value: POST_VIGNETTE_START },
+    uToneCurve: { value: POST_TONE_CURVE ? POST_TONE_CURVE_AMOUNT : 0 },
+    uCAPx: { value: POST_CHROMATIC_ABERRATION ? POST_CA_MAX_PX : 0 },
+    uInvRes: { value: new THREE.Vector2(1 / 1280, 1 / 720) },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -336,6 +375,9 @@ const GradeShader = {
     uniform float uGrain;
     uniform float uVigStrength;
     uniform float uVigStart;
+    uniform float uToneCurve;
+    uniform float uCAPx;
+    uniform vec2 uInvRes;
     varying vec2 vUv;
 
     // ACESFilmic fit (Stephen Hill), identical to three's tone mapping chunk.
@@ -376,7 +418,36 @@ const GradeShader = {
 
     void main() {
       vec4 color = texture2D(tDiffuse, vUv);
+
+      // Chromatic aberration (Final P3): radial R/B split, quadratic
+      // falloff -- exactly zero at center, uCAPx pixels at the corners.
+      // Sampled in linear HDR before the tone map so the fringes grade
+      // with the frame instead of over it.
+      vec2 rad = vUv - 0.5;
+      float r2 = clamp(dot(rad, rad) * 2.0, 0.0, 1.0); // 1 at the corner
+      if (uCAPx > 0.0 && r2 > 0.001) {
+        vec2 caOff = rad * (uCAPx * r2 / max(length(rad), 1e-4)) * uInvRes;
+        color.r = texture2D(tDiffuse, vUv + caOff).r;
+        color.b = texture2D(tDiffuse, vUv - caOff).b;
+      }
+
       color.rgb = linearToSrgb(acesFilmic(color.rgb));
+
+      // LUT-style tone curve (Final P3), display space: gentle S contrast,
+      // warm lift-crush in the shadows (deep tones drift ember-warm, never
+      // gray), highlight rolloff toward parchment (#d8c8a8).
+      if (uToneCurve > 0.0) {
+        float tlum = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+        vec3 sc = color.rgb * color.rgb * (3.0 - 2.0 * color.rgb);
+        color.rgb = mix(color.rgb, sc, 0.22 * uToneCurve);
+        float shadow = 1.0 - smoothstep(0.0, 0.45, tlum);
+        color.rgb += shadow * shadow * vec3(0.014, 0.006, -0.004) * uToneCurve;
+        float hi = smoothstep(0.62, 1.0, tlum);
+        vec3 parch = vec3(0.847, 0.784, 0.659);
+        vec3 rolled = min(color.rgb, parch + (color.rgb - parch) * 0.6);
+        color.rgb = mix(color.rgb, rolled, hi * 0.5 * uToneCurve);
+        color.rgb = max(color.rgb, 0.0);
+      }
 
       // Film grain: zero-mean, damped in deep shadow so charcoal stays calm.
       float g = grainHash(vUv * vec2(1613.0, 907.0) + fract(uTime) * 71.3) - 0.5;
@@ -430,6 +501,26 @@ export function createPostPipeline(
       ? new FireScenePass(scene, camera, opts.fire, size.x, size.y)
       : null;
   const renderPass = firePass ?? new RenderPass(scene, camera);
+
+  // AO attempt (POST_AO): both passes re-render the scene at HALF res for
+  // depth/normals, then blend the blurred AO term over the beauty buffer.
+  let aoPass: SAOPass | SSAOPass | null = null;
+  if (POST_AO !== 'off' && camera instanceof THREE.PerspectiveCamera) {
+    if (POST_AO === 'sao') {
+      const sao = new SAOPass(scene, camera, new THREE.Vector2(size.x * 0.5, size.y * 0.5));
+      sao.params.saoIntensity = 0.012;
+      sao.params.saoScale = 6;
+      sao.params.saoKernelRadius = 24;
+      sao.params.saoBlur = true;
+      aoPass = sao;
+    } else {
+      const ssao = new SSAOPass(scene, camera, size.x * 0.5, size.y * 0.5, 16);
+      ssao.kernelRadius = 1.1;
+      ssao.minDistance = 0.0015;
+      ssao.maxDistance = 0.35;
+      aoPass = ssao;
+    }
+  }
   const bloom = new UnrealBloomPass(
     new THREE.Vector2(size.x * POST_BLOOM_SCALE, size.y * POST_BLOOM_SCALE),
     POST_BLOOM_STRENGTH,
@@ -440,6 +531,7 @@ export function createPostPipeline(
   grade.uniforms['uExposure']!.value = renderer.toneMappingExposure;
 
   composer.addPass(renderPass);
+  if (aoPass) composer.addPass(aoPass);
   composer.addPass(bloom);
   composer.addPass(grade);
 
@@ -447,6 +539,12 @@ export function createPostPipeline(
   // every pass; re-shrink the bloom mip chain afterwards (see POST_BLOOM_SCALE).
   const shrinkBloom = (w: number, h: number): void => {
     bloom.setSize(w * POST_BLOOM_SCALE, h * POST_BLOOM_SCALE);
+    aoPass?.setSize(w * 0.5, h * 0.5);
+    const pr = renderer.getPixelRatio();
+    (grade.uniforms['uInvRes']!.value as THREE.Vector2).set(
+      1 / Math.max(w * pr, 1),
+      1 / Math.max(h * pr, 1),
+    );
   };
   shrinkBloom(size.x, size.y);
 
@@ -468,6 +566,7 @@ export function createPostPipeline(
       composer.dispose();
       bloom.dispose();
       grade.dispose();
+      aoPass?.dispose();
       renderPass.dispose();
     },
   };

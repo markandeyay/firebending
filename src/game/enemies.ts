@@ -377,6 +377,30 @@ interface ConstructTextures {
 let texturesBuilt = false;
 let texturesCache: ConstructTextures | null = null;
 
+// Contact-shadow blob under the stone base (Final P3): baked stand-in for
+// the screen-space AO that was measured and cut (src/game/post.ts POST_AO).
+// Shared module-lifetime texture, same policy as the cache above.
+let blobBuilt = false;
+let blobCache: THREE.Texture | null = null;
+
+function contactBlobTexture(): THREE.Texture | null {
+  if (blobBuilt) return blobCache;
+  blobBuilt = true;
+  const ctx = make2d(64);
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, 64, 64);
+  const g = ctx.createRadialGradient(32, 32, 3, 32, 32, 31);
+  g.addColorStop(0, 'rgba(10, 6, 3, 0.5)');
+  g.addColorStop(0.55, 'rgba(10, 6, 3, 0.3)');
+  g.addColorStop(1, 'rgba(10, 6, 3, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(ctx.canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  blobCache = tex;
+  return blobCache;
+}
+
 function constructTextures(): ConstructTextures | null {
   if (texturesBuilt) return texturesCache;
   texturesBuilt = true;
@@ -622,6 +646,8 @@ export class Construct {
   private readonly ironMat: THREE.MeshStandardMaterial;
   private readonly stoneMat: THREE.MeshStandardMaterial;
   private readonly coalMat: THREE.MeshStandardMaterial;
+  /** Contact-shadow blob material; null when headless (no canvas). */
+  private blobMat: THREE.MeshBasicMaterial | null = null;
   private readonly strawBase: THREE.Color;
   private readonly ropeBase: THREE.Color;
   private readonly woodBase = new THREE.Color(POST_WOOD);
@@ -676,7 +702,8 @@ export class Construct {
     this.strawMat = new THREE.MeshStandardMaterial({
       color: v.straw,
       map: tex?.straw ?? null,
-      roughness: 1.0,
+      // Dry straw (PBR audit ~0.95): a whisper of sheen on the stalks.
+      roughness: 0.95,
       metalness: 0.0,
       flatShading: true,
       side: THREE.DoubleSide, // burn holes reveal the bale interior
@@ -686,7 +713,7 @@ export class Construct {
       map: tex?.fray ?? null,
       alphaTest: 0.35,
       side: THREE.DoubleSide,
-      roughness: 1.0,
+      roughness: 0.95,
       metalness: 0.0,
     });
     if (tex) {
@@ -711,14 +738,16 @@ export class Construct {
     this.ironMat = new THREE.MeshStandardMaterial({
       color: DARK_IRON,
       map: tex?.iron ?? null,
-      roughness: 0.6,
-      metalness: 0.7,
+      // Forged iron bands (PBR audit): true metal, hammered-matte spec.
+      roughness: 0.42,
+      metalness: 0.9,
       flatShading: true,
     });
     this.stoneMat = new THREE.MeshStandardMaterial({
       color: BASE_STONE,
       map: tex?.stone ?? null,
-      roughness: 0.95,
+      // Dressed footing stone (PBR audit target ~0.85).
+      roughness: 0.85,
       metalness: 0.0,
       flatShading: true,
     });
@@ -779,6 +808,22 @@ export class Construct {
     baseMesh.castShadow = true;
     baseMesh.receiveShadow = true;
     this.group.add(baseMesh);
+
+    // Contact-shadow blob grounding the base (see contactBlobTexture).
+    const blobTex = contactBlobTexture();
+    if (blobTex) {
+      this.blobMat = new THREE.MeshBasicMaterial({
+        map: blobTex,
+        transparent: true,
+        depthWrite: false,
+      });
+      const blob = new THREE.Mesh(geo(new THREE.PlaneGeometry(1.6, 1.6)), this.blobMat);
+      blob.name = 'construct-contact-blob';
+      blob.rotation.x = -Math.PI / 2;
+      blob.position.y = 0.012;
+      blob.renderOrder = 2;
+      this.group.add(blob);
+    }
 
     // --- Torso assembly: everything above the pivot syncs from one body ----
     // Children are positioned relative to the torso body center (world y 1.25).
@@ -1336,6 +1381,7 @@ export class Construct {
       this.fadeAge += dt;
       const opacity = Math.max(0, 1 - this.fadeAge / FADE_SEC);
       for (const mat of this.materials()) mat.opacity = opacity;
+      if (this.blobMat) this.blobMat.opacity = opacity;
       if (this.fadeAge >= FADE_SEC) {
         this.dispose();
       }
@@ -1391,6 +1437,7 @@ export class Construct {
     // Materials are per construct; the canvas textures they reference are
     // the shared module cache and are intentionally NOT disposed.
     for (const mat of this.materials()) mat.dispose();
+    this.blobMat?.dispose();
     this.state = 'gone';
   }
 }

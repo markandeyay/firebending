@@ -259,7 +259,7 @@ function heightToNormalTexture(
  * scores, shared by the lacquer/beam normal maps (grain follows the timber
  * axis: column shafts and gate posts are lathes whose v runs along length).
  */
-function makeWoodHeightCtx(seed: number): CanvasRenderingContext2D | null {
+function makeWoodHeightCtx(seed: number, edgeWear = false): CanvasRenderingContext2D | null {
   const ctx = make2d(128);
   if (!ctx) return null;
   const rng = mulberry32(seed);
@@ -276,6 +276,17 @@ function makeWoodHeightCtx(seed: number): CanvasRenderingContext2D | null {
     ctx.moveTo(x0, -4);
     ctx.bezierCurveTo(x0 + drift, 44, x0 - drift, 88, x0 + drift * 0.5, 132);
     ctx.stroke();
+  }
+  if (edgeWear) {
+    // Rounded-off arris: height dips at the very edge (worn round) with a
+    // slight ridge just inside, matching the color map's lighter band.
+    for (const [lo, hi] of [
+      [0, 4],
+      [124, 128],
+    ] as const) {
+      ctx.fillStyle = 'rgba(60, 60, 60, 0.55)';
+      ctx.fillRect(lo, 0, hi - lo, 128);
+    }
   }
   return ctx;
 }
@@ -322,6 +333,14 @@ function makeStoneHeightCtx(seed: number): CanvasRenderingContext2D | null {
     ctx.lineTo(x + (rng() - 0.5) * 44, y + (rng() - 0.5) * 44);
     ctx.stroke();
   }
+  // Recessed masonry joints along the tile borders (repeat [2,2] turns them
+  // into a block-joint grid on plinths/braziers); pairs with the grime lines
+  // in the color map so crevices read dark AND recessed.
+  ctx.fillStyle = 'rgba(45, 45, 45, 0.75)';
+  ctx.fillRect(0, 0, 128, 2);
+  ctx.fillRect(0, 126, 128, 2);
+  ctx.fillRect(0, 0, 2, 128);
+  ctx.fillRect(126, 0, 2, 128);
   return ctx;
 }
 
@@ -370,8 +389,14 @@ function makeStoneRoughnessTexture(seed: number): THREE.Texture | null {
   return dataTexture(ctx, [2, 2]);
 }
 
-/** Vertical wavy wood grain, near-white multiplier so material color leads. */
-function makeWoodGrainTexture(seed: number): THREE.Texture | null {
+/**
+ * Vertical wavy wood grain, near-white multiplier so material color leads.
+ * `edgeWear` (Final P3 grit) paints lighter worn bands + chip nicks along
+ * the u edges: box faces map u 0..1 per face (v carries the [1,2] repeat),
+ * so the bands land exactly on member edges of every beam. Kept OFF for the
+ * column/lathe texture where the u seam wraps mid-surface.
+ */
+function makeWoodGrainTexture(seed: number, edgeWear = false): THREE.Texture | null {
   const ctx = make2d(128);
   if (!ctx) return null;
   const rng = mulberry32(seed);
@@ -387,6 +412,24 @@ function makeWoodGrainTexture(seed: number): THREE.Texture | null {
     ctx.moveTo(x0, 0);
     ctx.bezierCurveTo(x0 + drift, 42, x0 - drift, 86, x0 + drift * 0.6, 128);
     ctx.stroke();
+  }
+  if (edgeWear) {
+    // Worn arris: paint exposed lighter under-timber along both u edges.
+    for (const [x0, x1] of [
+      [0, 3],
+      [125, 128],
+    ] as const) {
+      ctx.fillStyle = 'rgba(214, 192, 150, 0.26)';
+      ctx.fillRect(x0, 0, x1 - x0, 128);
+    }
+    // Chip nicks: short brighter dashes biting into the edges.
+    for (let i = 0; i < 9; i++) {
+      const left = rng() < 0.5;
+      const y = rng() * 128;
+      const len = 3 + rng() * 8;
+      ctx.fillStyle = `rgba(224, 202, 158, ${0.28 + rng() * 0.2})`;
+      ctx.fillRect(left ? 0 : 128 - (2 + rng() * 3), y, 2 + rng() * 3, len);
+    }
   }
   return canvasTexture(ctx, [1, 2]);
 }
@@ -420,6 +463,20 @@ function makeStoneTexture(seed: number): THREE.Texture | null {
     ctx.beginPath();
     ctx.ellipse(rng() * 128, rng() * 128, 2 + rng() * 7, 2 + rng() * 5, rng() * Math.PI, 0, Math.PI * 2);
     ctx.fill();
+  }
+  // Grimed joints along the tile borders (crevice dirt; the matching height
+  // recess lives in makeStoneHeightCtx). Dabbed, not ruled, so the grid
+  // reads as settled dust rather than drafting lines.
+  for (let i = 0; i < 42; i++) {
+    const along = rng() * 128;
+    const jitter = rng() * 1.6;
+    const len = 4 + rng() * 9;
+    ctx.fillStyle = `rgba(18, 13, 8, ${0.22 + rng() * 0.2})`;
+    if (rng() < 0.5) {
+      ctx.fillRect(along, (rng() < 0.5 ? 0 : 126) + jitter - 0.8, len, 1.6);
+    } else {
+      ctx.fillRect((rng() < 0.5 ? 0 : 126) + jitter - 0.8, along, 1.6, len);
+    }
   }
   return canvasTexture(ctx, [2, 2]);
 }
@@ -460,6 +517,25 @@ function makeLanternTexture(): THREE.Texture | null {
     ctx.lineTo(x, 114);
     ctx.stroke();
   }
+  return canvasTexture(ctx);
+}
+
+/**
+ * Contact-shadow blob: soft near-black radial disc (Final P3). Ships in
+ * place of screen-space AO -- both SAOPass and SSAOPass were measured on
+ * the target iGPU and cut (see src/game/post.ts POST_AO). Warm-black so
+ * the darkening never reads cool.
+ */
+function makeBlobAOTexture(): THREE.Texture | null {
+  const ctx = make2d(64);
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, 64, 64);
+  const g = ctx.createRadialGradient(32, 32, 3, 32, 32, 31);
+  g.addColorStop(0, 'rgba(10, 6, 3, 0.5)');
+  g.addColorStop(0.55, 'rgba(10, 6, 3, 0.3)');
+  g.addColorStop(1, 'rgba(10, 6, 3, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
   return canvasTexture(ctx);
 }
 
@@ -526,6 +602,13 @@ function makeShimmerTexture(seed: number): THREE.Texture | null {
 export interface MaterialKit {
   /** Oxblood lacquer with broad soft sheen and wood grain: columns. */
   lacquer: THREE.MeshStandardMaterial;
+  /**
+   * Lacquer variant with vertexColors enabled for geometries that bake a
+   * soot gradient into their color attribute (column shafts, gate posts).
+   * ONLY geometries carrying a color attribute may use it (an unbound color
+   * attribute renders black).
+   */
+  lacquerSoot: THREE.MeshStandardMaterial;
   /** Deep vermilion structural timber: beams, brackets. */
   beam: THREE.MeshStandardMaterial;
   /** Muted antique gold trim accents. */
@@ -565,6 +648,15 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
   const stoneNormal = stoneHeight ? heightToNormalTexture(stoneHeight, 1.8, [2, 2]) : null;
   const lacquerRough = makeLacquerRoughnessTexture(texSeed());
   const stoneRough = makeStoneRoughnessTexture(texSeed());
+  // Worn-edge timber maps (Final P3): beams/brackets only. The u-edge wear
+  // bands land on member edges of box faces; the column lathes keep the
+  // clean tile (their u seam wraps mid-surface).
+  const wornSeed = texSeed();
+  const woodWorn = makeWoodGrainTexture(wornSeed, true);
+  const woodWornHeight = makeWoodHeightCtx(wornSeed ^ 0x9e37, true);
+  const woodWornNormal = woodWornHeight
+    ? heightToNormalTexture(woodWornHeight, 1.6, [1, 2])
+    : null;
 
   const lacquer = new THREE.MeshStandardMaterial({
     color: OXBLOOD,
@@ -578,12 +670,23 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
     metalness: 0.06,
     flatShading: true,
   });
+  const lacquerSoot = new THREE.MeshStandardMaterial({
+    color: OXBLOOD,
+    map: wood ?? null,
+    normalMap: woodNormal ?? null,
+    normalScale: new THREE.Vector2(0.45, 0.45),
+    roughnessMap: lacquerRough ?? null,
+    roughness: lacquerRough ? 0.55 : 0.34,
+    metalness: 0.06,
+    flatShading: true,
+    vertexColors: true,
+  });
   const beam = new THREE.MeshStandardMaterial({
     // Darkened vermilion: lit beam faces must stay lacquered timber, never
     // saturated red slabs (fire is the only saturation).
     color: VERMILION_TIMBER,
-    map: wood ?? null,
-    normalMap: woodNormal ?? null,
+    map: woodWorn ?? wood ?? null,
+    normalMap: woodWornNormal ?? woodNormal ?? null,
     normalScale: new THREE.Vector2(0.55, 0.55),
     roughness: 0.82,
     metalness: 0.04,
@@ -591,8 +694,14 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
   });
   const trim = new THREE.MeshStandardMaterial({
     color: GOLD,
-    roughness: 0.42,
-    metalness: 0.65,
+    // Gilded fittings over timber: metalness 0.7 per the PBR audit, wood
+    // normal underneath (gold leaf telegraphs its substrate) and the
+    // lacquer sheen bands breaking the specular so it never reads chrome.
+    normalMap: woodNormal ?? null,
+    normalScale: new THREE.Vector2(0.25, 0.25),
+    roughnessMap: lacquerRough ?? null,
+    roughness: lacquerRough ? 0.62 : 0.42,
+    metalness: 0.7,
     flatShading: true,
   });
   const stone = new THREE.MeshStandardMaterial({
@@ -601,7 +710,9 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
     normalMap: stoneNormal ?? null,
     normalScale: new THREE.Vector2(0.7, 0.7),
     roughnessMap: stoneRough ?? null,
-    roughness: 0.95,
+    // stoneRough texels ~0.74-0.95 multiply this: effective ~0.66-0.85,
+    // physically sensible dressed stone (audit target ~0.85).
+    roughness: stoneRough ? 0.9 : 0.85,
     metalness: 0.0,
     flatShading: true,
   });
@@ -615,6 +726,11 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
   });
   const darkWood = new THREE.MeshStandardMaterial({
     color: DARK_WOOD,
+    // Near-black charcoal timber: albedo is too dark for a color map to
+    // read, but the wood normal keeps its highlights broken (PBR audit:
+    // no flat default albedo without roughness/normal treatment).
+    normalMap: woodNormal ?? null,
+    normalScale: new THREE.Vector2(0.35, 0.35),
     roughness: 0.9,
     metalness: 0.0,
     flatShading: true,
@@ -638,19 +754,22 @@ export function makeMaterialKit(seed = 0x7a11): MaterialKit {
 
   const textures = [
     wood,
+    woodWorn,
     plasterTex,
     stoneTex,
     lanternTex,
     glow,
     woodNormal,
+    woodWornNormal,
     plasterNormal,
     stoneNormal,
     lacquerRough,
     stoneRough,
   ];
-  const materials = [lacquer, beam, trim, stone, plaster, darkWood, paper];
+  const materials = [lacquer, lacquerSoot, beam, trim, stone, plaster, darkWood, paper];
   return {
     lacquer,
+    lacquerSoot,
     beam,
     trim,
     stone,
@@ -680,6 +799,34 @@ function mergedBoxes(
   const merged = mergeGeometries(parts, false);
   for (const p of parts) p.dispose();
   return merged ?? new THREE.BoxGeometry(0.1, 0.1, 0.1);
+}
+
+/**
+ * Bake a vertical soot gradient into a geometry's vertex colors (Final P3
+ * weathering): full `maxDark` darkening at `yFrom`, fading to clean by
+ * `yTo`, with a slight around-the-axis waver so the soot line never reads
+ * ruled. Multiplies onto materials with vertexColors: true (kit.lacquerSoot).
+ * Soot keeps a whisper more red than green/blue so the darkening stays warm.
+ */
+function bakeVerticalSoot(
+  geo: THREE.BufferGeometry,
+  yFrom: number,
+  yTo: number,
+  maxDark: number,
+): void {
+  const pos = geo.getAttribute('position');
+  const colors = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    const waver =
+      0.85 + 0.15 * Math.sin(Math.atan2(pos.getZ(i), pos.getX(i)) * 3 + y * 2.7);
+    const t = Math.min(Math.max((y - yFrom) / (yTo - yFrom), 0), 1);
+    const s = maxDark * (1 - t * t * (3 - 2 * t)) * waver;
+    colors[i * 3] = 1 - s * 0.92;
+    colors[i * 3 + 1] = 1 - s;
+    colors[i * 3 + 2] = 1 - s * 1.02;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 }
 
 interface ColumnGeometries {
@@ -719,6 +866,9 @@ function makeColumnGeometries(shaftHeight = SHAFT_HEIGHT, baseRadius = 0.34): Co
   ];
   const shaft = new THREE.LatheGeometry(pts, 12);
   shaft.translate(0, 0.44, 0);
+  // Soot creeps up the lower shaft (ember rain, brazier smoke): darkest at
+  // the plinth, clean by ~1/3 height. Rendered via kit.lacquerSoot.
+  bakeVerticalSoot(shaft, 0.3, 0.44 + h * 0.38, 0.42);
 
   // Thin gold accent bands: one above the plinth, one below the capital.
   const lower = new THREE.CylinderGeometry(baseRadius * 1.04, baseRadius * 1.06, 0.07, 12);
@@ -762,7 +912,7 @@ export function buildColumn(opts: ColumnOptions = {}): THREE.Group {
   const group = new THREE.Group();
   group.name = 'column';
   const plinth = new THREE.Mesh(geo.plinth, kit.stone);
-  const shaft = new THREE.Mesh(geo.shaft, kit.lacquer);
+  const shaft = new THREE.Mesh(geo.shaft, kit.lacquerSoot);
   const bands = new THREE.Mesh(geo.bands, kit.trim);
   const bracket = new THREE.Mesh(geo.bracket, kit.beam);
   shaft.castShadow = true;
@@ -786,7 +936,7 @@ export function buildColumnRow(opts: ColumnRowOptions): THREE.Group {
   const n = opts.positions.length;
   const group = new THREE.Group();
   group.name = 'column-row';
-  const shafts = new THREE.InstancedMesh(geo.shaft, opts.kit.lacquer, n);
+  const shafts = new THREE.InstancedMesh(geo.shaft, opts.kit.lacquerSoot, n);
   shafts.name = 'columns';
   const plinths = new THREE.InstancedMesh(geo.plinth, opts.kit.stone, n);
   plinths.name = 'column-plinths';
@@ -973,7 +1123,9 @@ export function buildGreatGate(opts: GreatGateOptions): THREE.Group {
   for (const p of postParts) {
     if (p !== postGeo) p.dispose();
   }
-  const posts = new THREE.Mesh(postGeo, kit.lacquer);
+  // Soot up the lower posts, same treatment as the hall columns.
+  bakeVerticalSoot(postGeo, 0.25, postBaseY + postH * 0.4, 0.4);
+  const posts = new THREE.Mesh(postGeo, kit.lacquerSoot);
   posts.name = 'gate-posts';
   posts.castShadow = true;
   posts.receiveShadow = true;
@@ -2064,6 +2216,140 @@ export function buildArena(scene: THREE.Scene): Arena {
     group.add(soot);
   }
 
+  // --- Traffic wear + wall-base contact darkening (Final P3): one overlay
+  // canvas covering the whole floor. Soft dark lanes trace the walked
+  // sight lines from the porch to each combat station (years of feet), and
+  // gradient bands hug the plaster wall bases, the end wall and the terrace
+  // lip -- the baked stand-in for the AO the measured-and-cut screen-space
+  // passes would have supplied (see post.ts POST_AO).
+  {
+    // Floor rect: x -15..15, z -26.5..7.5 (width 30, length 34, centerZ -9.5).
+    const ctx = make2d(256);
+    if (ctx) {
+      ctx.clearRect(0, 0, 256, 256);
+      const ux = (x: number): number => ((x + 15) / 30) * 256;
+      const uz = (z: number): number => ((z + 26.5) / 34) * 256;
+      // Walked lanes: three feathered passes per route.
+      const routes: Array<[number, number]> = [
+        [0, -6], // entry construct
+        [-6.2, -10.2], // colonnade
+        [5, -15.5], // terrace vantage
+        [-3.5, -14.5], // bridge deck
+        [6.8, -6], // great gate
+        [-6.3, -16.5], // channel edge
+      ];
+      ctx.lineCap = 'round';
+      for (const [tx, tz] of routes) {
+        for (const [w, a] of [
+          [24, 0.05],
+          [14, 0.07],
+          [7, 0.09],
+        ] as const) {
+          ctx.strokeStyle = `rgba(14, 9, 5, ${a})`;
+          ctx.lineWidth = w;
+          ctx.beginPath();
+          ctx.moveTo(ux(0), uz(0.4));
+          ctx.quadraticCurveTo(ux(tx * 0.35), uz(tz * 0.55), ux(tx), uz(tz));
+          ctx.stroke();
+        }
+      }
+      // Porch scuff pool where every route starts.
+      const porch = ctx.createRadialGradient(ux(0), uz(0), 4, ux(0), uz(0), 26);
+      porch.addColorStop(0, 'rgba(14, 9, 5, 0.18)');
+      porch.addColorStop(1, 'rgba(14, 9, 5, 0)');
+      ctx.fillStyle = porch;
+      ctx.fillRect(0, 0, 256, 256);
+      // Wall-base AO bands: plaster walls (x +/-10.8), end wall (z 4.6),
+      // terrace lip (z -14.6, x 3.4..9.4).
+      const band = (
+        x0: number,
+        y0: number,
+        x1: number,
+        y1: number,
+        gx0: number,
+        gy0: number,
+        gx1: number,
+        gy1: number,
+      ): void => {
+        const g = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+        g.addColorStop(0, 'rgba(10, 7, 4, 0.42)');
+        g.addColorStop(1, 'rgba(10, 7, 4, 0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      };
+      band(ux(-11.2), 0, ux(-9.4), 256, ux(-10.8), 0, ux(-9.4), 0); // west wall
+      band(ux(9.4), 0, ux(11.2), 256, ux(10.8), 0, ux(9.4), 0); // east wall
+      band(0, uz(3.2), 256, uz(5), 0, uz(4.6), 0, uz(3.2)); // end wall
+      band(ux(3.4), uz(-14.6), ux(9.4), uz(-13.4), 0, uz(-14.6), 0, uz(-13.4)); // terrace lip
+      const trafficMat = new THREE.MeshBasicMaterial({
+        map: canvasTexture(ctx),
+        transparent: true,
+        depthWrite: false,
+      });
+      const traffic = new THREE.Mesh(new THREE.PlaneGeometry(30, 34), trafficMat);
+      traffic.name = 'floor-traffic-wear';
+      traffic.rotation.x = -Math.PI / 2;
+      traffic.position.set(0, 0.014, -9.5);
+      traffic.renderOrder = 2;
+      group.add(traffic);
+    }
+  }
+
+  // --- Blob contact shadows (Final P3): one instanced disc under every
+  // grounded vertical -- column plinths, gate posts, braziers, bridge end
+  // blocks. Ships in place of SAO/SSAO (measured and cut; see post.ts).
+  const blobTex = makeBlobAOTexture();
+  if (blobTex) {
+    // [x, y, z, diameter]
+    const blobSpots: Array<[number, number, number, number]> = [
+      // Entry columns
+      [-COLUMN_X, 0.013, 0.4, 1.9],
+      [COLUMN_X, 0.013, 0.4, 1.9],
+      [-COLUMN_X, 0.013, -3.2, 1.9],
+      [COLUMN_X, 0.013, -3.2, 1.9],
+      // Colonnade columns
+      [-7.6, 0.013, -3.5, 1.9],
+      [-7.6, 0.013, -7, 1.9],
+      [-7.6, 0.013, -10.5, 1.9],
+      [-7.6, 0.013, -14, 1.9],
+      [-7.6, 0.013, -17.5, 1.9],
+      // Gate post plinths
+      [7.4, 0.013, -3.6, 2.1],
+      [7.4, 0.013, -8.4, 2.1],
+      // Braziers (positions mirror brazierSpots below; terrace one raised)
+      [-2.6, 0.013, -2.8, 1.5],
+      [2.6, 0.013, -2.8, 1.5],
+      [-6.2, 0.013, -9.0, 1.5],
+      [-6.2, 0.013, -12.0, 1.5],
+      [6.8, 0.013, -2.6, 1.5],
+      [6.8, 0.013, -9.4, 1.5],
+      [-1.6, 0.013, -12.3, 1.5],
+      [3.9, 0.913, -17.2, 1.5],
+      [2.1, 0.013, -4.6, 1.5],
+      // Bridge end blocks
+      [-3.5, 0.013, -13.15, 2.0],
+      [-3.5, 0.013, -16.85, 2.0],
+    ];
+    const blobGeo = new THREE.PlaneGeometry(1, 1);
+    blobGeo.rotateX(-Math.PI / 2);
+    const blobMat = new THREE.MeshBasicMaterial({
+      map: blobTex,
+      transparent: true,
+      depthWrite: false,
+    });
+    const blobs = new THREE.InstancedMesh(blobGeo, blobMat, blobSpots.length);
+    blobs.name = 'contact-blobs';
+    blobs.renderOrder = 2;
+    const dummy = new THREE.Object3D();
+    blobSpots.forEach(([x, y, z, d], i) => {
+      dummy.position.set(x, y, z);
+      dummy.scale.set(d, 1, d);
+      dummy.updateMatrix();
+      blobs.setMatrixAt(i, dummy.matrix);
+    });
+    group.add(blobs);
+  }
+
   // --- Entry porch (station 0 framing): two column pairs + timber frame ----
   const entryZs = [0.4, -3.2];
   const entryPositions: Array<[number, number]> = [];
@@ -2281,7 +2567,10 @@ export function buildArena(scene: THREE.Scene): Arena {
   // station point lights on layered-noise flicker (see the module header
   // light policy), and only a whisper of warm ambient so unlit surfaces
   // fall to charcoal instead of gray.
-  const key = new THREE.DirectionalLight(0xffa050, 2.6);
+  // Final P3 hierarchy tune: key up a notch (focal read), hemisphere down
+  // (corners were drifting gray-brown; genuine darkness beats fill). The
+  // gap between the ember-lit pools and the unlit corners is the look.
+  const key = new THREE.DirectionalLight(0xffa050, 2.8);
   key.name = 'coal-wall-key';
   key.position.set(0, 2.6, -22.5);
   key.target.position.set(0, 0.8, -2);
@@ -2298,7 +2587,7 @@ export function buildArena(scene: THREE.Scene): Arena {
   group.add(key, key.target);
 
   // Warm hemisphere whisper: ember glow from below, near-black from above.
-  const ambient = new THREE.HemisphereLight(0x1a100a, 0x2a1408, 0.62);
+  const ambient = new THREE.HemisphereLight(0x1a100a, 0x2a1408, 0.48);
   ambient.name = 'ember-ambient';
   group.add(ambient);
 
