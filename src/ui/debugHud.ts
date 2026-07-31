@@ -107,9 +107,11 @@ export class DebugHud {
   private readonly el: HTMLElement;
   private readonly textEl: HTMLElement;
   private readonly ratesEl: HTMLElement;
+  private missEl!: HTMLElement;
   private lastUpdateMs = -Infinity;
   private lastText = '';
   private lastRatesText = '';
+  private lastMissText = '';
   private readonly missScratch: NearMissRecord[] = [];
   private visibleState = false;
 
@@ -118,7 +120,9 @@ export class DebugHud {
     el.style.position = 'absolute';
     el.style.top = '12px';
     el.style.right = '12px';
-    el.style.maxWidth = '360px';
+    // Wide enough for the longest fusion line (elbow+speed+bbox each with a
+    // PASS/FAIL token) at 11px Consolas; 360px clipped the verdicts.
+    el.style.maxWidth = '420px';
     el.style.padding = '10px 14px';
     el.style.background = 'rgba(26, 21, 18, 0.85)';
     el.style.border = '1px solid rgba(201, 119, 46, 0.4)';
@@ -129,15 +133,19 @@ export class DebugHud {
     el.style.pointerEvents = 'none';
     el.style.zIndex = '50';
     el.style.display = 'none';
-    // Two children: the engine text block, then the RATES block (its own
-    // element so the degraded-handHz reading can carry a color span).
+    // Three children: the engine text block, then the fixed-size RATES block
+    // (its own element so the degraded-handHz reading can carry a color
+    // span), then the variable-length near-miss log LAST so its 10 Hz
+    // appear/expire churn never shifts the blocks above it.
     const textEl = document.createElement('div');
     const ratesEl = document.createElement('div');
-    el.append(textEl, ratesEl);
+    const missEl = document.createElement('div');
+    el.append(textEl, ratesEl, missEl);
     root.appendChild(el);
     this.el = el;
     this.textEl = textEl;
     this.ratesEl = ratesEl;
+    this.missEl = missEl;
   }
 
   get visible(): boolean {
@@ -171,15 +179,24 @@ export class DebugHud {
       this.textEl.textContent = text;
     }
     this.updateRates(inputs.rates ?? null);
+    const missText = this.composeMisses(inputs.engine);
+    if (missText !== this.lastMissText) {
+      this.lastMissText = missText;
+      this.missEl.textContent = missText;
+    }
   }
 
   /** Render the RATES block: each metric as "name p50/p95"; handHz gets the
-   * degraded color when its p50 falls below HAND_HZ_BAD_BELOW. */
+   * degraded color when its p50 falls below HAND_HZ_BAD_BELOW, and a live
+   * probe with ZERO hand samples is the worst state, so it reads degraded
+   * too. A null block (replay paths) shows a one-line explanation instead
+   * of vanishing silently. */
   private updateRates(rates: RatesBlock | null): void {
     if (rates === null) {
-      if (this.lastRatesText !== '') {
-        this.lastRatesText = '';
-        this.ratesEl.replaceChildren();
+      const absent = `${NL}rates  - (no live probe)`;
+      if (this.lastRatesText !== absent) {
+        this.lastRatesText = absent;
+        this.ratesEl.textContent = absent;
       }
       return;
     }
@@ -195,7 +212,7 @@ export class DebugHud {
       `  main ml ${rates.mainMlMs.toFixed(1)}ms  wk hand ${rates.workerHandDetectMs.toFixed(1)}ms  wk pose ${rates.workerPoseDetectMs.toFixed(1)}ms`,
       `  workers  hand:${rates.handWorkerActive ? 'on' : 'OFF'}  pose:${rates.poseWorkerActive ? 'on' : 'OFF'}`,
     ].join(NL);
-    const bad = rates.handHz.count > 0 && rates.handHz.p50 < HAND_HZ_BAD_BELOW;
+    const bad = rates.handHz.count === 0 || rates.handHz.p50 < HAND_HZ_BAD_BELOW;
     const key = `${before}${handStr}${after}|${bad}`;
     if (key === this.lastRatesText) return;
     this.lastRatesText = key;
@@ -310,15 +327,19 @@ export class DebugHud {
         `${parallax.offset.z.toFixed(3)}`,
     );
 
-    // Near-miss trace.
-    lines.push('near misses');
+    return lines.join('\n');
+  }
+
+  /** The variable-length near-miss trace, rendered last so its churn never
+   * shifts the fixed blocks above it. */
+  private composeMisses(engine: MoveEngine): string {
+    const lines: string[] = ['near misses'];
     const misses = engine.nearMisses(this.missScratch);
     if (misses.length === 0) {
       lines.push('  -');
     } else {
       for (const rec of misses) lines.push(`  ${formatNearMiss(rec)}`);
     }
-
-    return lines.join('\n');
+    return NL + lines.join('\n');
   }
 }

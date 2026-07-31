@@ -453,7 +453,7 @@ export class StudioApp {
     this.rateChipEl.classList.toggle('is-low', low);
     const gateActive = this.mode === 'idle' || this.mode === 'recording';
     if (low && gateActive) {
-      this.rateBannerHeadEl.textContent = `Capture is running at ${fps.toFixed(1)} fps. 30 is required for usable data.`;
+      this.rateBannerHeadEl.textContent = `Capture is running at ${fps.toFixed(1)} fps. Takes need 30 fps to be usable.`;
       this.rateBannerEl.classList.add('is-visible');
     } else {
       this.rateBannerEl.classList.remove('is-visible');
