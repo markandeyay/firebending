@@ -59,6 +59,21 @@ export interface MotionProfile {
   neutralBboxGrowth: number;
   /** ISO timestamp of the capture ('default' for DEFAULT_PROFILE). */
   capturedAt: string;
+  /**
+   * OPTIONAL (additive, position-state-machine rebuild 2026-07-31): the
+   * calibrated per-arm FORWARD-PUNCH peak reach in SHOULDER-WIDTH units,
+   * i.e. dist(shoulder anchor, pose wrist) / shoulder width at the peak of
+   * a calibration punch. Seeds the phase engine's maxReach normalizer
+   * (src/gestures/extension.ts). NOTE this is the foreshortened SCREEN
+   * reach of a punch thrown at the camera (drill-measured 0.59..0.93), NOT
+   * anatomical arm length: a hanging idle arm measures 1.6..2.2 and must
+   * never seed this. Profiles that predate the fields lack them, and
+   * absence is fully supported (the engine falls back to its prior); a
+   * PRESENT but non-finite or non-positive value fails validation like any
+   * other corrupt numeric field.
+   */
+  maxReachLeftSw?: number;
+  maxReachRightSw?: number;
 }
 
 export interface MotionThresholds {
@@ -222,6 +237,14 @@ const NUMERIC_KEYS = [
   'neutralBboxGrowth',
 ] as const;
 
+/**
+ * OPTIONAL additive numeric fields (phase-engine reach seeds): absent is
+ * fully supported; present values must be finite and positive, matching the
+ * strictness of the required numerics so a corrupt profile forces one clean
+ * recalibration instead of poisoning extension normalization.
+ */
+const OPTIONAL_POSITIVE_KEYS = ['maxReachLeftSw', 'maxReachRightSw'] as const;
+
 /** Full structural validation: wrong version (v1 included), NaN, or
  *  non-finite rejects. */
 function isValidProfile(value: unknown): value is MotionProfile {
@@ -232,6 +255,11 @@ function isValidProfile(value: unknown): value is MotionProfile {
   for (const key of NUMERIC_KEYS) {
     const v = p[key];
     if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return false;
+  }
+  for (const key of OPTIONAL_POSITIVE_KEYS) {
+    const v = p[key];
+    if (v === undefined) continue; // additive field: absence fully supported
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return false;
   }
   return true;
 }
