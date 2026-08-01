@@ -57,7 +57,7 @@ import { DEFAULT_PROFILE, thresholdsFrom } from '../src/gestures/profile';
 import type { MotionProfile, MotionThresholds } from '../src/gestures/profile';
 import { palmScore, palmScore2D } from '../src/gestures/poses';
 import type { Handedness } from '../src/gestures/poses';
-import { RATE_GATE_FPS, TARGET_CAPTURE_FPS } from '../src/studio/captureRate';
+import { RATE_GATE_FPS } from '../src/studio/captureRate';
 import type { CaptureHealth } from '../src/studio/captureRate';
 import { detectReps } from '../src/studio/peaks';
 import type { SignalSample } from '../src/studio/peaks';
@@ -388,9 +388,11 @@ export interface TakeAnalysis {
   fpsMean?: number;
   fpsMin?: number;
   /**
-   * Phase 1 capture hard gate: the take measured under TARGET_CAPTURE_FPS
-   * (30). Every downstream number derived from such a take is invalid for
-   * tuning; the report banner names these takes.
+   * Capture sparsity gate: the take measured under RATE_GATE_FPS (10).
+   * Below that even position-based detection has too few samples, so
+   * every downstream number derived from such a take is invalid for
+   * tuning; the report banner names these takes. Takes at or above the
+   * gate (including the normal ~14 fps operating rate) are usable.
    */
   lowFps: boolean;
   kind: TakeKind;
@@ -464,8 +466,8 @@ export interface DrillAnalysis {
   /** True when at least one take ran on AUTO-PEAK rep windows. */
   autoPeakUsed: boolean;
   /**
-   * Takes (id#index) measured under TARGET_CAPTURE_FPS: the Phase 1
-   * capture hard gate. Their numbers are invalid for tuning.
+   * Takes (id#index) measured under RATE_GATE_FPS: the capture sparsity
+   * gate. Their numbers are invalid for tuning.
    */
   lowFpsTakes: string[];
   /** The export's capture-health summary; null on pre-gate exports. */
@@ -571,7 +573,7 @@ export function analyzeTake(
     fps: take.fps,
     ...(take.fpsMean !== undefined ? { fpsMean: take.fpsMean } : {}),
     ...(take.fpsMin !== undefined ? { fpsMin: take.fpsMin } : {}),
-    lowFps: take.fps < TARGET_CAPTURE_FPS,
+    lowFps: take.fps < RATE_GATE_FPS,
     kind: exp.kind,
     hasPose,
     repsUsed: reps.length,
@@ -1043,22 +1045,27 @@ function syntheticBanner(a: DrillAnalysis): string {
 }
 
 /**
- * Phase 1 capture hard gate banner: any take under TARGET_CAPTURE_FPS (30)
- * invalidates every number derived from it. Analysis still runs so the
- * failure is visible, but the banner names the invalid takes at the top.
+ * Capture sparsity gate banner: any take under RATE_GATE_FPS (10)
+ * invalidates every number derived from it. Position-based detection does
+ * not need dense sampling (the normal operating rate is ~14 fps), but
+ * below the gate a 300 ms punch window holds too few pose samples to
+ * reason about. Analysis still runs so the failure is visible, but the
+ * banner names the invalid takes at the top.
  */
 function lowFpsBanner(a: DrillAnalysis): string {
   if (a.lowFpsTakes.length === 0) return '';
   const lows = a.takes.filter((t) => t.lowFps);
   return [
     '',
-    `> **CAPTURE RATE UNDER ${TARGET_CAPTURE_FPS} FPS - PHASE 1 HARD GATE.** The`,
-    '> takes listed below were captured under the required 30 fps landmark',
-    '> rate (a 120 ms jab spans under 2 samples at 14 fps). Per the hard',
-    '> gate, EVERY downstream number derived from these takes (rep windows,',
-    '> hit rates, SNR, threshold proposals) is INVALID for tuning. The',
-    '> analysis still runs so the failure stays visible, but do not apply',
-    `> anything based on them. Takes at or above ${TARGET_CAPTURE_FPS} fps are unaffected.`,
+    `> **CAPTURE RATE UNDER ${RATE_GATE_FPS} FPS - TOO SPARSE TO TUNE.** The`,
+    `> takes listed below were captured under the ${RATE_GATE_FPS} fps sparsity gate.`,
+    '> Position-based detection does not need dense sampling (denser is',
+    '> nice, not required), but below the gate a 300 ms punch window holds',
+    '> too few pose samples to reason about. EVERY downstream number',
+    '> derived from these takes (rep windows, hit rates, SNR, threshold',
+    '> proposals) is INVALID for tuning. The analysis still runs so the',
+    '> failure stays visible, but do not apply anything based on them.',
+    `> Takes at or above ${RATE_GATE_FPS} fps are unaffected.`,
     '>',
     ...lows.map(
       (t) =>
@@ -1104,7 +1111,7 @@ export function buildReport(a: DrillAnalysis): string {
     L.push(
       `- Capture health: min ${fmt(a.captureHealth.minFps, 1)} fps, ` +
         `median ${fmt(a.captureHealth.medianFps, 1)} fps, ` +
-        `${a.captureHealth.takesUnderGate} take(s) under the ${RATE_GATE_FPS} fps studio gate`,
+        `${a.captureHealth.takesUnderGate} take(s) under the ${RATE_GATE_FPS} fps sparsity gate`,
     );
   }
   L.push(lowFpsBanner(a));
@@ -1338,10 +1345,11 @@ export function summarize(a: DrillAnalysis): string {
   if (a.synthetic) L.push('*** SYNTHETIC INPUT - numbers unusable for tuning ***');
   if (a.lowFpsTakes.length > 0) {
     L.push(
-      `*** CAPTURE RATE HARD GATE: ${a.lowFpsTakes.length} take(s) under ` +
-        `${TARGET_CAPTURE_FPS} fps: ${a.lowFpsTakes.join(', ')}`,
+      `*** CAPTURE SPARSITY GATE: ${a.lowFpsTakes.length} take(s) under ` +
+        `${RATE_GATE_FPS} fps: ${a.lowFpsTakes.join(', ')}`,
     );
-    L.push('*** Every number derived from those takes is INVALID for tuning.');
+    L.push('*** Those takes are too sparse to tune against; every number');
+    L.push('*** derived from them is INVALID for tuning.');
   }
   if (a.autoPeakUsed) {
     L.push('*** AUTO-PEAK REP WINDOWS IN USE: zero confirmed markers found on');

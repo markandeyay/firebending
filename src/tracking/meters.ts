@@ -17,7 +17,8 @@
  * All pure and headless-testable; no DOM, no timers of their own.
  */
 
-/** Default sliding-window size, samples (~8 s of 30 Hz data). */
+/** Default sliding-window size, samples (~17 s at the ~14 fps sustained
+ *  hand rate; proportionally less at higher rates). */
 export const METER_WINDOW = 240;
 
 export interface Percentiles {

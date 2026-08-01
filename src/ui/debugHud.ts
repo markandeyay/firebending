@@ -28,8 +28,13 @@ import type { Handedness } from '../gestures/poses';
 /** Maximum text refresh rate. */
 export const REFRESH_HZ = 10;
 
-/** handHz p50 below this reads as degraded (camera target is 30 Hz). */
-export const HAND_HZ_BAD_BELOW = 28;
+/**
+ * handHz p50 below this reads as degraded. Matches the capture sparsity
+ * gate (RATE_GATE_FPS): ~14 fps is the normal sustained hand rate on the
+ * reference machine and detection is framerate-independent, so only
+ * genuinely sparse capture is flagged.
+ */
+export const HAND_HZ_BAD_BELOW = 10;
 
 /** Warm ink-red for degraded readings (firelight family, never neon). */
 const BAD_COLOR = '#d0532f';

@@ -225,8 +225,9 @@ export class StudioApp {
     this.recChipEl.append(dot, this.recTimeEl, this.recRepsEl);
     this.modeChipEl = el('div', 'st-mode-chip');
     this.modeChipEl.textContent = 'LIVE';
-    // Live capture-rate chip (Phase 1 hard gate): actual landmark-frame
-    // arrival rate, updated ~2Hz from the rolling meter.
+    // Live capture-rate chip: actual landmark-frame arrival rate, updated
+    // ~2Hz from the rolling meter. Around 14 fps is the normal, healthy
+    // rate on the reference machine; only sub-gate rates warn.
     this.rateChipEl = el('div', 'st-rate-chip');
     this.rateChipEl.textContent = 'capture -- fps';
     // Low-rate banner over the stage. Recording is never blocked, but the
@@ -453,7 +454,7 @@ export class StudioApp {
     this.rateChipEl.classList.toggle('is-low', low);
     const gateActive = this.mode === 'idle' || this.mode === 'recording';
     if (low && gateActive) {
-      this.rateBannerHeadEl.textContent = `Capture is running at ${fps.toFixed(1)} fps. Takes need 30 fps to be usable.`;
+      this.rateBannerHeadEl.textContent = `Capture is running at ${fps.toFixed(1)} fps. Takes below ${RATE_GATE_FPS} fps are too sparse to tune against.`;
       this.rateBannerEl.classList.add('is-visible');
     } else {
       this.rateBannerEl.classList.remove('is-visible');
@@ -991,7 +992,7 @@ export class StudioApp {
     // Confirming a low-fps take stays allowed (the user may want to test),
     // but the button carries the warning.
     if (lowFps) {
-      confirmBtn.title = `This take measured ${stored.fps.toFixed(1)} fps, under the ${RATE_GATE_FPS} fps gate. Its numbers are not usable for tuning.`;
+      confirmBtn.title = `This take measured ${stored.fps.toFixed(1)} fps, under the ${RATE_GATE_FPS} fps sparsity gate. It is too sparse to tune against.`;
     }
     btn('Needs redo', () => this.setStatus(stored, 'needs-redo'), '', stored.status === 'needs-redo');
     btn('Re-record', () => this.startCountdown());

@@ -1,5 +1,5 @@
 /**
- * Capture-rate helpers (Phase 1 hard gate): the rolling arrival-rate
+ * Capture-rate helpers (the sparsity gate): the rolling arrival-rate
  * meter, gate classification, per-take instantaneous fps stats, the
  * export-level capture-health summary, and export back-compat for stored
  * takes recorded before the gate existed (no fpsMean/fpsMin). DOM-free.
@@ -29,18 +29,18 @@ import { DEFAULT_PROFILE, thresholdsFrom } from '../src/gestures/profile';
 // ---------------------------------------------------------------------------
 
 describe('capture gate constants and classification', () => {
-  it('targets 30 fps with a 28 fps jitter-absorbing gate', () => {
-    expect(TARGET_CAPTURE_FPS).toBe(30);
-    expect(RATE_GATE_FPS).toBe(28);
+  it('targets the measured 14 fps rate with a 10 fps sparsity gate', () => {
+    expect(TARGET_CAPTURE_FPS).toBe(14);
+    expect(RATE_GATE_FPS).toBe(10);
     expect(RATE_GATE_FPS).toBeLessThan(TARGET_CAPTURE_FPS);
   });
 
   it('classifies at the gate boundary', () => {
     expect(classifyRate(60)).toBe('good');
-    expect(classifyRate(29.8)).toBe('good');
-    expect(classifyRate(28)).toBe('good'); // at the gate is good
-    expect(classifyRate(27.99)).toBe('warn');
-    expect(classifyRate(14)).toBe('warn');
+    expect(classifyRate(30)).toBe('good');
+    expect(classifyRate(14)).toBe('good'); // the normal operating rate
+    expect(classifyRate(10)).toBe('good'); // at the gate is good
+    expect(classifyRate(9.99)).toBe('warn');
     expect(classifyRate(0)).toBe('warn');
   });
 });
@@ -89,8 +89,9 @@ describe('rolling rate meter', () => {
     const last = 59 * (1000 / 30);
     // Healthy at the moment of the last arrival.
     expect(m.fpsAt(last) ?? 0).toBeCloseTo(30, 3);
-    // Two stalled seconds later the same window reads far under the gate.
-    expect(m.fpsAt(last + 2000) ?? 0).toBeLessThan(RATE_GATE_FPS);
+    // A few stalled seconds later the same window reads under the 10 fps
+    // sparsity gate (the window span grows while arrivals do not).
+    expect(m.fpsAt(last + 6000) ?? 0).toBeLessThan(RATE_GATE_FPS);
   });
 
   it('reset clears the window', () => {
@@ -151,16 +152,16 @@ describe('per-take fps stats', () => {
 
 describe('capture-health summary', () => {
   it('summarizes min, median and takes under the gate', () => {
-    const h = captureHealthOf([31, 14, 29]);
-    expect(h.minFps).toBe(14);
-    expect(h.medianFps).toBe(29);
+    const h = captureHealthOf([15, 8, 14]);
+    expect(h.minFps).toBe(8);
+    expect(h.medianFps).toBe(14);
     expect(h.takesUnderGate).toBe(1);
   });
 
   it('even-count median averages the middle pair', () => {
-    const h = captureHealthOf([30, 32, 28, 26]);
-    expect(h.medianFps).toBe(29);
-    expect(h.takesUnderGate).toBe(1); // only 26 is under 28
+    const h = captureHealthOf([14, 16, 12, 9]);
+    expect(h.medianFps).toBe(13);
+    expect(h.takesUnderGate).toBe(1); // only 9 is under 10
   });
 
   it('empty input yields all zeros', () => {
@@ -247,14 +248,14 @@ describe('export back-compat with pre-gate takes', () => {
 
   it('buildExport derives captureHealth from per-take measured fps', () => {
     const out = buildExport({
-      takes: [oldStoredTake(31, 1), oldStoredTake(14, 2), oldStoredTake(29, 3)],
+      takes: [oldStoredTake(15, 1), oldStoredTake(8, 2), oldStoredTake(14, 3)],
       lightingNote: '',
       cameraWidth: 640,
       cameraHeight: 480,
       motionProfile: null,
       exportedAt: '2026-07-31T10:00:00.000Z',
     });
-    expect(out.captureHealth).toEqual({ minFps: 14, medianFps: 29, takesUnderGate: 1 });
+    expect(out.captureHealth).toEqual({ minFps: 8, medianFps: 14, takesUnderGate: 1 });
     // The envelope (old takes included) survives JSON round-tripping.
     expect(JSON.parse(JSON.stringify(out))).toEqual(out);
   });

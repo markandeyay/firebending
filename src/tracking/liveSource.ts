@@ -15,7 +15,8 @@
  *
  * EMISSION (decoupled): exactly ONE LandmarkFrame is emitted per fresh
  * hand-worker result. Hands are the fast channel: the emission rate equals
- * the achieved hand Hz (target: the camera's 30 Hz), independent of the
+ * the achieved hand Hz (~14 fps sustained on the reference machine; more
+ * when the hardware allows it), independent of the
  * render loop. Pose interpolates onto each emitted frame as before
  * (lerpPoseFrames, `interpolated` flag, elbow tracker skips interpolated).
  *

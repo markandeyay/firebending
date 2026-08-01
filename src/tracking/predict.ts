@@ -2,7 +2,8 @@
  * Predictive hand extrapolation for RENDERING (quality round Phase 1).
  *
  * The hand pipeline emits real samples at the achieved hand-inference rate
- * (target: camera 30 Hz) while the game renders at 60 fps, so a glove pinned
+ * (~14 fps sustained on the reference machine) while the game renders at
+ * 60 fps, so a glove pinned
  * to the last sample visibly steps. This module extrapolates a hand forward
  * to the render frame's time using CONSTANT WRIST VELOCITY from the last two
  * REAL samples, applied as a RIGID OFFSET to the whole hand: finger
