@@ -119,7 +119,11 @@ export function aimAnglesDeg(aim: Vec3): { yawDeg: number; pitchDeg: number } {
  *   "  EXTENDING>EXTENDED 180ms"
  * with " PAUSED" appended to the first line while confidence froze the
  * machine, and "-" on the second before any transition happened. The state
- * token is padded so the ext column never shifts between states. Pure.
+ * token is padded so the ext column never shifts between states. A
+ * zero-duration transition is an instantaneous phase ENTRY edge, not a
+ * timed traversal, so its "0ms" is suppressed (review r5p2 LOW: constant
+ * "RETRACTED>EXTENDING 0ms" read like a timing bug next to the real
+ * traversal timings). Pure.
  */
 export function formatArmDebug(label: string, arm: ArmDebugState): [string, string] {
   const paused = arm.paused ? ' PAUSED' : '';
@@ -127,8 +131,31 @@ export function formatArmDebug(label: string, arm: ArmDebugState): [string, stri
     `${label} ${arm.state.padEnd(9, ' ')} ext ${arm.extension.toFixed(2)} ` +
     `${extensionBar(arm.extension)} zone ${arm.zone}${paused}`;
   const tr = arm.lastTransition;
-  const line2 = tr === null ? '  -' : `  ${tr.from}>${tr.to} ${tr.tookMs.toFixed(0)}ms`;
+  const line2 =
+    tr === null
+      ? '  -'
+      : tr.tookMs > 0
+        ? `  ${tr.from}>${tr.to} ${tr.tookMs.toFixed(0)}ms`
+        : `  ${tr.from}>${tr.to}`;
   return [line1, line2];
+}
+
+/**
+ * After this long without a new engine frame the input line reads STALE.
+ * Longer than one HUD refresh interval and several 14fps frame gaps, so a
+ * normal capture cadence never flickers the flag; genuine input death (the
+ * tracking-loss overlay pausing engine updates, a camera stall) shows
+ * within a second (review r5p2 MEDIUM: frozen arm lines were
+ * indistinguishable from a deliberately held pose).
+ */
+export const INPUT_STALE_AFTER_MS = 600;
+
+/** The input freshness line: "input  live", "input  STALE 12.3s", or the
+ *  before-any-frames placeholder. Pure. */
+export function formatInputLine(hasFrames: boolean, staleForMs: number): string {
+  if (!hasFrames) return 'input  - (no frames yet)';
+  if (staleForMs < INPUT_STALE_AFTER_MS) return 'input  live';
+  return `input  STALE ${(staleForMs / 1000).toFixed(1)}s`;
 }
 
 export interface DebugHudInputs {
@@ -149,16 +176,28 @@ export class DebugHud {
   private lastText = '';
   private lastRatesText = '';
   private visibleState = false;
+  /** Wall-clock staleness tracking: the engine's lastFrameT is a frame-time
+   *  value, so freshness is measured by WHEN it last changed on our clock. */
+  private lastSeenFrameT: number | null = null;
+  private frameTChangedWallMs = -Infinity;
+  /** Wall-clock age of the last emitted aim/move (review r5p2 LOW: the
+   *  readout persisted unchanged with no way to tell how old it was). */
+  private lastMoveKey = '';
+  private lastMoveWallMs = -Infinity;
 
   constructor(root: HTMLElement) {
     const el = document.createElement('div');
     el.style.position = 'absolute';
     el.style.top = '12px';
     el.style.right = '12px';
-    // Wide enough for the longest state line (padded state + ext + bar +
-    // ABOVE_SHOULDER + PAUSED) at 11px Consolas; kept at the 420px the
-    // fusion lines already established so the panel footprint is unchanged.
-    el.style.maxWidth = '420px';
+    // FIXED width (review r5p2 MEDIUM): with only max-width set, the
+    // right-anchored box resized with the longest line and its left edge
+    // lurched as zone tokens swapped (CHEST vs LATERAL_INNER). Wide enough
+    // for the longest state line (padded state + ext + bar + ABOVE_SHOULDER
+    // + PAUSED) at 11px Consolas; border-box keeps the footprint at the
+    // 420px the panel already established.
+    el.style.width = '420px';
+    el.style.boxSizing = 'border-box';
     el.style.padding = '10px 14px';
     el.style.background = 'rgba(26, 21, 18, 0.85)';
     el.style.border = '1px solid rgba(201, 119, 46, 0.4)';
@@ -208,7 +247,24 @@ export class DebugHud {
     if (nowMs - this.lastUpdateMs < 1000 / REFRESH_HZ) return;
     this.lastUpdateMs = nowMs;
 
-    const text = this.compose(inputs);
+    // Freshness bookkeeping runs on every refresh, cheap scalar compares.
+    const frameT = inputs.engine.lastFrameT;
+    if (frameT !== this.lastSeenFrameT) {
+      this.lastSeenFrameT = frameT;
+      this.frameTChangedWallMs = nowMs;
+    }
+    const d = inputs.engine.debugState;
+    const aim = d.lastAim;
+    const moveKey =
+      d.lastMove === null || aim === null
+        ? ''
+        : `${d.lastMove}|${aim.x.toFixed(3)},${aim.y.toFixed(3)},${aim.z.toFixed(3)}`;
+    if (moveKey !== this.lastMoveKey) {
+      this.lastMoveKey = moveKey;
+      this.lastMoveWallMs = nowMs;
+    }
+
+    const text = this.compose(inputs, nowMs);
     if (text !== this.lastText) {
       this.lastText = text;
       this.textEl.textContent = text;
@@ -257,9 +313,15 @@ export class DebugHud {
     );
   }
 
-  private compose(inputs: DebugHudInputs): string {
+  private compose(inputs: DebugHudInputs, nowMs: number): string {
     const { engine, frame, profile, parallax, parallaxYawSign } = inputs;
     const lines: string[] = [];
+
+    // Input freshness first: a frozen arm block below must be attributable
+    // to dead input at a glance, not mistaken for a held pose.
+    lines.push(
+      formatInputLine(this.lastSeenFrameT !== null, nowMs - this.frameTChangedWallMs),
+    );
 
     // Per-arm phase machines. The debugState children are reused in place
     // by the engine: fields are read into strings here and never retained.
@@ -281,7 +343,14 @@ export class DebugHud {
       lines.push('aim  - (no move emitted yet)');
       lines.push('  raw -');
     }
-    lines.push(`last move  ${d.lastMove ?? '-'}`);
+    // The move line carries its age once it is a second old: the readout
+    // legitimately persists between moves and needed a way to say so.
+    const ageMs = nowMs - this.lastMoveWallMs;
+    const ageSuffix =
+      d.lastMove !== null && Number.isFinite(ageMs) && ageMs >= 1000
+        ? ` (${(ageMs / 1000).toFixed(0)}s ago)`
+        : '';
+    lines.push(`last move  ${d.lastMove ?? '-'}${ageSuffix}`);
 
     // Engine state, live learned reach, and the profile's calibrated seeds
     // (shoulder-width units; "-" for a profile predating the reach fields).

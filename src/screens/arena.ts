@@ -216,6 +216,8 @@ const SHADOW_MAP_FULL = 1024;
 const FRAME_STALE_SEC = 1.0;
 /** Debug aim ray length, meters (comfortably past the enemy stations). */
 const AIM_RAY_LENGTH = 12;
+/** Half-height of the vertical origin tick on the debug aim ray (world m). */
+const AIM_RAY_TICK = 0.08;
 /** Debug aim ray color: ember gold, firelight palette. */
 const AIM_RAY_COLOR = 0xe0a458;
 
@@ -370,9 +372,12 @@ export class ArenaScreen implements Screen {
   // deterministic position-only aim can be verified before punching (same
   // screen position, same ray, same fire). One line geometry updated in
   // place; zero per-frame allocation; hidden whenever the HUD is closed.
-  private aimRay: THREE.Line | null = null;
+  private aimRay: THREE.LineSegments | null = null;
   private aimRayGeom: THREE.BufferGeometry | null = null;
-  private readonly aimRayPositions = new Float32Array(6);
+  /** Two segments: the ray itself, plus a short vertical origin tick so the
+   *  ray stays attributable to the hand even when no glove renders there
+   *  (review r5p2). */
+  private readonly aimRayPositions = new Float32Array(12);
   private readonly aimRayMapped: MappedEvent = {
     origin: new THREE.Vector3(),
     direction: new THREE.Vector3(),
@@ -1141,7 +1146,7 @@ export class ArenaScreen implements Screen {
   private buildAimRay(scene: THREE.Scene): void {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(this.aimRayPositions, 3));
-    const line = new THREE.Line(
+    const line = new THREE.LineSegments(
       geom,
       new THREE.LineBasicMaterial({
         color: AIM_RAY_COLOR,
@@ -1188,6 +1193,14 @@ export class ArenaScreen implements Screen {
     p[3] = m.origin.x + m.direction.x * AIM_RAY_LENGTH;
     p[4] = m.origin.y + m.direction.y * AIM_RAY_LENGTH;
     p[5] = m.origin.z + m.direction.z * AIM_RAY_LENGTH;
+    // Origin tick: a short vertical dash through the launch point, so the
+    // ray reads as anchored at the hand rather than a free wire in space.
+    p[6] = m.origin.x;
+    p[7] = m.origin.y - AIM_RAY_TICK;
+    p[8] = m.origin.z;
+    p[9] = m.origin.x;
+    p[10] = m.origin.y + AIM_RAY_TICK;
+    p[11] = m.origin.z;
     const attr = this.aimRayGeom?.getAttribute('position');
     if (attr) attr.needsUpdate = true;
     ray.visible = true;

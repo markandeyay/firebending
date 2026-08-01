@@ -13,6 +13,8 @@ import {
   aimAnglesDeg,
   extensionBar,
   formatArmDebug,
+  formatInputLine,
+  INPUT_STALE_AFTER_MS,
   signedFixed,
 } from '../src/ui/debugHud';
 import type { ArmDebugState } from '../src/gestures/phaseEngine';
@@ -126,6 +128,32 @@ describe('formatArmDebug', () => {
       ...formatArmDebug('R', arm({ zone: 'NONE' })),
     ];
     for (const line of lines) expect(line).not.toContain('—');
+  });
+
+  it('suppresses the duration on zero-duration entry edges', () => {
+    const [, line2] = formatArmDebug(
+      'L',
+      arm({
+        lastTransition: { from: 'RETRACTED', to: 'EXTENDING', atT: 900, tookMs: 0 },
+      }),
+    );
+    expect(line2).toBe('  RETRACTED>EXTENDING');
+  });
+});
+
+describe('formatInputLine', () => {
+  it('reads live while frames are fresh', () => {
+    expect(formatInputLine(true, 0)).toBe('input  live');
+    expect(formatInputLine(true, INPUT_STALE_AFTER_MS - 1)).toBe('input  live');
+  });
+
+  it('reads STALE with the age once frames stop', () => {
+    expect(formatInputLine(true, INPUT_STALE_AFTER_MS)).toBe('input  STALE 0.6s');
+    expect(formatInputLine(true, 12_340)).toBe('input  STALE 12.3s');
+  });
+
+  it('renders the before-any-frames placeholder', () => {
+    expect(formatInputLine(false, Infinity)).toBe('input  - (no frames yet)');
   });
 });
 
