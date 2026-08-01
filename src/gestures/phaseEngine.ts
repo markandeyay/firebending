@@ -129,18 +129,28 @@ import type { MotionProfile } from './profile';
 
 /**
  * Two-hand pairing window: twin-cannon extended edges and rising-flame arm
- * completions must land within this of each other. At ~14 fps this is ~3
- * frames of slack between the arms, generous for a deliberate two-hand
- * move, tight enough that two unrelated one-arm motions rarely pair.
+ * completions must land within this of each other. RETUNED 250 -> 400 by
+ * the phase-eval pass (tools/phaseEval.ts) against the 2026-07-31 drill:
+ * the recording's REAL pose samples arrive at only ~3.8 Hz (median gap 267
+ * ms, p95 333 ms), so the two arms' edges routinely land ONE pose sample
+ * apart even in a perfectly joint thrust (measured: twin-cannon rep 1
+ * edges 283 ms apart, rising-flame rep 4 completions 334 ms apart, both
+ * refused at 250). 400 covers a full sample gap plus jitter while staying
+ * under two gaps, so two unrelated one-arm motions still rarely pair.
  */
-export const PAIR_WINDOW_MS = 250;
+export const PAIR_WINDOW_MS = 400;
 
 /**
  * Rising-flame per-arm sweep budget: the wrist must go from the HIP zone to
  * ABOVE_SHOULDER within this. A position sequence with a time sanity cap,
- * not a velocity: at 14 fps the drill's rising reps span 4..9 samples.
+ * not a velocity. RETUNED 600 -> 900 by the phase-eval pass against the
+ * 2026-07-31 drill: with real pose samples at ~3.8 Hz the HIP-to-ABOVE
+ * transit spans up to two sample gaps plus frame quantization (measured:
+ * rising rep 1 completed 618 ms after the wrist's last HIP sample and was
+ * refused at 600). 900 admits every recorded sweep and still demands the
+ * whole hip-to-overhead arc inside one second.
  */
-export const MAX_SWEEP_MS = 600;
+export const MAX_SWEEP_MS = 900;
 
 /**
  * A pose sample older than this (vs frame time) counts as a tracking stall
@@ -169,11 +179,30 @@ export const BREATH_STILL_RADIUS = 0.25;
  * cannot tell it from a punch. 150 ms later the two have diverged
  * completely: a punch is still out in the chest band at ~1.0 extension,
  * the drop has plunged into the HIP zone past the overdrive cap. The cost
- * is ~150 ms plus one frame of jab latency (deliberate trade after five
- * failed velocity rounds: a spurious fireball on every arms-drop reads
- * broken; a small uniform delay reads snappy-enough). Tunable.
+ * is the settle span plus one frame of jab latency (deliberate trade after
+ * five failed velocity rounds: a spurious fireball on every arms-drop reads
+ * broken; a small uniform delay reads snappy-enough).
+ *
+ * RETUNED 150 -> 250 by the phase-eval pass against the 2026-07-31 drill,
+ * pinched between two hard constraints:
+ * - LOWER BOUND: the release gate is only meaningful if it runs on a pose
+ *   position measured AFTER the crossing, and the recording's real pose
+ *   samples arrive at ~3.8 Hz (median gap 267 ms). At 150 ms the release
+ *   usually re-read the very sample that crossed the threshold, so the
+ *   hanging-arm rejection never saw the plunge (measured false jab on the
+ *   alt-jab take's arms-drop at 14254 ms, released off the held mid-drop
+ *   sample). The first frame past a 250 ms settle lands at >= 285 ms at
+ *   every tested rate, past the median gap.
+ * - UPPER BOUND (framerate independence, caught by the 14 fps leg of the
+ *   stress harness): the jab must release BEFORE its own dwell promotes to
+ *   a stream at EXTEND_HOLD_MS (350 ms), i.e. a frame must exist in
+ *   [settle, 350) at any supported rate. Frames land on multiples of the
+ *   period, so this is guaranteed only for settle <= 350 minus the slowest
+ *   supported frame period (100 ms at the 10 fps gate): 250. At 300 the
+ *   14 fps grid (multiples of 71.4 ms) skipped straight from 286 to 357
+ *   and held-out jabs were silently swallowed by their stream upgrade.
  */
-export const JAB_SETTLE_MS = 150;
+export const JAB_SETTLE_MS = 250;
 
 /**
  * Extension overdrive cap at jab release: forward punches normalize to

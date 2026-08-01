@@ -8,9 +8,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   CHEST_HALF_WIDTH,
-  HIP_ZONE_MARGIN,
+  HIP_ZONE_TOP_FRACTION,
   LATERAL_INNER_MIN,
   LATERAL_OUTER_MIN,
+  SHOULDER_LINE_Y,
   isAboveShoulder,
   isChest,
   isHip,
@@ -22,7 +23,7 @@ const HIP_Y = 1.15625;
 
 describe('zoneOf', () => {
   it('classifies the canonical positions', () => {
-    expect(zoneOf({ x: 0, y: -0.1 }, HIP_Y)).toBe('ABOVE_SHOULDER');
+    expect(zoneOf({ x: 0, y: SHOULDER_LINE_Y - 0.1 }, HIP_Y)).toBe('ABOVE_SHOULDER');
     expect(zoneOf({ x: -0.3, y: 0.5 }, HIP_Y)).toBe('CHEST');
     expect(zoneOf({ x: 0, y: 1.1 }, HIP_Y)).toBe('HIP');
     expect(zoneOf({ x: 1.0, y: 0.5 }, HIP_Y)).toBe('LATERAL_INNER');
@@ -32,22 +33,23 @@ describe('zoneOf', () => {
   });
 
   it('height wins over laterality (documented priority)', () => {
-    expect(zoneOf({ x: 1.5, y: -0.2 }, HIP_Y)).toBe('ABOVE_SHOULDER');
+    expect(zoneOf({ x: 1.5, y: SHOULDER_LINE_Y - 0.1 }, HIP_Y)).toBe('ABOVE_SHOULDER');
     expect(zoneOf({ x: 1.5, y: 1.2 }, HIP_Y)).toBe('HIP');
   });
 
-  it('respects the hip margin: slightly above the hip line is still HIP', () => {
-    const justAbove = HIP_Y - HIP_ZONE_MARGIN + 0.01;
-    const wellAbove = HIP_Y - HIP_ZONE_MARGIN - 0.01;
-    expect(zoneOf({ x: 0, y: justAbove }, HIP_Y)).toBe('HIP');
-    expect(zoneOf({ x: 0, y: wellAbove }, HIP_Y)).toBe('CHEST');
+  it('respects the hip band top: above the hip line but inside the band is HIP', () => {
+    const bandTop = HIP_Y * HIP_ZONE_TOP_FRACTION;
+    expect(zoneOf({ x: 0, y: bandTop + 0.01 }, HIP_Y)).toBe('HIP');
+    expect(zoneOf({ x: 0, y: bandTop - 0.01 }, HIP_Y)).toBe('CHEST');
   });
 });
 
 describe('predicates', () => {
   it('isAboveShoulder / isHip / isChest agree with zoneOf on their bands', () => {
-    expect(isAboveShoulder({ x: 0, y: -0.01 })).toBe(true);
-    expect(isAboveShoulder({ x: 0, y: 0.01 })).toBe(false);
+    // The ABOVE_SHOULDER boundary sits at SHOULDER_LINE_Y (0.25 sw above
+    // the anatomical shoulder line since the 2026-07-31 drill retune).
+    expect(isAboveShoulder({ x: 0, y: SHOULDER_LINE_Y - 0.01 })).toBe(true);
+    expect(isAboveShoulder({ x: 0, y: SHOULDER_LINE_Y + 0.01 })).toBe(false);
     expect(isHip({ x: 0, y: HIP_Y }, HIP_Y)).toBe(true);
     expect(isHip({ x: 0, y: 0.5 }, HIP_Y)).toBe(false);
     expect(isChest({ x: 0.5, y: 0.5 }, HIP_Y)).toBe(true);

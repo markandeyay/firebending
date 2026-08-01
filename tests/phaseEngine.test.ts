@@ -123,9 +123,12 @@ describe('jab-blast', () => {
     // Aim: normalized, positional, forward component toward the enemy.
     expect(Math.hypot(jab.aim.x, jab.aim.y, jab.aim.z)).toBeCloseTo(1, 5);
     expect(jab.aim.z).toBeLessThan(0);
-    // Origin is the POSE wrist (screen space) at release.
-    expect(jab.origin.x).toBeCloseTo(0.61, 5);
-    expect(jab.origin.y).toBeCloseTo(0.5, 5);
+    // Origin is the POSE wrist (screen space) at release. With the
+    // 2026-07-31 drill retune the settle spans a real pose sample gap
+    // (JAB_SETTLE_MS 250), so at 10 fps this trajectory releases on the
+    // t=1000 frame, where the wrist is back at guard.
+    expect(jab.origin.x).toBeCloseTo(GUARD_R.x, 5);
+    expect(jab.origin.y).toBeCloseTo(GUARD_R.y, 5);
     expect(engine.debugState.lastMove).toBe('jab-blast');
   });
 

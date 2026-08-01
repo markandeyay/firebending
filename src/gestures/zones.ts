@@ -40,18 +40,39 @@ export type LateralBand = 'center' | 'inner' | 'outer';
 // ---------------------------------------------------------------------------
 
 /**
- * The shoulder line: body y 0 by construction. Points with y below this
- * (numerically negative; screen-up) are ABOVE_SHOULDER.
+ * The ABOVE_SHOULDER boundary. The shoulder line itself is body y 0 by
+ * construction; the boundary sits 0.25 sw ABOVE it (negative y) rather
+ * than on it. RETUNED 0 -> -0.25 by the phase-eval pass (tools/
+ * phaseEval.ts) against the 2026-07-31 drill: the user's twin-cannon
+ * chamber holds the joined wrists ON the shoulder line (measured body y
+ * -0.16..+0.35 across chamber samples), so a boundary at 0 flickered the
+ * chamber into ABOVE_SHOULDER and broke the CHEST-zone hold; deliberate
+ * raises are far clear of the moved boundary (rising-flame sweep tops
+ * measure y -0.9..-1.4).
  */
-export const SHOULDER_LINE_Y = 0;
+export const SHOULDER_LINE_Y = -0.25;
 
 /**
- * The HIP zone starts this far ABOVE the hip line (hipY - margin): wrists
- * chambered slightly above the actual hips still count as at the hips.
- * 0.15 sw reproduces the legacy BREATH_HIP_MARGIN (0.05 screen units at the
- * ~0.32 reference shoulder width) in body units.
+ * The HIP zone starts at this FRACTION of the way down from the shoulder
+ * line to the hip line: points with y > hipY * fraction are in the hip
+ * band. RETUNED by the phase-eval pass (tools/phaseEval.ts) against the
+ * 2026-07-31 drill, replacing the original absolute margin (hipY - 0.15
+ * sw, the legacy BREATH_HIP_MARGIN in body units), for two measured
+ * reasons:
+ * - The user's real breath-charge chamber holds the fists 0.20..0.31 sw
+ *   ABOVE the hip line and the rising-flame start posture rests the
+ *   wrists 0.4..0.5 sw above it (both on a ~2.0 sw hip line), so the
+ *   0.15 band contained neither and both moves scored zero.
+ * - An absolute sw margin does not transfer between body proportions:
+ *   0.5 sw is a quarter of the drill body's 2.0 sw torso but nearly half
+ *   of a shorter-torsoed body's. A fraction of the torso length scales
+ *   with the player.
+ * At 0.75 the drill's band starts around y 1.5 (contains the measured
+ * chamber at 1.64..1.74 and the rising start at 1.43..1.62) while every
+ * recorded thrust-family completion stays clear above it (jab / twin
+ * releases measure y 0.6..1.1).
  */
-export const HIP_ZONE_MARGIN = 0.15;
+export const HIP_ZONE_TOP_FRACTION = 0.75;
 
 /**
  * Central band half-width for CHEST: |x| within this is central. 0.75 sw
@@ -69,12 +90,17 @@ export const LATERAL_INNER_MIN = 0.75;
 
 /**
  * Outer lateral band: |x| beyond this is a full sideways arm. The whip
- * fires on the inner -> outer crossing. A straight lateral arm reaches
- * roughly wrist |x| ~2 sw (hanging-arm drill reach 1.6..2.2 measured from
- * the shoulder, plus the half-shoulder offset of the shoulder itself), so
- * 1.30 demands a real swing while staying well inside the reachable range.
+ * fires on the inner -> outer crossing. RETUNED 1.30 -> 1.10 by the
+ * phase-eval pass (tools/phaseEval.ts) against the 2026-07-31 drill: the
+ * user's grip holds park the wrist at outward 0.79..1.00 sw, and the whip
+ * swing is a fast down-and-out arc whose apex falls BETWEEN the
+ * recording's ~3.8 Hz real pose samples, so the on-sample swing extremes
+ * only measure 1.06..1.33 sw; at 1.30 two of five recorded swings never
+ * produced an on-sample outer crossing. 1.10 sits a 0.10 sw margin above
+ * the loudest recorded hold and below every recorded swing extreme but
+ * one.
  */
-export const LATERAL_OUTER_MIN = 1.3;
+export const LATERAL_OUTER_MIN = 1.1;
 
 // ---------------------------------------------------------------------------
 // Predicates
@@ -85,9 +111,10 @@ export function isAboveShoulder(p: BodyPoint): boolean {
   return p.y < SHOULDER_LINE_Y;
 }
 
-/** In the hip band: at or below hipY - HIP_ZONE_MARGIN (y grows down). */
+/** In the hip band: below HIP_ZONE_TOP_FRACTION of the torso (y grows
+ *  down; hipY is the hip line in body units). */
 export function isHip(p: BodyPoint, hipY: number): boolean {
-  return p.y > hipY - HIP_ZONE_MARGIN;
+  return p.y > hipY * HIP_ZONE_TOP_FRACTION;
 }
 
 /** Central band between the shoulder line and the hip band. */

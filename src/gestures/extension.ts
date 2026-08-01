@@ -85,10 +85,16 @@ export const EXT_RETRACTED_MAX = 0.4;
  * Above this the arm is EXTENDED. The design starting point was 0.80, but
  * with maxReach = calibrated punch peak (~0.85 sw) the user's softer jab
  * rep maxima (0.59..0.68 sw) normalize to only ~0.70..0.80, so 0.80 would
- * miss them; 0.70 admits every recorded rep. Tunable: a downstream eval
- * pass retunes this against the recordings.
+ * miss them. RETUNED 0.70 -> 0.65 by the phase-eval pass
+ * (tools/phaseEval.ts) against the 2026-07-31 drill: the softest recorded
+ * rep peaks (jab-right reps 1..2 at 0.59..0.61 sw) normalize to 0.69..0.72
+ * against the 0.85 prior but drop to 0.63..0.66 once the per-arm learner
+ * has absorbed the player's hardest punch (0.86..0.93 sw), and at the
+ * recording's ~3.8 Hz real pose cadence a 0.65 threshold also catches the
+ * first out-going sample of a soft rep one sample (~270 ms) earlier.
+ * Recorded guard tops out at 0.42 normalized, far below.
  */
-export const EXT_EXTENDED_MIN = 0.7;
+export const EXT_EXTENDED_MIN = 0.65;
 
 /**
  * Re-arm hysteresis: after reaching EXTENDED the arm counts as RETRACTED
@@ -100,9 +106,20 @@ export const EXT_REARM_MAX = 0.5;
 /**
  * A RETRACTED -> EXTENDED traversal slower than this is a REACH, not a jab:
  * the machine still transitions to EXTENDED but marks the entry slow so
- * nothing fires and the dwell cannot promote to a stream.
+ * nothing fires and the dwell cannot promote to a stream. RETUNED 400 ->
+ * 650 by the phase-eval pass against the 2026-07-31 drill: the recording's
+ * REAL pose samples arrive at only ~3.8 Hz (median gap 267 ms, p95 333 ms),
+ * so a chamber-to-punch traversal whose chamber sample reads just above
+ * EXT_RETRACTED_MAX spans up to two sample gaps (~570 ms) before the
+ * extended sample lands, and frame quantization adds up to one frame
+ * period on top (100 ms at the 10 fps support floor; the framerate stress
+ * harness measured the same recorded rep at 583..643 ms depending on the
+ * frame grid, so 600 dropped it at exactly 14 fps). 650 covers two gaps
+ * plus a frame at every supported rate while still rejecting the drill's
+ * slow deliberate raises (slowest measured true reach: 816 ms,
+ * twin-cannon rep 1 left arm).
  */
-export const MAX_THRUST_MS = 400;
+export const MAX_THRUST_MS = 650;
 
 /**
  * Forward-punch reach prior, shoulder-width units. The DRILL-MEASURED

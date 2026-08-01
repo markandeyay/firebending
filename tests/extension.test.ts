@@ -119,9 +119,11 @@ describe('phase machine: transitions and gating', () => {
   });
 
   it('sanity: the slow/fast boundary is the exported window', () => {
-    expect(MAX_THRUST_MS).toBe(400);
+    // Values retuned by the 2026-07-31 phase-eval pass (tools/phaseEval.ts)
+    // against the real drill recording; see the constants' doc comments.
+    expect(MAX_THRUST_MS).toBe(650);
     expect(EXT_RETRACTED_MAX).toBeCloseTo(0.4, 10);
-    expect(EXT_EXTENDED_MIN).toBeCloseTo(0.7, 10);
+    expect(EXT_EXTENDED_MIN).toBeCloseTo(0.65, 10);
     expect(EXT_REARM_MAX).toBeCloseTo(0.5, 10);
   });
 
