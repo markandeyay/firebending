@@ -2,7 +2,7 @@
  * Arena screen (T052 integration): the full playable loop. Wires together
  * every Phase 3-5 system behind the ScreenManager Screen interface:
  *
- *   tracking (LandmarkSource -> FilteredSource) -> MoveEngine -> events
+ *   tracking (LandmarkSource -> FilteredSource) -> PhaseMoveEngine -> events
  *     -> MoveEffects (fire VFX) + CombatSystem (damage) + AudioHooks
  *   ConstructManager + rapier physics, CameraRig (head parallax + travels),
  *   Director (kill -> travel -> next chain), HUD (Breath, seal, numbers),
@@ -50,13 +50,16 @@ import type {
   FrameListener,
   LandmarkFrame,
   LandmarkSource,
+  Vec3,
 } from '../tracking/types';
 import { FilteredSource } from '../tracking/filters';
 import { LatencyMeter, RateMeter } from '../tracking/meters';
 import type { PredictedHands } from '../tracking/predict';
 import type { LiveRateStats } from '../tracking/liveSource';
 import type { ReplaySource } from '../tracking/replaySource';
-import { MoveEngine, type MoveEvent } from '../gestures/moves';
+import type { MoveEvent } from '../gestures/moves';
+import { PhaseMoveEngine } from '../gestures/phaseEngine';
+import type { Handedness } from '../gestures/poses';
 import {
   velocityScaleFor,
   type CalibrationStats,
@@ -83,7 +86,7 @@ import { configureRenderer } from '../game/renderer';
 import { createPostPipeline, type PostPipeline } from '../game/post';
 import { Director } from '../game/director';
 import { FireSystem, type AmbientFlameHandle } from '../vfx/fire';
-import { MoveEffects } from '../vfx/moveEffects';
+import { MoveEffects, screenToWorld, type MappedEvent } from '../vfx/moveEffects';
 import { GloveSystem } from '../vfx/gloves';
 import { WebcamPip } from '../ui/pip';
 import { ImpactSystem } from '../vfx/impact';
@@ -134,15 +137,19 @@ export interface ArenaContext {
   stats: CalibrationStats;
   audio?: AudioHooks;
   /**
-   * Explicit velocity-scale override. The replay path needs the One Euro
-   * compensation factor (REPLAY_VELOCITY_SCALE, see movesDebug.ts); live
-   * play omits this and uses velocityScaleFor(stats.wristSpan,
-   * stats.shoulderWidth) (real pose shoulder width preferred).
+   * Explicit velocity-scale override, kept for call-site parity with the
+   * legacy engine (the replay path passes REPLAY_VELOCITY_SCALE, see
+   * movesDebug.ts); live play omits this and uses
+   * velocityScaleFor(stats.wristSpan, stats.shoulderWidth). The phase
+   * engine ACCEPTS AND IGNORES the value: its body frame is scale
+   * invariant, so no velocity compensation exists to scale.
    */
   velocityScale?: number;
   /**
    * Per-player motion profile from the calibration punch/push steps. Fed to
-   * the MoveEngine; absent (replay paths) DEFAULT_PROFILE applies.
+   * the PhaseMoveEngine, which reads only the optional per-arm reach seeds
+   * (maxReachLeftSw/maxReachRightSw); absent fields and absent profiles
+   * (replay paths) fall back to the engine's forward-punch prior.
    */
   profile?: MotionProfile;
   /**
@@ -207,6 +214,10 @@ const BRAZIER_FLAME_SCALE = 0.8;
 const SHADOW_MAP_FULL = 1024;
 /** No landmark frame for this long counts as both hands untracked (T070). */
 const FRAME_STALE_SEC = 1.0;
+/** Debug aim ray length, meters (comfortably past the enemy stations). */
+const AIM_RAY_LENGTH = 12;
+/** Debug aim ray color: ember gold, firelight palette. */
+const AIM_RAY_COLOR = 0xe0a458;
 
 const UP = new THREE.Vector3(0, 1, 0);
 /** Scratch for construct wound-smoke emission (single threaded). */
@@ -314,7 +325,7 @@ export class ArenaScreen implements Screen {
   private gloves: GloveSystem | null = null;
   private pip: WebcamPip | null = null;
   private impacts: ImpactSystem | null = null;
-  private engine: MoveEngine | null = null;
+  private engine: PhaseMoveEngine | null = null;
   private combat: CombatSystem | null = null;
   private hud: HUD | null = null;
   private glow: EmpowerGlow | null = null;
@@ -353,6 +364,20 @@ export class ArenaScreen implements Screen {
   // Debug HUD (D key): engine internals overlay, live and replay alike.
   private debugHud: DebugHud | null = null;
   private ctxProfile: MotionProfile | null = null;
+
+  // Debug aim ray (D HUD only): a thin ember line from the would-be fire
+  // origin along the engine's CURRENT positional aim preview, so the
+  // deterministic position-only aim can be verified before punching (same
+  // screen position, same ray, same fire). One line geometry updated in
+  // place; zero per-frame allocation; hidden whenever the HUD is closed.
+  private aimRay: THREE.Line | null = null;
+  private aimRayGeom: THREE.BufferGeometry | null = null;
+  private readonly aimRayPositions = new Float32Array(6);
+  private readonly aimRayMapped: MappedEvent = {
+    origin: new THREE.Vector3(),
+    direction: new THREE.Vector3(),
+  };
+  private readonly aimPreview: Vec3 = { x: 0, y: 0, z: 0 };
 
   // Rate/latency instrumentation (quality round Phase 1): renderHz is the
   // game render loop cadence; photonToFire is fire-spawn wallclock minus the
@@ -484,12 +509,18 @@ export class ArenaScreen implements Screen {
     }
 
     // --- Gesture engine ----------------------------------------------------
-    // Real shoulder width (body pose) preferred over the wrist-span proxy.
+    // The GAME runs the position phase-machine engine (2026-07-31 rebuild);
+    // the legacy velocity MoveEngine stays in-tree only as the eval baseline
+    // (movesDebug.ts). velocityScale is still computed for construction
+    // parity with the legacy call (replay paths pass REPLAY_VELOCITY_SCALE
+    // through ctx): the phase engine accepts and ignores it, because
+    // positions in the scale-invariant body frame need no velocity
+    // compensation. The profile feeds the optional per-arm reach seeds.
     const velocityScale =
       context.velocityScale ??
       velocityScaleFor(context.stats.wristSpan, context.stats.shoulderWidth);
     this.ctxProfile = context.profile ?? null;
-    this.engine = new MoveEngine({
+    this.engine = new PhaseMoveEngine({
       velocityScale,
       ...(context.profile ? { profile: context.profile } : {}),
     });
@@ -633,11 +664,14 @@ export class ArenaScreen implements Screen {
     // First-run hint (live flow only): fade in on arrival, out after 6 s.
     if (context.firstRun && !context.bare) this.buildFirstRunChip(root);
 
-    // Debug HUD overlay (D key), hidden until toggled.
+    // Debug HUD overlay (D key), hidden until toggled, plus the in-scene
+    // debug aim ray that renders only while the HUD is open.
     this.debugHud = new DebugHud(root);
+    this.buildAimRay(scene);
 
     // Runtime keys: P toggles the parallax yaw sign (Section 8 verification),
-    // D toggles the debug HUD (and the engine's near-miss diagnostics).
+    // D toggles the debug HUD (debugEnabled is an inert compat flag on the
+    // phase engine, kept in sync so any future heavier tracing stays gated).
     this.onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'p' || e.key === 'P') {
         const rig = this.rig;
@@ -666,7 +700,7 @@ export class ArenaScreen implements Screen {
           eng.debugEnabled = false;
         } else {
           hud.show();
-          eng.debugEnabled = true; // near-miss tracing only while open
+          eng.debugEnabled = true; // inert compat flag; see above
         }
       }
     };
@@ -736,6 +770,13 @@ export class ArenaScreen implements Screen {
     this.toastEl = null;
     this.debugHud?.dispose();
     this.debugHud = null;
+    if (this.aimRay) {
+      this.aimRay.removeFromParent();
+      (this.aimRay.material as THREE.Material).dispose();
+      this.aimRay = null;
+    }
+    this.aimRayGeom?.dispose();
+    this.aimRayGeom = null;
     this.ctxProfile = null;
     this.liveProbe = null;
     delete (window as unknown as { __FB_RATES?: unknown }).__FB_RATES;
@@ -1012,6 +1053,8 @@ export class ArenaScreen implements Screen {
     this.pip?.render();
 
     // Debug HUD: pulls engine/rig state; internally throttled to ~10 Hz.
+    // The aim ray tracks at render rate while the HUD is open (a 10 Hz ray
+    // would visibly lag the arm) and hides the moment it closes.
     if (this.debugHud && this.debugHud.visible && this.engine) {
       this.debugHud.update(performance.now(), {
         engine: this.engine,
@@ -1021,6 +1064,9 @@ export class ArenaScreen implements Screen {
         parallaxYawSign: rig.parallaxYawSign,
         rates: this.composeRates(),
       });
+      this.updateAimRay(camera);
+    } else if (this.aimRay) {
+      this.aimRay.visible = false;
     }
 
     if (this.post) this.post.render(rawDt);
@@ -1083,6 +1129,68 @@ export class ArenaScreen implements Screen {
     }
 
     hud.update(rawDt);
+  }
+
+  // -------------------------------------------------------------------------
+  // Debug aim ray (D HUD)
+  // -------------------------------------------------------------------------
+
+  /** One thin ember line, built once and updated in place (see the field
+   *  block above). Added straight to the scene; invisible until the HUD
+   *  opens, so it costs nothing in normal play. */
+  private buildAimRay(scene: THREE.Scene): void {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(this.aimRayPositions, 3));
+    const line = new THREE.Line(
+      geom,
+      new THREE.LineBasicMaterial({
+        color: AIM_RAY_COLOR,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+      }),
+    );
+    line.name = 'debug-aim-ray';
+    line.visible = false;
+    line.frustumCulled = false; // endpoints move every frame; skip the bounds
+    scene.add(line);
+    this.aimRay = line;
+    this.aimRayGeom = geom;
+  }
+
+  /**
+   * Point the debug ray along the CURRENT would-be aim: the engine's
+   * positional aim preview for the firing arm (the more extended one),
+   * launched from that arm's pose wrist through the same screenToWorld
+   * mapping the VFX layer spawns fire with, so the ray shows exactly where
+   * fire WILL go before the punch commits. Without a pose sample the ray
+   * hides (no wrist, no origin). Zero per-frame allocation: the preview
+   * vector, mapped event and position buffer are all reused.
+   */
+  private updateAimRay(camera: THREE.PerspectiveCamera): void {
+    const ray = this.aimRay;
+    const engine = this.engine;
+    if (!ray) return;
+    const pose = this.latestFrame?.pose ?? null;
+    if (!engine || pose === null) {
+      ray.visible = false;
+      return;
+    }
+    const d = engine.debugState;
+    const hand: Handedness = d.right.extension >= d.left.extension ? 'right' : 'left';
+    const wrist = hand === 'right' ? pose.right.wrist : pose.left.wrist;
+    const aim = engine.previewAim(hand, this.aimPreview);
+    const m = screenToWorld(wrist, aim, camera, this.aimRayMapped);
+    const p = this.aimRayPositions;
+    p[0] = m.origin.x;
+    p[1] = m.origin.y;
+    p[2] = m.origin.z;
+    p[3] = m.origin.x + m.direction.x * AIM_RAY_LENGTH;
+    p[4] = m.origin.y + m.direction.y * AIM_RAY_LENGTH;
+    p[5] = m.origin.z + m.direction.z * AIM_RAY_LENGTH;
+    const attr = this.aimRayGeom?.getAttribute('position');
+    if (attr) attr.needsUpdate = true;
+    ray.visible = true;
   }
 
   // -------------------------------------------------------------------------

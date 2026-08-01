@@ -34,6 +34,7 @@ import {
   signature,
   type Trajectory,
 } from './phaseHelpers';
+import { PhaseMoveEngine } from '../src/gestures/phaseEngine';
 
 // ---------------------------------------------------------------------------
 // Trajectories
@@ -374,5 +375,30 @@ describe('drop-in surface', () => {
     });
     expect(engine.learnedReach.left).toBeCloseTo(0.9, 10);
     expect(engine.learnedReach.right).toBeCloseTo(1.0, 10);
+  });
+
+  it('previewAim reproduces the emitted aim on the release frame (debug ray)', () => {
+    // The arena's debug aim ray draws previewAim; it must equal the aim the
+    // emit path produces from the same positions, or the ray would lie.
+    const engine = new PhaseMoveEngine();
+    const out = { x: 0, y: 0, z: 0 };
+    for (const frame of sampleFrames(jabTraj, 1600, 10)) {
+      const jab = engine.update(frame).find((e) => e.move === 'jab-blast');
+      if (jab) {
+        engine.previewAim('right', out);
+        expect(out.x).toBeCloseTo(jab.aim.x, 10);
+        expect(out.y).toBeCloseTo(jab.aim.y, 10);
+        expect(out.z).toBeCloseTo(jab.aim.z, 10);
+        return;
+      }
+    }
+    throw new Error('no jab fired');
+  });
+
+  it('previewAim falls straight ahead before the body frame is ready', () => {
+    const engine = new PhaseMoveEngine();
+    const out = { x: 9, y: 9, z: 9 };
+    engine.previewAim('left', out);
+    expect(out).toEqual({ x: 0, y: 0, z: -1 });
   });
 });

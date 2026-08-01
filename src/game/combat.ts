@@ -130,8 +130,15 @@ export const WALL_TOP = 3.0;
 
 /** A pending projectile empowerment lapses after this long (ms). */
 const PENDING_EMPOWER_TTL_MS = 3000;
-/** Fallback dt for a sustain tick that arrives with no prior tick clock. */
-const DEFAULT_TICK_MS = 1000 / 30;
+/**
+ * Fallback dt for a sustain tick that arrives with NO prior tick clock (a
+ * defensive path: the engine always emits sustain-start first, and every
+ * later tick derives dt from measured timestamps). Was one 30 fps frame
+ * (33 ms), which silently undercounted the first tick's damage on the real
+ * ~14 fps capture cadence; 70 ms matches one frame at that measured
+ * cadence, keeping the fallback frame-rate-honest.
+ */
+const DEFAULT_TICK_MS = 70;
 /** Sustain tick dt clamp, seconds (a long hitch must not dump damage). */
 const MAX_TICK_SEC = 0.25;
 
@@ -503,9 +510,11 @@ export class CombatSystem {
   /**
    * Apply one sustained-beam tick (the fire-stream ray) against
    * the constructs, dealing damage * dt. Damage per second comes from
-   * DAMAGE_TABLE; dt derives from consecutive tick timestamps (first tick
-   * without a preceding sustain-start assumes one 30 fps frame). Returns the
-   * damage actually dealt (0 on miss), which tests use directly.
+   * DAMAGE_TABLE; dt derives from consecutive tick timestamps, so any
+   * capture rate is counted honestly. Only a first tick with no preceding
+   * sustain-start falls back to DEFAULT_TICK_MS (one frame at the measured
+   * ~14 fps cadence). Returns the damage actually dealt (0 on miss), which
+   * tests use directly.
    */
   applySustainTick(e: MoveEvent): number {
     this.refreshPose();

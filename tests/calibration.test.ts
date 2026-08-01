@@ -14,8 +14,14 @@ import {
   VELOCITY_SCALE_MAX,
   VELOCITY_SCALE_MIN,
   captureCalibration,
+  poseReachSw,
+  reachSeedSw,
   velocityScaleFor,
 } from '../src/gestures/calibrationStats';
+import {
+  MAX_REACH_LEARN_MAX_SW,
+  MAX_REACH_LEARN_MIN_SW,
+} from '../src/gestures/extension';
 import {
   ScreenManager,
   flameWipe,
@@ -241,6 +247,80 @@ describe('shoulder width capture', () => {
       velocityScaleFor(stats.wristSpan),
       10,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Punch-reach measurement (phase-engine profile seeds)
+// ---------------------------------------------------------------------------
+
+describe('poseReachSw', () => {
+  /** Squarely facing pose: shoulders `width` apart, wrists placed freely. */
+  function pose(width: number, lw: Vec3, rw: Vec3): PoseFrame {
+    const arm = (x: number, wrist: Vec3): PoseFrame['left'] => ({
+      shoulder: { x, y: 0.35, z: 0 },
+      elbow: { x, y: 0.48, z: 0 },
+      wrist,
+      hip: { x, y: 0.72, z: 0 },
+    });
+    return {
+      t: 0,
+      left: arm(0.5 - width / 2, lw),
+      right: arm(0.5 + width / 2, rw),
+      world: null,
+      confidence: 1,
+    };
+  }
+
+  it('measures dist(shoulder, wrist) in shoulder-width units per arm', () => {
+    // Right wrist one full shoulder width straight below its shoulder;
+    // left wrist half a width. width 0.32 (the reference body).
+    const p = pose(
+      0.32,
+      { x: 0.34, y: 0.35 + 0.16, z: 0 },
+      { x: 0.66, y: 0.35 + 0.32, z: 0 },
+    );
+    const reach = poseReachSw(p);
+    expect(reach).not.toBeNull();
+    expect(reach?.left).toBeCloseTo(0.5, 6);
+    expect(reach?.right).toBeCloseTo(1.0, 6);
+  });
+
+  it('is scale invariant: the same posture at any distance measures alike', () => {
+    const near = poseReachSw(
+      pose(0.4, { x: 0.3, y: 0.65, z: 0 }, { x: 0.7, y: 0.65, z: 0 }),
+    );
+    const far = poseReachSw(
+      pose(0.2, { x: 0.4, y: 0.5, z: 0 }, { x: 0.6, y: 0.5, z: 0 }),
+    );
+    expect(near?.left).toBeCloseTo(far?.left ?? -1, 6);
+    expect(near?.right).toBeCloseTo(far?.right ?? -1, 6);
+  });
+
+  it('rejects a degenerate (collapsed) shoulder line', () => {
+    const collapsed = pose(0.001, { x: 0.3, y: 0.6, z: 0 }, { x: 0.7, y: 0.6, z: 0 });
+    expect(poseReachSw(collapsed)).toBeNull();
+  });
+});
+
+describe('reachSeedSw', () => {
+  it('passes forward-punch peaks through unchanged', () => {
+    expect(reachSeedSw(0.85)).toBeCloseTo(0.85, 10);
+    expect(reachSeedSw(0.6)).toBeCloseTo(0.6, 10);
+  });
+
+  it('clamps into the plausible forward band shared with the engine learner', () => {
+    // A hanging arm (1.6..2.2 sw) clamps to the band top, never poisons.
+    expect(reachSeedSw(2.2)).toBe(MAX_REACH_LEARN_MAX_SW);
+    // An arm that barely registered clamps to the band floor.
+    expect(reachSeedSw(0.2)).toBe(MAX_REACH_LEARN_MIN_SW);
+  });
+
+  it('returns null (omit the field) for arms that never registered', () => {
+    expect(reachSeedSw(0)).toBeNull();
+    expect(reachSeedSw(-1)).toBeNull();
+    expect(reachSeedSw(Number.NaN)).toBeNull();
+    expect(reachSeedSw(Number.POSITIVE_INFINITY)).toBeNull();
   });
 });
 

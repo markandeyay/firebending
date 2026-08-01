@@ -1,29 +1,35 @@
 /**
  * Debug HUD (D key in the arena): a translucent charcoal overlay panel in the
- * top-right corner showing the move engine's live internals per hand (pose
- * scores + active flags, windowed speed, bbox growth, thrust/whip arming,
- * the per-hand punch-fusion signals vs thresholds with pose freshness),
- * the global state machine (active sustain, lockout, cooldowns, Breath), the
- * derived MotionThresholds and the loaded MotionProfile, the raw head pose,
- * the camera rig's parallax state, and the engine's near-miss trace ring
- * ("JAB: speed 0.42 vs threshold 0.61 FAIL").
+ * top-right corner showing the PHASE ENGINE's live internals (the position
+ * state machines of the 2026-07-31 rebuild). Per arm: the machine state
+ * (RETRACTED / EXTENDING / EXTENDED, with PAUSED flagged while confidence
+ * froze it), the normalized extension with a tiny textual bar, the body zone
+ * the wrist sits in, and the last transition with its timing
+ * ("EXTENDING>EXTENDED 180ms"). Then the AIM READOUT: the last emitted aim
+ * vector as yaw/pitch degrees plus its raw screen-space components and the
+ * last move name, the engine state line (active sustain, Breath), the live
+ * learned per-arm reach against the profile's calibrated seeds, the raw head
+ * pose, the camera rig's parallax state, and the measured pipeline RATES
+ * block.
  *
- * Budget: pointer-events none, a single text node updated via textContent at
- * most REFRESH_HZ times a second and only when the text changed, so the DOM
- * cost stays far under a millisecond. Data is pulled, never pushed: the
- * arena's tick calls update() every frame and the HUD throttles itself.
+ * The legacy velocity displays (pose-score/speed/growth fusion vs
+ * thresholds, the derived MotionThresholds, the near-miss trace ring) died
+ * with the velocity engine: the phase engine has no velocities and no
+ * near-miss ring, so those sections are removed outright rather than dashed
+ * out ("I need to see the state machine, not velocity numbers").
+ *
+ * Budget: pointer-events none, text updated via textContent at most
+ * REFRESH_HZ times a second and only when the text changed, so the DOM cost
+ * stays far under a millisecond. Data is pulled, never pushed: the arena's
+ * tick calls update() every frame and the HUD throttles itself. The engine's
+ * debugState children are REUSED in place by the engine; compose() reads
+ * fields immediately and never retains them.
  */
 
-import type { LandmarkFrame } from '../tracking/types';
+import type { LandmarkFrame, Vec3 } from '../tracking/types';
 import type { Percentiles } from '../tracking/meters';
-import type {
-  MoveEngine,
-  MoveName,
-  NearMissRecord,
-  PoseScores,
-} from '../gestures/moves';
+import type { ArmDebugState, PhaseMoveEngine } from '../gestures/phaseEngine';
 import type { MotionProfile } from '../gestures/profile';
-import type { Handedness } from '../gestures/poses';
 
 /** Maximum text refresh rate. */
 export const REFRESH_HZ = 10;
@@ -68,16 +74,65 @@ export function formatPercentiles(p: Percentiles): string {
   return `${p.p50.toFixed(1)}/${p.p95.toFixed(1)}`;
 }
 
-/** Short move labels for near-miss lines. */
-const SHORT_NAME: Partial<Record<MoveName, string>> = {
-  'jab-blast': 'JAB',
-  'rising-flame': 'RISING',
-  'fire-whip': 'WHIP',
-  'twin-cannon': 'TWIN',
-};
+// ---------------------------------------------------------------------------
+// Phase-machine block formatting (pure, exported for tests)
+// ---------------------------------------------------------------------------
+
+/** Cells in the tiny textual extension bar. */
+export const EXT_BAR_CELLS = 8;
+
+/**
+ * Extension that fills the bar completely. Punches normalize to ~0.7..1.1
+ * and the jab overdrive gate sits at 1.35, so a saturated bar reads as
+ * "past any plausible forward punch" (a hanging arm pegs it instantly).
+ */
+export const EXT_BAR_FULL = 1.2;
+
+/** Tiny textual extension bar, e.g. "[#####---]". Junk input renders empty
+ *  rather than corrupting the panel's column widths. Pure. */
+export function extensionBar(ext: number): string {
+  const frac = Number.isFinite(ext) ? Math.min(Math.max(ext / EXT_BAR_FULL, 0), 1) : 0;
+  const fill = Math.round(frac * EXT_BAR_CELLS);
+  return `[${'#'.repeat(fill)}${'-'.repeat(EXT_BAR_CELLS - fill)}]`;
+}
+
+/** Always-signed fixed-point ("+12.4" / "-3.1") for the degree readout. */
+export function signedFixed(value: number, digits: number): string {
+  const s = value.toFixed(digits);
+  return s.startsWith('-') ? s : `+${s}`;
+}
+
+/**
+ * Aim vector (screen space: x right, y DOWN, z negative toward the enemy)
+ * as yaw/pitch degrees: yaw positive to the player's right, pitch positive
+ * up, (0, 0) dead ahead. Pure.
+ */
+export function aimAnglesDeg(aim: Vec3): { yawDeg: number; pitchDeg: number } {
+  const yaw = Math.atan2(aim.x, -aim.z);
+  const pitch = Math.atan2(-aim.y, Math.hypot(aim.x, aim.z));
+  return { yawDeg: (yaw * 180) / Math.PI, pitchDeg: (pitch * 180) / Math.PI };
+}
+
+/**
+ * The two lines of one arm's state-machine readout, exactly:
+ *   "L EXTENDED  ext 0.94 [######--] zone CHEST"
+ *   "  EXTENDING>EXTENDED 180ms"
+ * with " PAUSED" appended to the first line while confidence froze the
+ * machine, and "-" on the second before any transition happened. The state
+ * token is padded so the ext column never shifts between states. Pure.
+ */
+export function formatArmDebug(label: string, arm: ArmDebugState): [string, string] {
+  const paused = arm.paused ? ' PAUSED' : '';
+  const line1 =
+    `${label} ${arm.state.padEnd(9, ' ')} ext ${arm.extension.toFixed(2)} ` +
+    `${extensionBar(arm.extension)} zone ${arm.zone}${paused}`;
+  const tr = arm.lastTransition;
+  const line2 = tr === null ? '  -' : `  ${tr.from}>${tr.to} ${tr.tookMs.toFixed(0)}ms`;
+  return [line1, line2];
+}
 
 export interface DebugHudInputs {
-  engine: MoveEngine;
+  engine: PhaseMoveEngine;
   frame: LandmarkFrame | null;
   profile: MotionProfile | null;
   parallax: { yaw: number; pitch: number; offset: { x: number; y: number; z: number } };
@@ -86,38 +141,13 @@ export interface DebugHudInputs {
   rates?: RatesBlock | null;
 }
 
-/**
- * One near-miss line, formatted exactly as specified. Fusion conditions name
- * the specific failing signal: "JAB: elbowVel 2.10 vs threshold 3.60 FAIL"
- * or, for a primary that passed with no secondary,
- * "JAB: no secondary: speed 0.51/0.90, growth 0.40/1.35".
- */
-export function formatNearMiss(rec: NearMissRecord): string {
-  const name = SHORT_NAME[rec.move] ?? rec.move.toUpperCase();
-  if (rec.condition === 'secondary') {
-    const g = rec.value2 ?? 0;
-    const gt = rec.threshold2 ?? 0;
-    return (
-      `${name}: no secondary: speed ${rec.value.toFixed(2)}/${rec.threshold.toFixed(2)}, ` +
-      `growth ${g.toFixed(2)}/${gt.toFixed(2)}`
-    );
-  }
-  return (
-    `${name}: ${rec.condition} ${rec.value.toFixed(2)}` +
-    ` vs threshold ${rec.threshold.toFixed(2)} FAIL`
-  );
-}
-
 export class DebugHud {
   private readonly el: HTMLElement;
   private readonly textEl: HTMLElement;
   private readonly ratesEl: HTMLElement;
-  private missEl!: HTMLElement;
   private lastUpdateMs = -Infinity;
   private lastText = '';
   private lastRatesText = '';
-  private lastMissText = '';
-  private readonly missScratch: NearMissRecord[] = [];
   private visibleState = false;
 
   constructor(root: HTMLElement) {
@@ -125,8 +155,9 @@ export class DebugHud {
     el.style.position = 'absolute';
     el.style.top = '12px';
     el.style.right = '12px';
-    // Wide enough for the longest fusion line (elbow+speed+bbox each with a
-    // PASS/FAIL token) at 11px Consolas; 360px clipped the verdicts.
+    // Wide enough for the longest state line (padded state + ext + bar +
+    // ABOVE_SHOULDER + PAUSED) at 11px Consolas; kept at the 420px the
+    // fusion lines already established so the panel footprint is unchanged.
     el.style.maxWidth = '420px';
     el.style.padding = '10px 14px';
     el.style.background = 'rgba(26, 21, 18, 0.85)';
@@ -138,19 +169,18 @@ export class DebugHud {
     el.style.pointerEvents = 'none';
     el.style.zIndex = '50';
     el.style.display = 'none';
-    // Three children: the engine text block, then the fixed-size RATES block
-    // (its own element so the degraded-handHz reading can carry a color
-    // span), then the variable-length near-miss log LAST so its 10 Hz
-    // appear/expire churn never shifts the blocks above it.
+    // Two children: the fixed-line-count engine text block, then the RATES
+    // block LAST (its own element so the degraded-handHz reading can carry a
+    // color span, and so any variable content can never shift the state
+    // block above it). The near-miss log is gone: the phase engine has no
+    // near-miss ring.
     const textEl = document.createElement('div');
     const ratesEl = document.createElement('div');
-    const missEl = document.createElement('div');
-    el.append(textEl, ratesEl, missEl);
+    el.append(textEl, ratesEl);
     root.appendChild(el);
     this.el = el;
     this.textEl = textEl;
     this.ratesEl = ratesEl;
-    this.missEl = missEl;
   }
 
   get visible(): boolean {
@@ -184,11 +214,6 @@ export class DebugHud {
       this.textEl.textContent = text;
     }
     this.updateRates(inputs.rates ?? null);
-    const missText = this.composeMisses(inputs.engine);
-    if (missText !== this.lastMissText) {
-      this.lastMissText = missText;
-      this.missEl.textContent = missText;
-    }
   }
 
   /** Render the RATES block: each metric as "name p50/p95"; handHz gets the
@@ -234,84 +259,42 @@ export class DebugHud {
 
   private compose(inputs: DebugHudInputs): string {
     const { engine, frame, profile, parallax, parallaxYawSign } = inputs;
-    const t = engine.lastFrameT ?? 0;
-    const scores = engine.currentPoseScores;
     const lines: string[] = [];
 
-    const hand = (label: string, which: Handedness, s: PoseScores | null): void => {
-      const m = engine.handMotionDebug(which);
-      if (!m.present || s === null) {
-        lines.push(`${label}  absent`);
-        return;
-      }
-      const flag = (on: boolean): string => (on ? '*' : ' ');
-      lines.push(
-        `${label}  fist ${s.fist.toFixed(2)}${flag(s.fistActive)} ` +
-          `grip ${s.grip.toFixed(2)}${flag(s.gripActive)}`,
-      );
-      lines.push(
-        `    speed ${m.speed.toFixed(2)} growth ${m.growth.toFixed(2)} ` +
-          `thrust:${m.thrustArmed ? 'armed' : '-'} whip:${m.whipArmed ? 'armed' : '-'}`,
-      );
-    };
+    // Per-arm phase machines. The debugState children are reused in place
+    // by the engine: fields are read into strings here and never retained.
+    const d = engine.debugState;
+    lines.push(...formatArmDebug('L', d.left));
+    lines.push(...formatArmDebug('R', d.right));
 
-    hand('L', 'left', scores.left);
-    hand('R', 'right', scores.right);
-
-    // Punch-fusion block: each signal vs its threshold with PASS/FAIL, plus
-    // whether pose is fresh (fresh = primary+one-secondary rule; stale =
-    // both-secondaries fallback).
-    const fusion = engine.fusionState;
-    lines.push(`fusion  pose ${fusion.left.elbowFresh ? 'FRESH' : 'stale/absent'}`);
-    const fusionLine = (label: string, f: typeof fusion.left): void => {
-      const pf = (v: number, th: number): string =>
-        `${v.toFixed(2)}/${th.toFixed(2)} ${v >= th ? 'PASS' : 'FAIL'}`;
+    // AIM READOUT: the last emitted aim as yaw/pitch degrees plus its raw
+    // screen-space components, then the move that carried it. Fixed line
+    // count in both states so the blocks below never shift.
+    const aim = d.lastAim;
+    if (aim !== null) {
+      const ang = aimAnglesDeg(aim);
       lines.push(
-        `  ${label} elbow ${pf(f.elbowVel, f.elbowThreshold)} ` +
-          `speed ${pf(f.wristSpeed, f.speedThreshold)} ` +
-          `bbox ${pf(f.bboxGrowth, f.growthThreshold)}`,
+        `aim  yaw ${signedFixed(ang.yawDeg, 1)}deg pitch ${signedFixed(ang.pitchDeg, 1)}deg`,
       );
-    };
-    fusionLine('L', fusion.left);
-    fusionLine('R', fusion.right);
-
-    // State machine.
-    const lockoutMs = Math.max(0, engine.lockoutUntilT - t);
-    lines.push(
-      `state  sustain:${engine.activeSustain ?? '-'} ` +
-        `lockout:${lockoutMs > 0 ? `${lockoutMs.toFixed(0)}ms` : '-'} ` +
-        `breath:${engine.breath.toFixed(0)}`,
-    );
-    const cds: string[] = [];
-    for (const [move, until] of engine.cooldownView) {
-      const left = until - t;
-      if (left > 0) cds.push(`${move} ${(left / 1000).toFixed(1)}s`);
+      lines.push(`  raw ${aim.x.toFixed(3)} ${aim.y.toFixed(3)} ${aim.z.toFixed(3)}`);
+    } else {
+      lines.push('aim  - (no move emitted yet)');
+      lines.push('  raw -');
     }
-    lines.push(`cooldowns  ${cds.length > 0 ? cds.join('  ') : '-'}`);
+    lines.push(`last move  ${d.lastMove ?? '-'}`);
 
-    // Thresholds and profile.
-    const th = engine.thresholds;
+    // Engine state, live learned reach, and the profile's calibrated seeds
+    // (shoulder-width units; "-" for a profile predating the reach fields).
     lines.push(
-      `thresholds  spike ${th.spikeSpeed.toFixed(2)}/${th.spikeGrowth.toFixed(2)} ` +
-        `retract ${th.retractShrink.toFixed(2)} elbow ${th.elbowExtendVel.toFixed(2)}`,
+      `state  sustain:${engine.activeSustain ?? '-'} breath:${engine.breath.toFixed(0)}`,
     );
-    lines.push(
-      `  rise ${th.risingUpVel.toFixed(2)} whipVx ${th.whipSwingVx.toFixed(2)} ` +
-        `static ${th.whipStaticMax.toFixed(2)}/${th.breathStaticMax.toFixed(2)} ` +
-        `aim ${th.aimMinSpeed.toFixed(2)}`,
-    );
+    const reach = engine.learnedReach;
+    lines.push(`reach  L ${reach.left.toFixed(2)}sw R ${reach.right.toFixed(2)}sw`);
     if (profile) {
+      const seed = (v: number | undefined): string =>
+        v !== undefined ? `${v.toFixed(2)}sw` : '-';
       lines.push(
-        `profile  punch ${profile.peakPunchSpeed.toFixed(2)}u/s ` +
-          `${profile.peakPunchBboxGrowth.toFixed(2)}/s ` +
-          `palm ${profile.peakPalmSpeed.toFixed(2)}u/s ` +
-          `${profile.peakPalmBboxGrowth.toFixed(2)}/s`,
-      );
-      lines.push(
-        `  elbow ${profile.peakElbowVel.toFixed(2)}rad/s ` +
-          `neutral ${profile.neutralSpeed.toFixed(3)}u/s ` +
-          `${profile.neutralBboxGrowth.toFixed(3)}/s ` +
-          `${profile.neutralElbowVel.toFixed(3)}rad/s`,
+        `profile  seeds L ${seed(profile.maxReachLeftSw)} R ${seed(profile.maxReachRightSw)}`,
       );
     } else {
       lines.push('profile  default');
@@ -333,18 +316,5 @@ export class DebugHud {
     );
 
     return lines.join('\n');
-  }
-
-  /** The variable-length near-miss trace, rendered last so its churn never
-   * shifts the fixed blocks above it. */
-  private composeMisses(engine: MoveEngine): string {
-    const lines: string[] = ['near misses'];
-    const misses = engine.nearMisses(this.missScratch);
-    if (misses.length === 0) {
-      lines.push('  -');
-    } else {
-      for (const rec of misses) lines.push(`  ${formatNearMiss(rec)}`);
-    }
-    return NL + lines.join('\n');
   }
 }

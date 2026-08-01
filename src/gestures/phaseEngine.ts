@@ -404,6 +404,23 @@ export class PhaseMoveEngine {
   }
 
   /**
+   * Debug preview: the aim vector this arm WOULD emit if a move fired on
+   * this frame, computed by the exact positional armAim math the emit path
+   * uses, so the arena's debug ray shows precisely where fire will go
+   * before the punch commits. Writes into `out` and returns it (the out
+   * object is caller-owned, safe to retain). Falls back to straight ahead
+   * (AIM_FORWARD) before the body frame is ready or while the arm's wrist
+   * is untracked, exactly like the emit path. HUD-open call rates only.
+   */
+  previewAim(hand: Handedness, out: Vec3): Vec3 {
+    const aim = this.armAim(hand);
+    out.x = aim.x;
+    out.y = aim.y;
+    out.z = aim.z;
+    return out;
+  }
+
+  /**
    * Typed debug surface for the HUD. Allocation-conscious: the returned
    * object and its children are REUSED in place, so callers read fields,
    * never retain the object. HUD-rate calls only.

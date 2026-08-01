@@ -10,8 +10,13 @@
  * dropouts cannot skew the baselines.
  */
 
-import type { HandFrame, LandmarkFrame, Vec3 } from '../tracking/types';
+import type { HandFrame, LandmarkFrame, PoseFrame, Vec3 } from '../tracking/types';
 import { LM } from '../tracking/types';
+import { MIN_SHOULDER_WIDTH } from './bodyFrame';
+import {
+  MAX_REACH_LEARN_MAX_SW,
+  MAX_REACH_LEARN_MIN_SW,
+} from './extension';
 
 export interface CalibrationStats {
   /** Median wrist position of the player's left hand, normalized coords. */
@@ -118,6 +123,51 @@ export function velocityScaleFor(
   if (!Number.isFinite(span) || span <= 0) return 1;
   const raw = REFERENCE_WRIST_SPAN / span;
   return Math.min(VELOCITY_SCALE_MAX, Math.max(VELOCITY_SCALE_MIN, raw));
+}
+
+// ---------------------------------------------------------------------------
+// Punch-reach measurement (phase-engine seeds, 2026-07-31 rebuild)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-arm screen reach from one pose sample, SHOULDER-WIDTH units: the same
+ * dist(shoulder, wrist) / shoulderWidth measurement the phase engine's
+ * extension normalizer runs on (src/gestures/extension.ts), so a peak taken
+ * during a calibration punch seeds maxReach in exactly the engine's units.
+ * Returns null for a degenerate (collapsed or sideways) shoulder line, the
+ * same guard the body frame applies before trusting a sample. Pure.
+ */
+export function poseReachSw(
+  pose: PoseFrame,
+): { left: number; right: number } | null {
+  const ls = pose.left.shoulder;
+  const rs = pose.right.shoulder;
+  const width = Math.hypot(rs.x - ls.x, rs.y - ls.y);
+  if (!Number.isFinite(width) || width < MIN_SHOULDER_WIDTH) return null;
+  const lw = pose.left.wrist;
+  const rw = pose.right.wrist;
+  return {
+    left: Math.hypot(lw.x - ls.x, lw.y - ls.y) / width,
+    right: Math.hypot(rw.x - rs.x, rw.y - rs.y) / width,
+  };
+}
+
+/**
+ * Turn a measured per-arm punch-reach peak into a profile seed
+ * (MotionProfile.maxReachLeftSw / maxReachRightSw): clamped into the
+ * plausible FORWARD-punch band 0.5..1.2 sw shared with the engine's online
+ * learner (a forward punch at the camera foreshortens to 0.59..0.93 on the
+ * drills; a hanging arm reads 1.6..2.2 and clamps to the band's top rather
+ * than poisoning normalization). Null for an arm that never registered a
+ * usable reach (no pose during the punches), which OMITS the optional field
+ * so the engine's prior applies. Pure.
+ */
+export function reachSeedSw(peakSw: number): number | null {
+  if (!Number.isFinite(peakSw) || peakSw <= 0) return null;
+  return Math.min(
+    MAX_REACH_LEARN_MAX_SW,
+    Math.max(MAX_REACH_LEARN_MIN_SW, peakSw),
+  );
 }
 
 /**

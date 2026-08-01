@@ -23,7 +23,18 @@
  *   1. "Throw three punches."     peak punch speed + bbox growth + peak
  *                                 elbow-extension angular velocity (median
  *                                 of 3), plus the neutral elbow velocity
- *                                 from the still lead-in
+ *                                 from the still lead-in. The punch step
+ *                                 ALSO measures the per-arm forward-punch
+ *                                 REACH peak (dist(pose shoulder, pose
+ *                                 wrist) / shoulder width, sampled inside
+ *                                 each punch's +-250 ms pairing window so a
+ *                                 hanging arm between punches cannot
+ *                                 register) and persists it into the
+ *                                 profile's optional maxReachLeftSw /
+ *                                 maxReachRightSw seeds for the phase
+ *                                 engine's extension normalizer, clamped to
+ *                                 the plausible forward band (see
+ *                                 reachSeedSw in gestures/calibrationStats)
  *   2. "Push your palms forward." peak palm speed + bbox growth
  * A live ink-brush meter shows the three fusion signals (windowed wrist
  * speed, bbox growth, elbow angular velocity) with peak markers and a
@@ -48,6 +59,8 @@ import { LM } from '../tracking/types';
 import { ConfidenceGate } from '../tracking/filters';
 import {
   captureCalibration,
+  poseReachSw,
+  reachSeedSw,
   type CalibrationStats,
 } from '../gestures/calibrationStats';
 import { handSpeed } from '../gestures/poses';
@@ -206,8 +219,17 @@ export class CalibrationScreen implements Screen {
   private neutralGrowth = 0;
   private neutralElbowVel = 0;
   private baselineDone = false;
-  /** Recent (t, speed, growth, elbow) samples for the +-250 ms peak pairing. */
-  private recent: Array<{ t: number; speed: number; growth: number; elbow: number }> = [];
+  /** Recent (t, speed, growth, elbow, per-arm reach) samples for the
+   *  +-250 ms peak pairing. reachL/reachR are shoulder-width units, 0 while
+   *  no pose is available (a zero can never become a reach seed). */
+  private recent: Array<{
+    t: number;
+    speed: number;
+    growth: number;
+    elbow: number;
+    reachL: number;
+    reachR: number;
+  }> = [];
   private tracking = false; // inside a candidate event (above threshold)
   private localPeak = 0;
   private localPeakT = 0;
@@ -215,9 +237,16 @@ export class CalibrationScreen implements Screen {
   private keyPeaks: number[] = [];
   private pairPeaks: number[] = [];
   private elbowPeaks: number[] = [];
+  /** Per finalized event: each arm's reach max inside the pairing window. */
+  private reachPeaksL: number[] = [];
+  private reachPeaksR: number[] = [];
   private punchSpeeds: number[] = [];
   private punchGrowths: number[] = [];
   private punchElbows: number[] = [];
+  /** Per-arm reach maxima of the finalized PUNCH events (carried past the
+   *  push step's state reset, like punchSpeeds and friends). */
+  private punchReachL: number[] = [];
+  private punchReachR: number[] = [];
   private stepPeakSpeed = 0;
   private stepPeakGrowth = 0;
   private stepPeakElbow = 0;
@@ -275,6 +304,8 @@ export class CalibrationScreen implements Screen {
     this.punchSpeeds = [];
     this.punchGrowths = [];
     this.punchElbows = [];
+    this.punchReachL = [];
+    this.punchReachR = [];
     this.sawPose = false;
     this.recalibrateRequested = false;
     this.framingGate = null;
@@ -541,6 +572,8 @@ export class CalibrationScreen implements Screen {
     this.keyPeaks = [];
     this.pairPeaks = [];
     this.elbowPeaks = [];
+    this.reachPeaksL = [];
+    this.reachPeaksR = [];
     this.stepPeakSpeed = 0;
     this.stepPeakGrowth = 0;
     this.stepPeakElbow = 0;
@@ -633,7 +666,19 @@ export class CalibrationScreen implements Screen {
     // Extension is positive; the stronger arm drives the punch signal.
     const elbow = Math.max(this.elbowVelL, this.elbowVelR, 0);
 
-    this.recent.push({ t, speed, growth, elbow });
+    // Per-arm screen reach (shoulder-width units) from the CURRENT pose,
+    // positional so held/interpolated pose frames are fine. Zero without a
+    // pose (or a degenerate shoulder line): zeros never seed a reach.
+    const poseReach = frame.pose ? poseReachSw(frame.pose) : null;
+
+    this.recent.push({
+      t,
+      speed,
+      growth,
+      elbow,
+      reachL: poseReach?.left ?? 0,
+      reachR: poseReach?.right ?? 0,
+    });
     while (this.recent.length > 0) {
       const oldest = this.recent[0];
       if (oldest && t - oldest.t > 2 * PEAK_PAIR_WINDOW_MS + 200) {
@@ -696,21 +741,29 @@ export class CalibrationScreen implements Screen {
 
     // Finalize pending events once their +-250 ms pairing window closed:
     // pair the keyed peak with the other signals' max inside that window
-    // (punches also capture the elbow-extension peak per punch).
+    // (punches also capture the elbow-extension peak and each arm's REACH
+    // peak per punch; the window keeps a hanging arm between punches from
+    // ever contributing a reach sample).
     for (let i = this.pending.length - 1; i >= 0; i--) {
       const p = this.pending[i];
       if (!p || t - p.tPeak < PEAK_PAIR_WINDOW_MS) continue;
       let pairMax = 0;
       let elbowMax = 0;
+      let reachLMax = 0;
+      let reachRMax = 0;
       for (const sample of this.recent) {
         if (Math.abs(sample.t - p.tPeak) <= PEAK_PAIR_WINDOW_MS) {
           pairMax = Math.max(pairMax, isPunches ? sample.growth : sample.speed);
           elbowMax = Math.max(elbowMax, sample.elbow);
+          reachLMax = Math.max(reachLMax, sample.reachL);
+          reachRMax = Math.max(reachRMax, sample.reachR);
         }
       }
       this.keyPeaks.push(p.keyPeak);
       this.pairPeaks.push(pairMax);
       this.elbowPeaks.push(elbowMax);
+      this.reachPeaksL.push(reachLMax);
+      this.reachPeaksR.push(reachRMax);
       this.pending.splice(i, 1);
     }
 
@@ -722,6 +775,8 @@ export class CalibrationScreen implements Screen {
         this.punchSpeeds = this.keyPeaks;
         this.punchGrowths = this.pairPeaks;
         this.punchElbows = this.elbowPeaks;
+        this.punchReachL = this.reachPeaksL;
+        this.punchReachR = this.reachPeaksR;
         this.startPushStep(t);
       } else {
         this.finishSteps();
@@ -745,6 +800,17 @@ export class CalibrationScreen implements Screen {
     // usable and the engine's no-pose fallback rule carries the play.
     const elbowPeak = median(this.punchElbows);
     const haveElbow = this.sawPose && elbowPeak > 0;
+    // Phase-engine reach seeds (ADDITIVE, optional): the largest per-punch
+    // reach each arm showed across the three punches, clamped into the
+    // plausible forward band. A poseless capture yields all zeros and
+    // reachSeedSw returns null, so the fields are simply omitted and older
+    // consumers plus the engine's prior stay untouched.
+    const seedL = reachSeedSw(
+      this.punchReachL.length > 0 ? Math.max(...this.punchReachL) : 0,
+    );
+    const seedR = reachSeedSw(
+      this.punchReachR.length > 0 ? Math.max(...this.punchReachR) : 0,
+    );
     const profile: MotionProfile = {
       version: 2,
       peakPunchSpeed: median(this.punchSpeeds),
@@ -758,6 +824,8 @@ export class CalibrationScreen implements Screen {
       neutralSpeed: this.neutralSpeed,
       neutralBboxGrowth: this.neutralGrowth,
       capturedAt: new Date().toISOString(),
+      ...(seedL !== null ? { maxReachLeftSw: seedL } : {}),
+      ...(seedR !== null ? { maxReachRightSw: seedR } : {}),
     };
     saveProfile(profile);
     this.complete(profile);

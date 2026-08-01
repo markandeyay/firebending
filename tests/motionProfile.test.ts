@@ -300,6 +300,61 @@ describe('profile persistence', () => {
     expect(loadProfile()).toBeNull();
   });
 
+  it('round-trips the optional phase-engine reach seeds', () => {
+    stubStorage();
+    const profile: MotionProfile = {
+      ...DEFAULT_PROFILE,
+      capturedAt: '2026-07-31T00:00:00.000Z',
+      maxReachLeftSw: 0.82,
+      maxReachRightSw: 0.88,
+    };
+    saveProfile(profile);
+    const loaded = loadProfile();
+    expect(loaded).toEqual(profile);
+    expect(loaded?.maxReachLeftSw).toBeCloseTo(0.82, 10);
+    expect(loaded?.maxReachRightSw).toBeCloseTo(0.88, 10);
+  });
+
+  it('accepts a profile with only one reach seed (single-arm capture)', () => {
+    stubStorage();
+    const profile: MotionProfile = {
+      ...DEFAULT_PROFILE,
+      capturedAt: '2026-07-31T00:00:00.000Z',
+      maxReachRightSw: 0.9,
+    };
+    saveProfile(profile);
+    const loaded = loadProfile();
+    expect(loaded?.maxReachLeftSw).toBeUndefined();
+    expect(loaded?.maxReachRightSw).toBeCloseTo(0.9, 10);
+  });
+
+  it('stays backward compatible: profiles without reach seeds still load', () => {
+    stubStorage();
+    saveProfile({ ...DEFAULT_PROFILE, capturedAt: '2026-07-30T00:00:00.000Z' });
+    const loaded = loadProfile();
+    expect(loaded).not.toBeNull();
+    expect(loaded?.maxReachLeftSw).toBeUndefined();
+    expect(loaded?.maxReachRightSw).toBeUndefined();
+  });
+
+  it('rejects PRESENT but corrupt reach seeds (zero, negative, non-numeric)', () => {
+    const map = stubStorage();
+    const good = JSON.parse(JSON.stringify(DEFAULT_PROFILE)) as Record<string, unknown>;
+
+    map.set(PROFILE_STORAGE_KEY, JSON.stringify({ ...good, maxReachLeftSw: 0 }));
+    expect(loadProfile()).toBeNull();
+
+    map.set(PROFILE_STORAGE_KEY, JSON.stringify({ ...good, maxReachRightSw: -0.8 }));
+    expect(loadProfile()).toBeNull();
+
+    map.set(PROFILE_STORAGE_KEY, JSON.stringify({ ...good, maxReachLeftSw: 'long' }));
+    expect(loadProfile()).toBeNull();
+
+    // JSON cannot carry NaN/Infinity; they arrive as null and must reject.
+    map.set(PROFILE_STORAGE_KEY, JSON.stringify({ ...good, maxReachRightSw: null }));
+    expect(loadProfile()).toBeNull();
+  });
+
   it('rejects a stored v1 profile (forces one recalibration)', () => {
     const map = stubStorage();
     const v1 = {
